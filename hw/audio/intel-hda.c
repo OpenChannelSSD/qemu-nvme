@@ -269,7 +269,7 @@ static void intel_hda_update_irq(IntelHDAState *d)
             msi_notify(&d->pci, 0);
         }
     } else {
-        qemu_set_irq(d->pci.irq[0], level);
+        pci_set_irq(&d->pci, level);
     }
 }
 
@@ -444,6 +444,7 @@ static bool intel_hda_xfer(HDACodecDevice *dev, uint32_t stnr, bool output,
         }
     }
     if (d->dp_lbase & 0x01) {
+        s = st - d->st;
         addr = intel_hda_addr(d->dp_lbase & ~0x01, d->dp_ubase);
         stl_le_pci_dma(&d->pci, addr + 8*s, st->lpib);
     }

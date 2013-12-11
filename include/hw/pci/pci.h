@@ -247,9 +247,6 @@ struct PCIDevice {
     PCIConfigReadFunc *config_read;
     PCIConfigWriteFunc *config_write;
 
-    /* IRQ objects for the INTA-INTD pins.  */
-    qemu_irq *irq;
-
     /* Legacy PCI VGA regions */
     MemoryRegion *vga_regions[QEMU_PCI_VGA_NUM_REGIONS];
     bool has_vga;
@@ -424,25 +421,25 @@ pci_get_byte(const uint8_t *config)
 static inline void
 pci_set_word(uint8_t *config, uint16_t val)
 {
-    cpu_to_le16wu((uint16_t *)config, val);
+    stw_le_p(config, val);
 }
 
 static inline uint16_t
 pci_get_word(const uint8_t *config)
 {
-    return le16_to_cpupu((const uint16_t *)config);
+    return lduw_le_p(config);
 }
 
 static inline void
 pci_set_long(uint8_t *config, uint32_t val)
 {
-    cpu_to_le32wu((uint32_t *)config, val);
+    stl_le_p(config, val);
 }
 
 static inline uint32_t
 pci_get_long(const uint8_t *config)
 {
-    return le32_to_cpupu((const uint32_t *)config);
+    return ldl_le_p(config);
 }
 
 static inline void
@@ -631,6 +628,29 @@ PCIDevice *pci_create_simple_multifunction(PCIBus *bus, int devfn,
                                            const char *name);
 PCIDevice *pci_create(PCIBus *bus, int devfn, const char *name);
 PCIDevice *pci_create_simple(PCIBus *bus, int devfn, const char *name);
+
+qemu_irq pci_allocate_irq(PCIDevice *pci_dev);
+void pci_set_irq(PCIDevice *pci_dev, int level);
+
+static inline void pci_irq_assert(PCIDevice *pci_dev)
+{
+    pci_set_irq(pci_dev, 1);
+}
+
+static inline void pci_irq_deassert(PCIDevice *pci_dev)
+{
+    pci_set_irq(pci_dev, 0);
+}
+
+/*
+ * FIXME: PCI does not work this way.
+ * All the callers to this method should be fixed.
+ */
+static inline void pci_irq_pulse(PCIDevice *pci_dev)
+{
+    pci_irq_assert(pci_dev);
+    pci_irq_deassert(pci_dev);
+}
 
 static inline int pci_is_express(const PCIDevice *d)
 {

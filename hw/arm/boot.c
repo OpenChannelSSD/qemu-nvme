@@ -228,23 +228,31 @@ static void set_kernel_args_old(const struct arm_boot_info *info)
 static int load_dtb(hwaddr addr, const struct arm_boot_info *binfo)
 {
     void *fdt = NULL;
-    char *filename;
     int size, rc;
     uint32_t acells, scells;
 
-    filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, binfo->dtb_filename);
-    if (!filename) {
-        fprintf(stderr, "Couldn't open dtb file %s\n", binfo->dtb_filename);
-        goto fail;
-    }
+    if (binfo->dtb_filename) {
+        char *filename;
+        filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, binfo->dtb_filename);
+        if (!filename) {
+            fprintf(stderr, "Couldn't open dtb file %s\n", binfo->dtb_filename);
+            goto fail;
+        }
 
-    fdt = load_device_tree(filename, &size);
-    if (!fdt) {
-        fprintf(stderr, "Couldn't open dtb file %s\n", filename);
+        fdt = load_device_tree(filename, &size);
+        if (!fdt) {
+            fprintf(stderr, "Couldn't open dtb file %s\n", filename);
+            g_free(filename);
+            goto fail;
+        }
         g_free(filename);
-        goto fail;
+    } else if (binfo->get_dtb) {
+        fdt = binfo->get_dtb(binfo, &size);
+        if (!fdt) {
+            fprintf(stderr, "Board was unable to create a dtb blob\n");
+            goto fail;
+        }
     }
-    g_free(filename);
 
     acells = qemu_devtree_getprop_cell(fdt, "/", "#address-cells");
     scells = qemu_devtree_getprop_cell(fdt, "/", "#size-cells");
@@ -354,8 +362,10 @@ void arm_load_kernel(ARMCPU *cpu, struct arm_boot_info *info)
 
     /* Load the kernel.  */
     if (!info->kernel_filename) {
-        fprintf(stderr, "Kernel image must be specified\n");
-        exit(1);
+        /* If no kernel specified, do nothing; we will start from address 0
+         * (typically a boot ROM image) in the same way as hardware.
+         */
+        return;
     }
 
     info->dtb_filename = qemu_opt_get(qemu_get_machine_opts(), "dtb");
@@ -436,7 +446,7 @@ void arm_load_kernel(ARMCPU *cpu, struct arm_boot_info *info)
         /* for device tree boot, we pass the DTB directly in r2. Otherwise
          * we point to the kernel args.
          */
-        if (info->dtb_filename) {
+        if (info->dtb_filename || info->get_dtb) {
             /* Place the DTB after the initrd in memory. Note that some
              * kernels will trash anything in the 4K page the initrd
              * ends in, so make sure the DTB isn't caught up in that.

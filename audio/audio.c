@@ -95,7 +95,7 @@ static struct {
         }
     },
 
-    .period = { .hertz = 250 },
+    .period = { .hertz = 100 },
     .plive = 0,
     .log_to_monitor = 0,
     .try_poll_in = 1,
@@ -1124,7 +1124,8 @@ static int audio_is_timer_needed (void)
 static void audio_reset_timer (AudioState *s)
 {
     if (audio_is_timer_needed ()) {
-        timer_mod (s->ts, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1);
+        timer_mod (s->ts,
+            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + conf.period.ticks);
     }
     else {
         timer_del (s->ts);

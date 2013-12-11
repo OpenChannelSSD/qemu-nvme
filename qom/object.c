@@ -838,8 +838,9 @@ char *object_property_get_str(Object *obj, const char *name,
 void object_property_set_link(Object *obj, Object *value,
                               const char *name, Error **errp)
 {
-    object_property_set_str(obj, object_get_canonical_path(value),
-                            name, errp);
+    gchar *path = object_get_canonical_path(value);
+    object_property_set_str(obj, path, name, errp);
+    g_free(path);
 }
 
 Object *object_property_get_link(Object *obj, const char *name,
@@ -1342,6 +1343,66 @@ void object_property_add_bool(Object *obj, const char *name,
 static char *qdev_get_type(Object *obj, Error **errp)
 {
     return g_strdup(object_get_typename(obj));
+}
+
+static void property_get_uint8_ptr(Object *obj, Visitor *v,
+                                   void *opaque, const char *name,
+                                   Error **errp)
+{
+    uint8_t value = *(uint8_t *)opaque;
+    visit_type_uint8(v, &value, name, errp);
+}
+
+static void property_get_uint16_ptr(Object *obj, Visitor *v,
+                                   void *opaque, const char *name,
+                                   Error **errp)
+{
+    uint16_t value = *(uint16_t *)opaque;
+    visit_type_uint16(v, &value, name, errp);
+}
+
+static void property_get_uint32_ptr(Object *obj, Visitor *v,
+                                   void *opaque, const char *name,
+                                   Error **errp)
+{
+    uint32_t value = *(uint32_t *)opaque;
+    visit_type_uint32(v, &value, name, errp);
+}
+
+static void property_get_uint64_ptr(Object *obj, Visitor *v,
+                                   void *opaque, const char *name,
+                                   Error **errp)
+{
+    uint64_t value = *(uint64_t *)opaque;
+    visit_type_uint64(v, &value, name, errp);
+}
+
+void object_property_add_uint8_ptr(Object *obj, const char *name,
+                                   const uint8_t *v, Error **errp)
+{
+    object_property_add(obj, name, "uint8", property_get_uint8_ptr,
+                        NULL, NULL, (void *)v, errp);
+}
+
+void object_property_add_uint16_ptr(Object *obj, const char *name,
+                                    const uint16_t *v, Error **errp)
+{
+    object_property_add(obj, name, "uint16", property_get_uint16_ptr,
+                        NULL, NULL, (void *)v, errp);
+}
+
+void object_property_add_uint32_ptr(Object *obj, const char *name,
+                                    const uint32_t *v, Error **errp)
+{
+    object_property_add(obj, name, "uint32", property_get_uint32_ptr,
+                        NULL, NULL, (void *)v, errp);
+}
+
+void object_property_add_uint64_ptr(Object *obj, const char *name,
+                                    const uint64_t *v, Error **errp)
+{
+    object_property_add(obj, name, "uint64", property_get_uint64_ptr,
+                        NULL, NULL, (void *)v, errp);
 }
 
 static void object_instance_init(Object *obj)

@@ -225,10 +225,16 @@ static void count_cpreg(gpointer key, gpointer opaque)
 
 static gint cpreg_key_compare(gconstpointer a, gconstpointer b)
 {
-    uint32_t aidx = *(uint32_t *)a;
-    uint32_t bidx = *(uint32_t *)b;
+    uint64_t aidx = cpreg_to_kvm_id(*(uint32_t *)a);
+    uint64_t bidx = cpreg_to_kvm_id(*(uint32_t *)b);
 
-    return aidx - bidx;
+    if (aidx > bidx) {
+        return 1;
+    }
+    if (aidx < bidx) {
+        return -1;
+    }
+    return 0;
 }
 
 static void cpreg_make_keylist(gpointer key, gpointer value, gpointer udata)
@@ -537,6 +543,13 @@ static int pmintenclr_write(CPUARMState *env, const ARMCPRegInfo *ri,
     return 0;
 }
 
+static int vbar_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                      uint64_t value)
+{
+    env->cp15.c12_vbar = value & ~0x1Ful;
+    return 0;
+}
+
 static int ccsidr_read(CPUARMState *env, const ARMCPRegInfo *ri,
                        uint64_t *value)
 {
@@ -622,6 +635,10 @@ static const ARMCPRegInfo v7_cp_reginfo[] = {
       .access = PL1_RW, .type = ARM_CP_NO_MIGRATE,
       .fieldoffset = offsetof(CPUARMState, cp15.c9_pminten),
       .resetvalue = 0, .writefn = pmintenclr_write, },
+    { .name = "VBAR", .cp = 15, .crn = 12, .crm = 0, .opc1 = 0, .opc2 = 0,
+      .access = PL1_RW, .writefn = vbar_write,
+      .fieldoffset = offsetof(CPUARMState, cp15.c12_vbar),
+      .resetvalue = 0 },
     { .name = "SCR", .cp = 15, .crn = 1, .crm = 1, .opc1 = 0, .opc2 = 0,
       .access = PL1_RW, .fieldoffset = offsetof(CPUARMState, cp15.c1_scr),
       .resetvalue = 0, },
@@ -1156,7 +1173,7 @@ static int vmsa_ttbcr_raw_write(CPUARMState *env, const ARMCPRegInfo *ri,
 {
     int maskshift = extract32(value, 0, 3);
 
-    if (arm_feature(env, ARM_FEATURE_LPAE)) {
+    if (arm_feature(env, ARM_FEATURE_LPAE) && (value & (1 << 31))) {
         value &= ~((7 << 19) | (3 << 14) | (0xf << 3));
     } else {
         value &= 7;
@@ -1825,6 +1842,12 @@ void arm_cpu_list(FILE *f, fprintf_function cpu_fprintf)
     (*cpu_fprintf)(f, "Available CPUs:\n");
     g_slist_foreach(list, arm_cpu_list_entry, &s);
     g_slist_free(list);
+#ifdef CONFIG_KVM
+    /* The 'host' CPU type is dynamically registered only if KVM is
+     * enabled, so we have to special-case it here:
+     */
+    (*cpu_fprintf)(f, "  host (only available in KVM mode)\n");
+#endif
 }
 
 static void arm_cpu_add_definition(gpointer data, gpointer user_data)
@@ -2470,7 +2493,17 @@ void arm_cpu_do_interrupt(CPUState *cs)
     }
     /* High vectors.  */
     if (env->cp15.c1_sys & (1 << 13)) {
+        /* when enabled, base address cannot be remapped.  */
         addr += 0xffff0000;
+    } else {
+        /* ARM v7 architectures provide a vector base address register to remap
+         * the interrupt vector table.
+         * This register is only followed in non-monitor mode, and has a secure
+         * and un-secure copy. Since the cpu is always in a un-secure operation
+         * and is never in monitor mode this feature is always active.
+         * Note: only bits 31:5 are valid.
+         */
+        addr += env->cp15.c12_vbar;
     }
     switch_mode (env, new_mode);
     env->spsr = cpsr_read(env);
@@ -4051,4 +4084,29 @@ float64 VFP_HELPER(muladd, d)(float64 a, float64 b, float64 c, void *fpstp)
 {
     float_status *fpst = fpstp;
     return float64_muladd(a, b, c, 0, fpst);
+}
+
+/* ARMv8 VMAXNM/VMINNM */
+float32 VFP_HELPER(maxnm, s)(float32 a, float32 b, void *fpstp)
+{
+    float_status *fpst = fpstp;
+    return float32_maxnum(a, b, fpst);
+}
+
+float64 VFP_HELPER(maxnm, d)(float64 a, float64 b, void *fpstp)
+{
+    float_status *fpst = fpstp;
+    return float64_maxnum(a, b, fpst);
+}
+
+float32 VFP_HELPER(minnm, s)(float32 a, float32 b, void *fpstp)
+{
+    float_status *fpst = fpstp;
+    return float32_minnum(a, b, fpst);
+}
+
+float64 VFP_HELPER(minnm, d)(float64 a, float64 b, void *fpstp)
+{
+    float_status *fpst = fpstp;
+    return float64_minnum(a, b, fpst);
 }

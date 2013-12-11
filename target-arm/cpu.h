@@ -21,6 +21,8 @@
 
 #include "config.h"
 
+#include "kvm-consts.h"
+
 #if defined(TARGET_AARCH64)
   /* AArch64 definitions */
 #  define TARGET_LONG_BITS 64
@@ -176,6 +178,7 @@ typedef struct CPUARMState {
         uint32_t c9_pmxevtyper; /* perf monitor event type */
         uint32_t c9_pmuserenr; /* perf monitor user enable */
         uint32_t c9_pminten; /* perf monitor interrupt enables */
+        uint32_t c12_vbar; /* vector base address register */
         uint32_t c13_fcse; /* FCSE PID.  */
         uint32_t c13_context; /* Context ID.  */
         uint32_t c13_tls1; /* User RW Thread register.  */
@@ -495,17 +498,6 @@ void armv7m_nvic_complete_irq(void *opaque, int irq);
 #define ENCODE_CP_REG(cp, is64, crn, crm, opc1, opc2)   \
     (((cp) << 16) | ((is64) << 15) | ((crn) << 11) |    \
      ((crm) << 7) | ((opc1) << 3) | (opc2))
-
-/* Note that these must line up with the KVM/ARM register
- * ID field definitions (kvm.c will check this, but we
- * can't just use the KVM defines here as the kvm headers
- * are unavailable to non-KVM-specific files)
- */
-#define CP_REG_SIZE_SHIFT 52
-#define CP_REG_SIZE_MASK       0x00f0000000000000ULL
-#define CP_REG_SIZE_U32        0x0020000000000000ULL
-#define CP_REG_SIZE_U64        0x0030000000000000ULL
-#define CP_REG_ARM             0x4000000000000000ULL
 
 /* Convert a full 64 bit KVM register ID to the truncated 32 bit
  * version used as a key for the coprocessor register hashtable

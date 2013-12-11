@@ -335,7 +335,7 @@ typedef struct ExtSaveArea {
 
 static const ExtSaveArea ext_save_areas[] = {
     [2] = { .feature = FEAT_1_ECX, .bits = CPUID_EXT_AVX,
-            .offset = 0x100, .size = 0x240 },
+            .offset = 0x240, .size = 0x100 },
 };
 
 const char *get_register_name_32(unsigned int reg)
@@ -2086,14 +2086,10 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
         /* cache info: needed for Core compatibility */
         if (cpu->cache_info_passthrough) {
             host_cpuid(index, count, eax, ebx, ecx, edx);
-            break;
-        }
-        if (cs->nr_cores > 1) {
-            *eax = (cs->nr_cores - 1) << 26;
+            *eax &= ~0xFC000000;
         } else {
             *eax = 0;
-        }
-        switch (count) {
+            switch (count) {
             case 0: /* L1 dcache info */
                 *eax |= CPUID_4_TYPE_DCACHE | \
                         CPUID_4_LEVEL(1) | \
@@ -2133,6 +2129,12 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
                 *ecx = 0;
                 *edx = 0;
                 break;
+            }
+        }
+
+        /* QEMU gives out its own APIC IDs, never pass down bits 31..26.  */
+        if ((*eax & 31) && cs->nr_cores > 1) {
+            *eax |= (cs->nr_cores - 1) << 26;
         }
         break;
     case 5:
@@ -2225,8 +2227,8 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
             const ExtSaveArea *esa = &ext_save_areas[count];
             if ((env->features[esa->feature] & esa->bits) == esa->bits &&
                 (kvm_mask & (1 << count)) != 0) {
-                *eax = esa->offset;
-                *ebx = esa->size;
+                *eax = esa->size;
+                *ebx = esa->offset;
             }
         }
         break;

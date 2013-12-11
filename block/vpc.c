@@ -211,6 +211,15 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
     bs->total_sectors = (int64_t)
         be16_to_cpu(footer->cyls) * footer->heads * footer->secs_per_cyl;
 
+    /* images created with disk2vhd report a far higher virtual size
+     * than expected with the cyls * heads * sectors_per_cyl formula.
+     * use the footer->size instead if the image was created with
+     * disk2vhd.
+     */
+    if (!strncmp(footer->creator_app, "d2v", 4)) {
+        bs->total_sectors = be64_to_cpu(footer->size) / BDRV_SECTOR_SIZE;
+    }
+
     /* Allow a maximum disk size of approximately 2 TB */
     if (bs->total_sectors >= 65535LL * 255 * 255) {
         ret = -EFBIG;
@@ -258,6 +267,13 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
                     s->free_data_block_offset = next;
                 }
             }
+        }
+
+        if (s->free_data_block_offset > bdrv_getlength(bs->file)) {
+            error_setg(errp, "block-vpc: free_data_block_offset points after "
+                             "the end of file. The image has been truncated.");
+            ret = -EINVAL;
+            goto fail;
         }
 
         s->last_bitmap_offset = (int64_t) -1;
@@ -437,6 +453,19 @@ static int64_t alloc_block(BlockDriverState* bs, int64_t sector_num)
 fail:
     s->free_data_block_offset -= (s->block_size + s->bitmap_size);
     return -1;
+}
+
+static int vpc_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
+{
+    BDRVVPCState *s = (BDRVVPCState *)bs->opaque;
+    VHDFooter *footer = (VHDFooter *) s->footer_buf;
+
+    if (cpu_to_be32(footer->type) != VHD_FIXED) {
+        bdi->cluster_size = s->block_size;
+    }
+
+    bdi->unallocated_blocks_are_zero = true;
+    return 0;
 }
 
 static int vpc_read(BlockDriverState *bs, int64_t sector_num,
@@ -840,6 +869,8 @@ static BlockDriver bdrv_vpc = {
 
     .bdrv_read              = vpc_co_read,
     .bdrv_write             = vpc_co_write,
+
+    .bdrv_get_info          = vpc_get_info,
 
     .create_options         = vpc_create_options,
     .bdrv_has_zero_init     = vpc_has_zero_init,

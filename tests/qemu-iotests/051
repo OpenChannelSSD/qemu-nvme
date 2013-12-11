@@ -64,9 +64,9 @@ function run_qemu()
 size=128M
 
 _make_test_img $size
-cp $TEST_IMG $TEST_IMG.orig
-mv $TEST_IMG $TEST_IMG.base
-_make_test_img -b $TEST_IMG.base $size
+cp "$TEST_IMG" "$TEST_IMG.orig"
+mv "$TEST_IMG" "$TEST_IMG.base"
+_make_test_img -b "$TEST_IMG.base" $size
 
 echo
 echo === Unknown option ===
@@ -78,10 +78,17 @@ run_qemu -drive file="$TEST_IMG",format=qcow2,unknown_opt=1234
 run_qemu -drive file="$TEST_IMG",format=qcow2,unknown_opt=foo
 
 echo
+echo === Invalid format ===
+echo
+
+run_qemu -drive file="$TEST_IMG",format=foo
+run_qemu -drive file="$TEST_IMG",driver=foo
+
+echo
 echo === Overriding backing file ===
 echo
 
-echo "info block" | run_qemu -drive file=$TEST_IMG,driver=qcow2,backing.file.filename=$TEST_IMG.orig -nodefaults
+echo "info block" | run_qemu -drive file="$TEST_IMG",driver=qcow2,backing.file.filename="$TEST_IMG.orig" -nodefaults
 
 echo
 echo === Enable and disable lazy refcounting on the command line, plus some invalid values ===
@@ -175,6 +182,23 @@ echo
 run_qemu -hda foo:bar
 run_qemu -drive file=foo:bar
 run_qemu -drive file.filename=foo:bar
+
+echo
+echo === Snapshot mode ===
+echo
+
+$QEMU_IO -c "write -P 0x11 0 4k" "$TEST_IMG" | _filter_qemu_io
+
+echo 'qemu-io ide0-hd0 "write -P 0x22 0 4k"' | run_qemu -drive file="$TEST_IMG" -snapshot | _filter_qemu_io
+echo 'qemu-io ide0-hd0 "write -P 0x22 0 4k"' | run_qemu -drive file="$TEST_IMG",snapshot=on | _filter_qemu_io
+echo 'qemu-io ide0-hd0 "write -P 0x22 0 4k"' | run_qemu -drive file.filename="$TEST_IMG",driver=qcow2,snapshot=on | _filter_qemu_io
+echo 'qemu-io ide0-hd0 "write -P 0x22 0 4k"' | run_qemu -drive file.filename="$TEST_IMG",driver=qcow2 -snapshot | _filter_qemu_io
+
+$QEMU_IO -c "read -P 0x11 0 4k" "$TEST_IMG" | _filter_qemu_io
+
+echo 'qemu-io ide0-hd0 "write -P 0x22 0 4k"' | run_qemu -drive file="$TEST_IMG",snapshot=off | _filter_qemu_io
+
+$QEMU_IO -c "read -P 0x22 0 4k" "$TEST_IMG" | _filter_qemu_io
 
 # success, all done
 echo "*** done"

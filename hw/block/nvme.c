@@ -169,7 +169,7 @@ static void nvme_isr_notify(void *opaque)
                 msi_notify(&(n->parent_obj), cq->vector);
             }
         } else {
-            qemu_irq_pulse(n->parent_obj.irq[0]);
+            pci_irq_pulse(&n->parent_obj);
         }
     }
 }

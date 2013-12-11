@@ -61,8 +61,13 @@ static void q35_host_realize(DeviceState *dev, Error **errp)
 static const char *q35_host_root_bus_path(PCIHostState *host_bridge,
                                           PCIBus *rootbus)
 {
-    /* For backwards compat with old device paths */
-    return "0000";
+    Q35PCIHost *s = Q35_HOST_DEVICE(host_bridge);
+
+     /* For backwards compat with old device paths */
+    if (s->mch.short_root_bus) {
+        return "0000";
+    }
+    return "0000:00";
 }
 
 static void q35_host_get_pci_hole_start(Object *obj, Visitor *v,
@@ -109,11 +114,22 @@ static void q35_host_get_pci_hole64_end(Object *obj, Visitor *v,
     visit_type_uint64(v, &w64.end, name, errp);
 }
 
+static void q35_host_get_mmcfg_size(Object *obj, Visitor *v,
+                                    void *opaque, const char *name,
+                                    Error **errp)
+{
+    PCIExpressHost *e = PCIE_HOST_BRIDGE(obj);
+    uint32_t value = e->size;
+
+    visit_type_uint32(v, &value, name, errp);
+}
+
 static Property mch_props[] = {
-    DEFINE_PROP_UINT64("MCFG", Q35PCIHost, parent_obj.base_addr,
+    DEFINE_PROP_UINT64(PCIE_HOST_MCFG_BASE, Q35PCIHost, parent_obj.base_addr,
                         MCH_HOST_BRIDGE_PCIEXBAR_DEFAULT),
     DEFINE_PROP_SIZE(PCI_HOST_PROP_PCI_HOLE64_SIZE, Q35PCIHost,
                      mch.pci_hole64_size, DEFAULT_PCI_HOLE64_SIZE),
+    DEFINE_PROP_UINT32("short_root_bus", Q35PCIHost, mch.short_root_bus, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -158,6 +174,10 @@ static void q35_host_initfn(Object *obj)
 
     object_property_add(obj, PCI_HOST_PROP_PCI_HOLE64_END, "int",
                         q35_host_get_pci_hole64_end,
+                        NULL, NULL, NULL, NULL);
+
+    object_property_add(obj, PCIE_HOST_MCFG_SIZE, "int",
+                        q35_host_get_mmcfg_size,
                         NULL, NULL, NULL, NULL);
 
     /* Leave enough space for the biggest MCFG BAR */
@@ -373,6 +393,16 @@ static int mch_init(PCIDevice *d)
                  PAM_EXPAN_SIZE);
     }
     return 0;
+}
+
+uint64_t mch_mcfg_base(void)
+{
+    bool ambiguous;
+    Object *o = object_resolve_path_type("", TYPE_MCH_PCI_DEVICE, &ambiguous);
+    if (!o) {
+        return 0;
+    }
+    return MCH_HOST_BRIDGE_PCIEXBAR_DEFAULT;
 }
 
 static void mch_class_init(ObjectClass *klass, void *data)

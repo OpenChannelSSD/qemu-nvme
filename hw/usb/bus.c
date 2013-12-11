@@ -203,6 +203,24 @@ void usb_device_ep_stopped(USBDevice *dev, USBEndpoint *ep)
     }
 }
 
+int usb_device_alloc_streams(USBDevice *dev, USBEndpoint **eps, int nr_eps,
+                             int streams)
+{
+    USBDeviceClass *klass = USB_DEVICE_GET_CLASS(dev);
+    if (klass->alloc_streams) {
+        return klass->alloc_streams(dev, eps, nr_eps, streams);
+    }
+    return 0;
+}
+
+void usb_device_free_streams(USBDevice *dev, USBEndpoint **eps, int nr_eps)
+{
+    USBDeviceClass *klass = USB_DEVICE_GET_CLASS(dev);
+    if (klass->free_streams) {
+        klass->free_streams(dev, eps, nr_eps);
+    }
+}
+
 static int usb_qdev_init(DeviceState *qdev)
 {
     USBDevice *dev = USB_DEVICE(qdev);
@@ -356,8 +374,9 @@ void usb_port_location(USBPort *downstream, USBPort *upstream, int portnr)
 
 void usb_unregister_port(USBBus *bus, USBPort *port)
 {
-    if (port->dev)
-        qdev_free(&port->dev->qdev);
+    if (port->dev) {
+        object_unparent(OBJECT(port->dev));
+    }
     QTAILQ_REMOVE(&bus->free, port, next);
     bus->nfree--;
 }
@@ -505,7 +524,7 @@ int usb_device_delete_addr(int busnr, int addr)
         return -1;
     dev = port->dev;
 
-    qdev_free(&dev->qdev);
+    object_unparent(OBJECT(dev));
     return 0;
 }
 

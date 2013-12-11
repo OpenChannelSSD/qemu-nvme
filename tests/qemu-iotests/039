@@ -44,7 +44,8 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 _supported_fmt qcow2
 _supported_proto generic
 _supported_os Linux
-_unsupported_qemu_io_options --nocache
+_default_cache_mode "writethrough"
+_supported_cache_modes "writethrough"
 
 size=128M
 
@@ -54,7 +55,7 @@ echo "== Checking that image is clean on shutdown =="
 IMGOPTS="compat=1.1,lazy_refcounts=on"
 _make_test_img $size
 
-$QEMU_IO -c "write -P 0x5a 0 512" ""$TEST_IMG"" | _filter_qemu_io
+$QEMU_IO -c "write -P 0x5a 0 512" "$TEST_IMG" | _filter_qemu_io
 
 # The dirty bit must not be set
 ./qcow2.py "$TEST_IMG" dump-header | grep incompatible_features

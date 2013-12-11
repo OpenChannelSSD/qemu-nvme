@@ -27,6 +27,7 @@
 #include "clients.h"
 #include "hub.h"
 #include "net/slirp.h"
+#include "net/eth.h"
 #include "util.h"
 
 #include "monitor/monitor.h"
@@ -442,7 +443,6 @@ void qemu_flush_queued_packets(NetClientState *nc)
         if (net_hub_flush(nc->peer)) {
             qemu_notify_event();
         }
-        return;
     }
     if (qemu_net_queue_flush(nc->incoming_queue)) {
         /* We emptied the queue successfully, signal to the IO thread to repoll
@@ -689,6 +689,11 @@ static int net_init_nic(const NetClientOptions *opts, const char *name,
         error_report("invalid syntax for ethernet address");
         return -1;
     }
+    if (nic->has_macaddr &&
+        is_multicast_ether_addr(nd->macaddr.a)) {
+        error_report("NIC cannot have multicast MAC address (odd 1st byte)");
+        return -1;
+    }
     qemu_macaddr_default_if_unset(&nd->macaddr);
 
     if (nic->has_vectors) {
@@ -721,6 +726,9 @@ static int (* const net_client_init_fun[NET_CLIENT_OPTIONS_KIND_MAX])(
 #ifdef CONFIG_VDE
         [NET_CLIENT_OPTIONS_KIND_VDE]       = net_init_vde,
 #endif
+#ifdef CONFIG_NETMAP
+        [NET_CLIENT_OPTIONS_KIND_NETMAP]    = net_init_netmap,
+#endif
         [NET_CLIENT_OPTIONS_KIND_DUMP]      = net_init_dump,
 #ifdef CONFIG_NET_BRIDGE
         [NET_CLIENT_OPTIONS_KIND_BRIDGE]    = net_init_bridge,
@@ -751,6 +759,9 @@ static int net_client_init1(const void *object, int is_netdev, Error **errp)
         case NET_CLIENT_OPTIONS_KIND_SOCKET:
 #ifdef CONFIG_VDE
         case NET_CLIENT_OPTIONS_KIND_VDE:
+#endif
+#ifdef CONFIG_NETMAP
+        case NET_CLIENT_OPTIONS_KIND_NETMAP:
 #endif
 #ifdef CONFIG_NET_BRIDGE
         case NET_CLIENT_OPTIONS_KIND_BRIDGE:
@@ -1060,15 +1071,23 @@ void qmp_set_link(const char *name, bool up, Error **errp)
         nc->info->link_status_changed(nc);
     }
 
-    /* Notify peer. Don't update peer link status: this makes it possible to
-     * disconnect from host network without notifying the guest.
-     * FIXME: is disconnected link status change operation useful?
-     *
-     * Current behaviour is compatible with qemu vlans where there could be
-     * multiple clients that can still communicate with each other in
-     * disconnected mode. For now maintain this compatibility. */
-    if (nc->peer && nc->peer->info->link_status_changed) {
-        nc->peer->info->link_status_changed(nc->peer);
+    if (nc->peer) {
+        /* Change peer link only if the peer is NIC and then notify peer.
+         * If the peer is a HUBPORT or a backend, we do not change the
+         * link status.
+         *
+         * This behavior is compatible with qemu vlans where there could be
+         * multiple clients that can still communicate with each other in
+         * disconnected mode. For now maintain this compatibility.
+         */
+        if (nc->peer->info->type == NET_CLIENT_OPTIONS_KIND_NIC) {
+            for (i = 0; i < queues; i++) {
+                ncs[i]->peer->link_down = !up;
+            }
+        }
+        if (nc->peer->info->link_status_changed) {
+            nc->peer->info->link_status_changed(nc->peer);
+        }
     }
 }
 

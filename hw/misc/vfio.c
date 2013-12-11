@@ -52,6 +52,8 @@
 /* Extra debugging, trap acceleration paths for more logging */
 #define VFIO_ALLOW_MMAP 1
 #define VFIO_ALLOW_KVM_INTX 1
+#define VFIO_ALLOW_KVM_MSI 1
+#define VFIO_ALLOW_KVM_MSIX 1
 
 struct VFIODevice;
 
@@ -208,6 +210,17 @@ static QLIST_HEAD(, VFIOContainer)
 static QLIST_HEAD(, VFIOGroup)
     group_list = QLIST_HEAD_INITIALIZER(group_list);
 
+#ifdef CONFIG_KVM
+/*
+ * We have a single VFIO pseudo device per KVM VM.  Once created it lives
+ * for the life of the VM.  Closing the file descriptor only drops our
+ * reference to it and the device's reference to kvm.  Therefore once
+ * initialized, this file descriptor is only released on QEMU exit and
+ * we'll re-use it should another vfio device be attached before then.
+ */
+static int vfio_kvm_device_fd = -1;
+#endif
+
 static void vfio_disable_interrupts(VFIODevice *vdev);
 static uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len);
 static void vfio_pci_write_config(PCIDevice *pdev, uint32_t addr,
@@ -302,7 +315,7 @@ static void vfio_intx_interrupt(void *opaque)
             'A' + vdev->intx.pin);
 
     vdev->intx.pending = true;
-    qemu_set_irq(vdev->pdev.irq[vdev->intx.pin], 1);
+    pci_irq_assert(&vdev->pdev);
     vfio_mmap_set_enabled(vdev, false);
     if (vdev->intx.mmap_timeout) {
         timer_mod(vdev->intx.mmap_timer,
@@ -320,7 +333,7 @@ static void vfio_eoi(VFIODevice *vdev)
             vdev->host.bus, vdev->host.slot, vdev->host.function);
 
     vdev->intx.pending = false;
-    qemu_set_irq(vdev->pdev.irq[vdev->intx.pin], 0);
+    pci_irq_deassert(&vdev->pdev);
     vfio_unmask_intx(vdev);
 }
 
@@ -346,7 +359,7 @@ static void vfio_enable_intx_kvm(VFIODevice *vdev)
     qemu_set_fd_handler(irqfd.fd, NULL, NULL, vdev);
     vfio_mask_intx(vdev);
     vdev->intx.pending = false;
-    qemu_set_irq(vdev->pdev.irq[vdev->intx.pin], 0);
+    pci_irq_deassert(&vdev->pdev);
 
     /* Get an eventfd for resample/unmask */
     if (event_notifier_init(&vdev->intx.unmask, 0)) {
@@ -422,7 +435,7 @@ static void vfio_disable_intx_kvm(VFIODevice *vdev)
      */
     vfio_mask_intx(vdev);
     vdev->intx.pending = false;
-    qemu_set_irq(vdev->pdev.irq[vdev->intx.pin], 0);
+    pci_irq_deassert(&vdev->pdev);
 
     /* Tell KVM to stop listening for an INTx irqfd */
     if (kvm_vm_ioctl(kvm_state, KVM_IRQFD, &irqfd)) {
@@ -493,6 +506,7 @@ static int vfio_enable_intx(VFIODevice *vdev)
     vfio_disable_interrupts(vdev);
 
     vdev->intx.pin = pin - 1; /* Pin A (1) -> irq[0] */
+    pci_config_set_interrupt_pin(vdev->pdev.config, pin);
 
 #ifdef CONFIG_KVM
     /*
@@ -552,7 +566,7 @@ static void vfio_disable_intx(VFIODevice *vdev)
     vfio_disable_intx_kvm(vdev);
     vfio_disable_irqindex(vdev, VFIO_PCI_INTX_IRQ_INDEX);
     vdev->intx.pending = false;
-    qemu_set_irq(vdev->pdev.irq[vdev->intx.pin], 0);
+    pci_irq_deassert(&vdev->pdev);
     vfio_mmap_set_enabled(vdev, true);
 
     fd = event_notifier_get_fd(&vdev->intx.interrupt);
@@ -578,9 +592,21 @@ static void vfio_msi_interrupt(void *opaque)
         return;
     }
 
-    DPRINTF("%s(%04x:%02x:%02x.%x) vector %d\n", __func__,
+#ifdef VFIO_DEBUG
+    MSIMessage msg;
+
+    if (vdev->interrupt == VFIO_INT_MSIX) {
+        msg = msi_get_message(&vdev->pdev, nr);
+    } else if (vdev->interrupt == VFIO_INT_MSI) {
+        msg = msix_get_message(&vdev->pdev, nr);
+    } else {
+        abort();
+    }
+
+    DPRINTF("%s(%04x:%02x:%02x.%x) vector %d 0x%"PRIx64"/0x%x\n", __func__,
             vdev->host.domain, vdev->host.bus, vdev->host.slot,
-            vdev->host.function, nr);
+            vdev->host.function, nr, msg.address, msg.data);
+#endif
 
     if (vdev->interrupt == VFIO_INT_MSIX) {
         msix_notify(&vdev->pdev, nr);
@@ -648,7 +674,8 @@ static int vfio_msix_vector_do_use(PCIDevice *pdev, unsigned int nr,
      * Attempt to enable route through KVM irqchip,
      * default to userspace handling if unavailable.
      */
-    vector->virq = msg ? kvm_irqchip_add_msi_route(kvm_state, *msg) : -1;
+    vector->virq = msg && VFIO_ALLOW_KVM_MSIX ?
+                   kvm_irqchip_add_msi_route(kvm_state, *msg) : -1;
     if (vector->virq < 0 ||
         kvm_irqchip_add_irqfd_notifier(kvm_state, &vector->interrupt,
                                        NULL, vector->virq) < 0) {
@@ -815,7 +842,8 @@ retry:
          * Attempt to enable route through KVM irqchip,
          * default to userspace handling if unavailable.
          */
-        vector->virq = kvm_irqchip_add_msi_route(kvm_state, vector->msg);
+        vector->virq = VFIO_ALLOW_KVM_MSI ?
+                       kvm_irqchip_add_msi_route(kvm_state, vector->msg) : -1;
         if (vector->virq < 0 ||
             kvm_irqchip_add_irqfd_notifier(kvm_state, &vector->interrupt,
                                            NULL, vector->virq) < 0) {
@@ -877,7 +905,19 @@ static void vfio_disable_msi_common(VFIODevice *vdev)
 
 static void vfio_disable_msix(VFIODevice *vdev)
 {
+    int i;
+
     msix_unset_vector_notifiers(&vdev->pdev);
+
+    /*
+     * MSI-X will only release vectors if MSI-X is still enabled on the
+     * device, check through the rest and release it ourselves if necessary.
+     */
+    for (i = 0; i < vdev->nr_vectors; i++) {
+        if (vdev->msi_vectors[i].use) {
+            vfio_msix_vector_release(&vdev->pdev, i);
+        }
+    }
 
     if (vdev->nr_vectors) {
         vfio_disable_irqindex(vdev, VFIO_PCI_MSIX_IRQ_INDEX);
@@ -1799,6 +1839,34 @@ static void vfio_probe_nvidia_bar5_window_quirk(VFIODevice *vdev, int nr)
             vdev->host.function);
 }
 
+static void vfio_nvidia_88000_quirk_write(void *opaque, hwaddr addr,
+                                          uint64_t data, unsigned size)
+{
+    VFIOQuirk *quirk = opaque;
+    VFIODevice *vdev = quirk->vdev;
+    PCIDevice *pdev = &vdev->pdev;
+    hwaddr base = quirk->data.address_match & TARGET_PAGE_MASK;
+
+    vfio_generic_quirk_write(opaque, addr, data, size);
+
+    /*
+     * Nvidia seems to acknowledge MSI interrupts by writing 0xff to the
+     * MSI capability ID register.  Both the ID and next register are
+     * read-only, so we allow writes covering either of those to real hw.
+     * NB - only fixed for the 0x88000 MMIO window.
+     */
+    if ((pdev->cap_present & QEMU_PCI_CAP_MSI) &&
+        vfio_range_contained(addr, size, pdev->msi_cap, PCI_MSI_FLAGS)) {
+        vfio_bar_write(&vdev->bars[quirk->data.bar], addr + base, data, size);
+    }
+}
+
+static const MemoryRegionOps vfio_nvidia_88000_quirk = {
+    .read = vfio_generic_quirk_read,
+    .write = vfio_nvidia_88000_quirk_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
 /*
  * Finally, BAR0 itself.  We want to redirect any accesses to either
  * 0x1800 or 0x88000 through the PCI config space access functions.
@@ -1825,7 +1893,7 @@ static void vfio_probe_nvidia_bar0_88000_quirk(VFIODevice *vdev, int nr)
     quirk->data.address_mask = PCIE_CONFIG_SPACE_SIZE - 1;
     quirk->data.bar = nr;
 
-    memory_region_init_io(&quirk->mem, OBJECT(vdev), &vfio_generic_quirk,
+    memory_region_init_io(&quirk->mem, OBJECT(vdev), &vfio_nvidia_88000_quirk,
                           quirk, "vfio-nvidia-bar0-88000-quirk",
                           TARGET_PAGE_ALIGN(quirk->data.address_mask + 1));
     memory_region_add_subregion_overlap(&vdev->bars[nr].mem,
@@ -3040,6 +3108,59 @@ static void vfio_pci_reset_handler(void *opaque)
     }
 }
 
+static void vfio_kvm_device_add_group(VFIOGroup *group)
+{
+#ifdef CONFIG_KVM
+    struct kvm_device_attr attr = {
+        .group = KVM_DEV_VFIO_GROUP,
+        .attr = KVM_DEV_VFIO_GROUP_ADD,
+        .addr = (uint64_t)(unsigned long)&group->fd,
+    };
+
+    if (!kvm_enabled()) {
+        return;
+    }
+
+    if (vfio_kvm_device_fd < 0) {
+        struct kvm_create_device cd = {
+            .type = KVM_DEV_TYPE_VFIO,
+        };
+
+        if (kvm_vm_ioctl(kvm_state, KVM_CREATE_DEVICE, &cd)) {
+            DPRINTF("KVM_CREATE_DEVICE: %m\n");
+            return;
+        }
+
+        vfio_kvm_device_fd = cd.fd;
+    }
+
+    if (ioctl(vfio_kvm_device_fd, KVM_SET_DEVICE_ATTR, &attr)) {
+        error_report("Failed to add group %d to KVM VFIO device: %m",
+                     group->groupid);
+    }
+#endif
+}
+
+static void vfio_kvm_device_del_group(VFIOGroup *group)
+{
+#ifdef CONFIG_KVM
+    struct kvm_device_attr attr = {
+        .group = KVM_DEV_VFIO_GROUP,
+        .attr = KVM_DEV_VFIO_GROUP_DEL,
+        .addr = (uint64_t)(unsigned long)&group->fd,
+    };
+
+    if (vfio_kvm_device_fd < 0) {
+        return;
+    }
+
+    if (ioctl(vfio_kvm_device_fd, KVM_SET_DEVICE_ATTR, &attr)) {
+        error_report("Failed to remove group %d to KVM VFIO device: %m",
+                     group->groupid);
+    }
+#endif
+}
+
 static int vfio_connect_container(VFIOGroup *group)
 {
     VFIOContainer *container;
@@ -3188,6 +3309,8 @@ static VFIOGroup *vfio_get_group(int groupid)
 
     QLIST_INSERT_HEAD(&group_list, group, next);
 
+    vfio_kvm_device_add_group(group);
+
     return group;
 }
 
@@ -3197,6 +3320,7 @@ static void vfio_put_group(VFIOGroup *group)
         return;
     }
 
+    vfio_kvm_device_del_group(group);
     vfio_disconnect_container(group);
     QLIST_REMOVE(group, next);
     DPRINTF("vfio_put_group: close group->fd\n");
@@ -3566,6 +3690,13 @@ static int vfio_initfn(PCIDevice *pdev)
     /* QEMU can change multi-function devices to single function, or reverse */
     vdev->emulated_config_bits[PCI_HEADER_TYPE] =
                                               PCI_HEADER_TYPE_MULTI_FUNCTION;
+
+    /* Restore or clear multifunction, this is always controlled by QEMU */
+    if (vdev->pdev.cap_present & QEMU_PCI_CAP_MULTIFUNCTION) {
+        vdev->pdev.config[PCI_HEADER_TYPE] |= PCI_HEADER_TYPE_MULTI_FUNCTION;
+    } else {
+        vdev->pdev.config[PCI_HEADER_TYPE] &= ~PCI_HEADER_TYPE_MULTI_FUNCTION;
+    }
 
     /*
      * Clear host resource mapping info.  If we choose not to register a

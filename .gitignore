@@ -3,6 +3,7 @@ config-all-devices.*
 config-all-disas.*
 config-host.*
 config-target.*
+config.status
 trace/generated-tracers.h
 trace/generated-tracers.c
 trace/generated-tracers-dtrace.h
@@ -44,7 +45,7 @@ qemu-ga
 qemu-bridge-helper
 qemu-monitor.texi
 vscclient
-QMP/qmp-commands.txt
+qmp-commands.txt
 test-bitops
 test-coroutine
 test-int128

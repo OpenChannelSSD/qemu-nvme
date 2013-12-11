@@ -28,7 +28,14 @@ CONFIG_ALL=y
 include $(SRC_PATH)/rules.mak
 config-host.mak: $(SRC_PATH)/configure
 	@echo $@ is out-of-date, running configure
-	@sed -n "/.*Configured with/s/[^:]*: //p" $@ | sh
+	@# TODO: The next lines include code which supports a smooth
+	@# transition from old configurations without config.status.
+	@# This code can be removed after QEMU 1.7.
+	@if test -x config.status; then \
+	    ./config.status; \
+        else \
+	    sed -n "/.*Configured with/s/[^:]*: //p" $@ | sh; \
+	fi
 else
 config-host.mak:
 ifneq ($(filter-out %clean,$(MAKECMDGOALS)),$(if $(MAKECMDGOALS),,fail))
@@ -280,13 +287,13 @@ distclean: clean
 KEYMAPS=da     en-gb  et  fr     fr-ch  is  lt  modifiers  no  pt-br  sv \
 ar      de     en-us  fi  fr-be  hr     it  lv  nl         pl  ru     th \
 common  de-ch  es     fo  fr-ca  hu     ja  mk  nl-be      pt  sl     tr \
-bepo
+bepo    cz
 
 ifdef INSTALL_BLOBS
 BLOBS=bios.bin sgabios.bin vgabios.bin vgabios-cirrus.bin \
 vgabios-stdvga.bin vgabios-vmware.bin vgabios-qxl.bin \
 acpi-dsdt.aml q35-acpi-dsdt.aml \
-ppc_rom.bin openbios-sparc32 openbios-sparc64 openbios-ppc \
+ppc_rom.bin openbios-sparc32 openbios-sparc64 openbios-ppc QEMU,tcx.bin \
 pxe-e1000.rom pxe-eepro100.rom pxe-ne2k_pci.rom \
 pxe-pcnet.rom pxe-rtl8139.rom pxe-virtio.rom \
 efi-e1000.rom efi-eepro100.rom efi-ne2k_pci.rom \

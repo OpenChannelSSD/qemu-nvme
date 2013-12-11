@@ -61,6 +61,7 @@ typedef struct MCHPCIState {
     ram_addr_t above_4g_mem_size;
     uint64_t pci_hole64_size;
     PcGuestInfo *guest_info;
+    uint32_t short_root_bus;
 } MCHPCIState;
 
 typedef struct Q35PCIHost {
@@ -155,5 +156,7 @@ typedef struct Q35PCIHost {
 /* D1:F0 PCIE* port*/
 #define MCH_PCIE_DEV                           1
 #define MCH_PCIE_FUNC                          0
+
+uint64_t mch_mcfg_base(void);
 
 #endif /* HW_Q35_H */

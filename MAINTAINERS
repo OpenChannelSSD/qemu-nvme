@@ -639,6 +639,8 @@ S: Supported
 F: block*
 F: block/
 F: hw/block/
+T: git git://repo.or.cz/qemu/kevin.git block
+T: git git://github.com/stefanha/qemu.git block
 
 Character Devices
 M: Anthony Liguori <aliguori@amazon.com>
@@ -699,6 +701,7 @@ S: Supported
 F: monitor.c
 F: hmp.c
 F: hmp-commands.hx
+T: git git://repo.or.cz/qemu/qmp-unstable.git queue/qmp
 
 Network device layer
 M: Anthony Liguori <aliguori@amazon.com>
@@ -706,6 +709,14 @@ M: Stefan Hajnoczi <stefanha@redhat.com>
 S: Maintained
 F: net/
 T: git git://github.com/stefanha/qemu.git net
+
+Netmap network backend
+M: Luigi Rizzo <rizzo@iet.unipi.it>
+M: Giuseppe Lettieri <g.lettieri@iet.unipi.it>
+M: Vincenzo Maffione <v.maffione@gmail.com>
+W: http://info.iet.unipi.it/~luigi/netmap/
+S: Maintained
+F: net/netmap.c
 
 Network Block Device (NBD)
 M: Paolo Bonzini <pbonzini@redhat.com>
@@ -720,6 +731,7 @@ M: Luiz Capitulino <lcapitulino@redhat.com>
 M: Michael Roth <mdroth@linux.vnet.ibm.com>
 S: Supported
 F: qapi/
+T: git git://repo.or.cz/qemu/qmp-unstable.git queue/qmp
 
 QAPI Schema
 M: Eric Blake <eblake@redhat.com>
@@ -727,6 +739,7 @@ M: Luiz Capitulino <lcapitulino@redhat.com>
 M: Markus Armbruster <armbru@redhat.com>
 S: Supported
 F: qapi-schema.json
+T: git git://repo.or.cz/qemu/qmp-unstable.git queue/qmp
 
 QMP
 M: Luiz Capitulino <lcapitulino@redhat.com>
@@ -735,6 +748,7 @@ F: qmp.c
 F: monitor.c
 F: qmp-commands.hx
 F: QMP/
+T: git git://repo.or.cz/qemu/qmp-unstable.git queue/qmp
 
 SLIRP
 M: Jan Kiszka <jan.kiszka@siemens.com>
@@ -857,3 +871,44 @@ Stable 0.10
 L: qemu-stable@nongnu.org
 T: git git://git.qemu-project.org/qemu-stable-0.10.git
 S: Orphan
+
+Block drivers
+-------------
+VMDK
+M: Fam Zheng <famz@redhat.com>
+S: Supported
+F: block/vmdk.c
+
+RBD
+M: Josh Durgin <josh.durgin@inktank.com>
+S: Supported
+F: block/rbd.c
+
+Sheepdog
+M: MORITA Kazutaka <morita.kazutaka@lab.ntt.co.jp>
+M: Liu Yuan <namei.unix@gmail.com>
+L: sheepdog@lists.wpkg.org
+S: Supported
+F: block/sheepdog.c
+
+VHDX
+M: Jeff Cody <jcody@redhat.com>
+S: Supported
+F: block/vhdx*
+
+VDI
+M: Stefan Weil <sw@weilnetz.de>
+S: Maintained
+F: block/vdi.c
+
+iSCSI
+M: Ronnie Sahlberg <ronniesahlberg@gmail.com>
+M: Paolo Bonzini <pbonzini@redhat.com>
+M: Peter Lieven <pl@kamp.de>
+S: Supported
+F: block/iscsi.c
+
+SSH
+M: Richard W.M. Jones <rjones@redhat.com>
+S: Supported
+F: block/ssh.c

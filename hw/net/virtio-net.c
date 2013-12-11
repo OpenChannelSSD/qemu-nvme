@@ -200,16 +200,16 @@ static void rxfilter_notify(NetClientState *nc)
     VirtIONet *n = qemu_get_nic_opaque(nc);
 
     if (nc->rxfilter_notify_enabled) {
+        gchar *path = object_get_canonical_path(OBJECT(n->qdev));
         if (n->netclient_name) {
             event_data = qobject_from_jsonf("{ 'name': %s, 'path': %s }",
-                                    n->netclient_name,
-                                    object_get_canonical_path(OBJECT(n->qdev)));
+                                    n->netclient_name, path);
         } else {
-            event_data = qobject_from_jsonf("{ 'path': %s }",
-                                    object_get_canonical_path(OBJECT(n->qdev)));
+            event_data = qobject_from_jsonf("{ 'path': %s }", path);
         }
         monitor_protocol_event(QEVENT_NIC_RX_FILTER_CHANGED, event_data);
         qobject_decref(event_data);
+        g_free(path);
 
         /* disable event notification to avoid events flooding */
         nc->rxfilter_notify_enabled = 0;
@@ -610,11 +610,11 @@ static int virtio_net_handle_mac(VirtIONet *n, uint8_t cmd,
         return VIRTIO_NET_ERR;
     }
 
-    n->mac_table.in_use = 0;
-    n->mac_table.first_multi = 0;
-    n->mac_table.uni_overflow = 0;
-    n->mac_table.multi_overflow = 0;
-    memset(n->mac_table.macs, 0, MAC_TABLE_ENTRIES * ETH_ALEN);
+    int in_use = 0;
+    int first_multi = 0;
+    uint8_t uni_overflow = 0;
+    uint8_t multi_overflow = 0;
+    uint8_t *macs = g_malloc0(MAC_TABLE_ENTRIES * ETH_ALEN);
 
     s = iov_to_buf(iov, iov_cnt, 0, &mac_data.entries,
                    sizeof(mac_data.entries));
@@ -629,19 +629,19 @@ static int virtio_net_handle_mac(VirtIONet *n, uint8_t cmd,
     }
 
     if (mac_data.entries <= MAC_TABLE_ENTRIES) {
-        s = iov_to_buf(iov, iov_cnt, 0, n->mac_table.macs,
+        s = iov_to_buf(iov, iov_cnt, 0, macs,
                        mac_data.entries * ETH_ALEN);
         if (s != mac_data.entries * ETH_ALEN) {
             goto error;
         }
-        n->mac_table.in_use += mac_data.entries;
+        in_use += mac_data.entries;
     } else {
-        n->mac_table.uni_overflow = 1;
+        uni_overflow = 1;
     }
 
     iov_discard_front(&iov, &iov_cnt, mac_data.entries * ETH_ALEN);
 
-    n->mac_table.first_multi = n->mac_table.in_use;
+    first_multi = in_use;
 
     s = iov_to_buf(iov, iov_cnt, 0, &mac_data.entries,
                    sizeof(mac_data.entries));
@@ -656,23 +656,29 @@ static int virtio_net_handle_mac(VirtIONet *n, uint8_t cmd,
         goto error;
     }
 
-    if (n->mac_table.in_use + mac_data.entries <= MAC_TABLE_ENTRIES) {
-        s = iov_to_buf(iov, iov_cnt, 0, n->mac_table.macs,
+    if (in_use + mac_data.entries <= MAC_TABLE_ENTRIES) {
+        s = iov_to_buf(iov, iov_cnt, 0, &macs[in_use * ETH_ALEN],
                        mac_data.entries * ETH_ALEN);
         if (s != mac_data.entries * ETH_ALEN) {
             goto error;
         }
-        n->mac_table.in_use += mac_data.entries;
+        in_use += mac_data.entries;
     } else {
-        n->mac_table.multi_overflow = 1;
+        multi_overflow = 1;
     }
 
+    n->mac_table.in_use = in_use;
+    n->mac_table.first_multi = first_multi;
+    n->mac_table.uni_overflow = uni_overflow;
+    n->mac_table.multi_overflow = multi_overflow;
+    memcpy(n->mac_table.macs, macs, MAC_TABLE_ENTRIES * ETH_ALEN);
+    g_free(macs);
     rxfilter_notify(nc);
 
     return VIRTIO_NET_OK;
 
 error:
-    rxfilter_notify(nc);
+    g_free(macs);
     return VIRTIO_NET_ERR;
 }
 
@@ -1427,7 +1433,7 @@ static NetClientInfo net_virtio_info = {
     .size = sizeof(NICState),
     .can_receive = virtio_net_can_receive,
     .receive = virtio_net_receive,
-        .cleanup = virtio_net_cleanup,
+    .cleanup = virtio_net_cleanup,
     .link_status_changed = virtio_net_set_link_status,
     .query_rx_filter = virtio_net_query_rxfilter,
 };
@@ -1601,7 +1607,7 @@ static int virtio_net_device_exit(DeviceState *qdev)
         if (q->tx_timer) {
             timer_del(q->tx_timer);
             timer_free(q->tx_timer);
-        } else {
+        } else if (q->tx_bh) {
             qemu_bh_delete(q->tx_bh);
         }
     }
