@@ -675,7 +675,6 @@ typedef struct NvmeCQueue {
     struct NvmeCtrl *ctrl;
     uint8_t     phys_contig;
     uint8_t     phase;
-    uint8_t     cqes_pending;
     uint16_t    cqid;
     uint16_t    irq_enabled;
     uint32_t    head;
