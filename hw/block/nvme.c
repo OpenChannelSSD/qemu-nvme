@@ -960,13 +960,28 @@ static uint16_t nvme_compare(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_SUCCESS;
 }
 
+static void nvme_flush_cb(void *opaque, int ret)
+{
+    NvmeRequest *req = opaque;
+    NvmeSQueue *sq = req->sq;
+    NvmeCtrl *n = sq->ctrl;
+    NvmeCQueue *cq = n->cq[sq->cqid];
+
+    bdrv_acct_done(n->conf.bs, &req->acct);
+    if (!ret) {
+        req->status = NVME_SUCCESS;
+    } else {
+        req->status = NVME_INTERNAL_DEV_ERROR;
+    }
+    nvme_enqueue_req_completion(cq, req);
+}
+
 static uint16_t nvme_flush(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
-    if (bdrv_flush(n->conf.bs) < 0) {
-        return NVME_INTERNAL_DEV_ERROR;
-    }
-    return NVME_SUCCESS;
+    bdrv_acct_start(n->conf.bs, &req->acct, 0, BDRV_ACCT_FLUSH);
+    req->aiocb = bdrv_aio_flush(n->conf.bs, nvme_flush_cb, req);
+    return NVME_NO_COMPLETE;
 }
 
 static uint16_t nvme_write_uncor(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
