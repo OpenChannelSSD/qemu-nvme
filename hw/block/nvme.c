@@ -890,11 +890,11 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 return NVME_LBA_RANGE | NVME_DNR;
             }
 
-            bitmap_clear(ns->util, slba, nlb);
             if (bdrv_discard(n->conf.bs, ns->start_block + (slba << data_shift),
                     nlb << data_shift) < 0) {
                 req->status = NVME_INTERNAL_DEV_ERROR;
             }
+            bitmap_clear(ns->util, slba, nlb);
         }
     }
     return NVME_SUCCESS;
