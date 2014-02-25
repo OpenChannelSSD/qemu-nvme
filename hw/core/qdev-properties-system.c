@@ -109,7 +109,8 @@ static void set_drive(Object *obj, Visitor *v, void *opaque,
 }
 
 PropertyInfo qdev_prop_drive = {
-    .name  = "drive",
+    .name  = "str",
+    .legacy_name  = "drive",
     .get   = get_drive,
     .set   = set_drive,
     .release = release_drive,
@@ -164,7 +165,8 @@ static void set_chr(Object *obj, Visitor *v, void *opaque,
 }
 
 PropertyInfo qdev_prop_chr = {
-    .name  = "chr",
+    .name  = "str",
+    .legacy_name  = "chr",
     .get   = get_chr,
     .set   = set_chr,
     .release = release_chr,
@@ -242,7 +244,8 @@ static void set_netdev(Object *obj, Visitor *v, void *opaque,
 }
 
 PropertyInfo qdev_prop_netdev = {
-    .name  = "netdev",
+    .name  = "str",
+    .legacy_name  = "netdev",
     .get   = get_netdev,
     .set   = set_netdev,
 };
@@ -321,7 +324,8 @@ static void set_vlan(Object *obj, Visitor *v, void *opaque,
 }
 
 PropertyInfo qdev_prop_vlan = {
-    .name  = "vlan",
+    .name  = "int32",
+    .legacy_name  = "vlan",
     .print = print_vlan,
     .get   = get_vlan,
     .set   = set_vlan,
@@ -352,21 +356,17 @@ void qdev_prop_set_drive_nofail(DeviceState *dev, const char *name,
 void qdev_prop_set_chr(DeviceState *dev, const char *name,
                        CharDriverState *value)
 {
-    Error *errp = NULL;
     assert(!value || value->label);
     object_property_set_str(OBJECT(dev),
-                            value ? value->label : "", name, &errp);
-    assert_no_error(errp);
+                            value ? value->label : "", name, &error_abort);
 }
 
 void qdev_prop_set_netdev(DeviceState *dev, const char *name,
                           NetClientState *value)
 {
-    Error *errp = NULL;
     assert(!value || value->name);
     object_property_set_str(OBJECT(dev),
-                            value ? value->name : "", name, &errp);
-    assert_no_error(errp);
+                            value ? value->name : "", name, &error_abort);
 }
 
 void qdev_set_nic_properties(DeviceState *dev, NICInfo *nd)

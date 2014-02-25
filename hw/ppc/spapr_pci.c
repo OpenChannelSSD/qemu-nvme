@@ -90,7 +90,7 @@ static void finish_read_pci_config(sPAPREnvironment *spapr, uint64_t buid,
 
     if ((size != 1) && (size != 2) && (size != 4)) {
         /* access must be 1, 2 or 4 bytes */
-        rtas_st(rets, 0, -1);
+        rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
         return;
     }
 
@@ -100,14 +100,14 @@ static void finish_read_pci_config(sPAPREnvironment *spapr, uint64_t buid,
     if (!pci_dev || (addr % size) || (addr >= pci_config_size(pci_dev))) {
         /* Access must be to a valid device, within bounds and
          * naturally aligned */
-        rtas_st(rets, 0, -1);
+        rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
         return;
     }
 
     val = pci_host_config_read_common(pci_dev, addr,
                                       pci_config_size(pci_dev), size);
 
-    rtas_st(rets, 0, 0);
+    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
     rtas_st(rets, 1, val);
 }
 
@@ -120,7 +120,7 @@ static void rtas_ibm_read_pci_config(PowerPCCPU *cpu, sPAPREnvironment *spapr,
     uint32_t size, addr;
 
     if ((nargs != 4) || (nret != 2)) {
-        rtas_st(rets, 0, -1);
+        rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
         return;
     }
 
@@ -139,7 +139,7 @@ static void rtas_read_pci_config(PowerPCCPU *cpu, sPAPREnvironment *spapr,
     uint32_t size, addr;
 
     if ((nargs != 2) || (nret != 2)) {
-        rtas_st(rets, 0, -1);
+        rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
         return;
     }
 
@@ -157,7 +157,7 @@ static void finish_write_pci_config(sPAPREnvironment *spapr, uint64_t buid,
 
     if ((size != 1) && (size != 2) && (size != 4)) {
         /* access must be 1, 2 or 4 bytes */
-        rtas_st(rets, 0, -1);
+        rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
         return;
     }
 
@@ -167,14 +167,14 @@ static void finish_write_pci_config(sPAPREnvironment *spapr, uint64_t buid,
     if (!pci_dev || (addr % size) || (addr >= pci_config_size(pci_dev))) {
         /* Access must be to a valid device, within bounds and
          * naturally aligned */
-        rtas_st(rets, 0, -1);
+        rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
         return;
     }
 
     pci_host_config_write_common(pci_dev, addr, pci_config_size(pci_dev),
                                  val, size);
 
-    rtas_st(rets, 0, 0);
+    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
 }
 
 static void rtas_ibm_write_pci_config(PowerPCCPU *cpu, sPAPREnvironment *spapr,
@@ -186,7 +186,7 @@ static void rtas_ibm_write_pci_config(PowerPCCPU *cpu, sPAPREnvironment *spapr,
     uint32_t val, size, addr;
 
     if ((nargs != 5) || (nret != 1)) {
-        rtas_st(rets, 0, -1);
+        rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
         return;
     }
 
@@ -206,7 +206,7 @@ static void rtas_write_pci_config(PowerPCCPU *cpu, sPAPREnvironment *spapr,
     uint32_t val, size, addr;
 
     if ((nargs != 3) || (nret != 1)) {
-        rtas_st(rets, 0, -1);
+        rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
         return;
     }
 
@@ -293,7 +293,7 @@ static void rtas_ibm_change_msi(PowerPCCPU *cpu, sPAPREnvironment *spapr,
         break;
     default:
         fprintf(stderr, "rtas_ibm_change_msi(%u) is not implemented\n", func);
-        rtas_st(rets, 0, -3); /* Parameter error */
+        rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
         return;
     }
 
@@ -303,7 +303,7 @@ static void rtas_ibm_change_msi(PowerPCCPU *cpu, sPAPREnvironment *spapr,
         pdev = find_dev(spapr, buid, config_addr);
     }
     if (!phb || !pdev) {
-        rtas_st(rets, 0, -3); /* Parameter error */
+        rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
         return;
     }
 
@@ -312,11 +312,11 @@ static void rtas_ibm_change_msi(PowerPCCPU *cpu, sPAPREnvironment *spapr,
         ndev = spapr_msicfg_find(phb, config_addr, false);
         if (ndev < 0) {
             trace_spapr_pci_msi("MSI has not been enabled", -1, config_addr);
-            rtas_st(rets, 0, -1); /* Hardware error */
+            rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
             return;
         }
         trace_spapr_pci_msi("Released MSIs", ndev, config_addr);
-        rtas_st(rets, 0, 0);
+        rtas_st(rets, 0, RTAS_OUT_SUCCESS);
         rtas_st(rets, 1, 0);
         return;
     }
@@ -327,7 +327,7 @@ static void rtas_ibm_change_msi(PowerPCCPU *cpu, sPAPREnvironment *spapr,
     ndev = spapr_msicfg_find(phb, config_addr, true);
     if (ndev >= SPAPR_MSIX_MAX_DEVS || ndev < 0) {
         fprintf(stderr, "No free entry for a new MSI device\n");
-        rtas_st(rets, 0, -1); /* Hardware error */
+        rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
         return;
     }
     trace_spapr_pci_msi("Configuring MSI", ndev, config_addr);
@@ -336,7 +336,7 @@ static void rtas_ibm_change_msi(PowerPCCPU *cpu, sPAPREnvironment *spapr,
     if (phb->msi_table[ndev].nvec && (req_num != phb->msi_table[ndev].nvec)) {
         /* Unexpected behaviour */
         fprintf(stderr, "Cannot reuse MSI config for device#%d", ndev);
-        rtas_st(rets, 0, -1); /* Hardware error */
+        rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
         return;
     }
 
@@ -346,7 +346,7 @@ static void rtas_ibm_change_msi(PowerPCCPU *cpu, sPAPREnvironment *spapr,
                                        ret_intr_type == RTAS_TYPE_MSI);
         if (irq < 0) {
             fprintf(stderr, "Cannot allocate MSIs for device#%d", ndev);
-            rtas_st(rets, 0, -1); /* Hardware error */
+            rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
             return;
         }
         phb->msi_table[ndev].irq = irq;
@@ -358,7 +358,7 @@ static void rtas_ibm_change_msi(PowerPCCPU *cpu, sPAPREnvironment *spapr,
     spapr_msi_setmsg(pdev, spapr->msi_win_addr, ret_intr_type == RTAS_TYPE_MSIX,
                      phb->msi_table[ndev].irq, req_num);
 
-    rtas_st(rets, 0, 0);
+    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
     rtas_st(rets, 1, req_num);
     rtas_st(rets, 2, ++seq_num);
     rtas_st(rets, 3, ret_intr_type);
@@ -383,7 +383,7 @@ static void rtas_ibm_query_interrupt_source_number(PowerPCCPU *cpu,
     /* Fins sPAPRPHBState */
     phb = find_phb(spapr, buid);
     if (!phb) {
-        rtas_st(rets, 0, -3); /* Parameter error */
+        rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
         return;
     }
 
@@ -391,7 +391,7 @@ static void rtas_ibm_query_interrupt_source_number(PowerPCCPU *cpu,
     ndev = spapr_msicfg_find(phb, config_addr, false);
     if (ndev < 0) {
         trace_spapr_pci_msi("MSI has not been enabled", -1, config_addr);
-        rtas_st(rets, 0, -1); /* Hardware error */
+        rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
         return;
     }
 
@@ -399,7 +399,7 @@ static void rtas_ibm_query_interrupt_source_number(PowerPCCPU *cpu,
     trace_spapr_pci_rtas_ibm_query_interrupt_source_number(ioa_intr_num,
                                                            intr_src_num);
 
-    rtas_st(rets, 0, 0);
+    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
     rtas_st(rets, 1, intr_src_num);
     rtas_st(rets, 2, 1);/* 0 == level; 1 == edge */
 }
@@ -555,7 +555,7 @@ static int spapr_phb_init(SysBusDevice *s)
 
     /* Initialize memory regions */
     sprintf(namebuf, "%s.mmio", sphb->dtbusname);
-    memory_region_init(&sphb->memspace, OBJECT(sphb), namebuf, INT64_MAX);
+    memory_region_init(&sphb->memspace, OBJECT(sphb), namebuf, UINT64_MAX);
 
     sprintf(namebuf, "%s.mmio-alias", sphb->dtbusname);
     memory_region_init_alias(&sphb->memwindow, OBJECT(sphb),
@@ -651,14 +651,14 @@ static void spapr_phb_reset(DeviceState *qdev)
 
 static Property spapr_phb_properties[] = {
     DEFINE_PROP_INT32("index", sPAPRPHBState, index, -1),
-    DEFINE_PROP_HEX64("buid", sPAPRPHBState, buid, -1),
-    DEFINE_PROP_HEX32("liobn", sPAPRPHBState, dma_liobn, -1),
-    DEFINE_PROP_HEX64("mem_win_addr", sPAPRPHBState, mem_win_addr, -1),
-    DEFINE_PROP_HEX64("mem_win_size", sPAPRPHBState, mem_win_size,
-                      SPAPR_PCI_MMIO_WIN_SIZE),
-    DEFINE_PROP_HEX64("io_win_addr", sPAPRPHBState, io_win_addr, -1),
-    DEFINE_PROP_HEX64("io_win_size", sPAPRPHBState, io_win_size,
-                      SPAPR_PCI_IO_WIN_SIZE),
+    DEFINE_PROP_UINT64("buid", sPAPRPHBState, buid, -1),
+    DEFINE_PROP_UINT32("liobn", sPAPRPHBState, dma_liobn, -1),
+    DEFINE_PROP_UINT64("mem_win_addr", sPAPRPHBState, mem_win_addr, -1),
+    DEFINE_PROP_UINT64("mem_win_size", sPAPRPHBState, mem_win_size,
+                       SPAPR_PCI_MMIO_WIN_SIZE),
+    DEFINE_PROP_UINT64("io_win_addr", sPAPRPHBState, io_win_addr, -1),
+    DEFINE_PROP_UINT64("io_win_size", sPAPRPHBState, io_win_size,
+                       SPAPR_PCI_IO_WIN_SIZE),
     DEFINE_PROP_END_OF_LIST(),
 };
 

@@ -180,12 +180,14 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         msr |= env->error_code;
         goto store_next;
     case POWERPC_EXCP_EXTERNAL:  /* External input                           */
+        cs = CPU(cpu);
+
         if (lpes0 == 1) {
             new_msr |= (target_ulong)MSR_HVB;
         }
         if (env->mpic_proxy) {
             /* IACK the IRQ on delivery */
-            env->spr[SPR_BOOKE_EPR] = ldl_phys(env->mpic_iack);
+            env->spr[SPR_BOOKE_EPR] = ldl_phys(cs->as, env->mpic_iack);
         }
         goto store_next;
     case POWERPC_EXCP_ALIGN:     /* Alignment exception                      */
@@ -386,6 +388,11 @@ static inline void powerpc_excp(PowerPCCPU *cpu, int excp_model, int excp)
         new_msr |= env->msr & ((target_ulong)1 << MSR_RI);
         goto store_next;
     case POWERPC_EXCP_VPU:       /* Vector unavailable exception             */
+        if (lpes1 == 0) {
+            new_msr |= (target_ulong)MSR_HVB;
+        }
+        goto store_current;
+    case POWERPC_EXCP_VSXU:       /* VSX unavailable exception               */
         if (lpes1 == 0) {
             new_msr |= (target_ulong)MSR_HVB;
         }

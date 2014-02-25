@@ -11,6 +11,7 @@
 
 #include <hw/qdev.h>
 #include "qemu/bitops.h"
+#include "exec/address-spaces.h"
 #include "cpu.h"
 #include "ioinst.h"
 #include "css.h"
@@ -667,18 +668,20 @@ static void css_update_chnmon(SubchDev *sch)
         /* Format 1, per-subchannel area. */
         uint32_t count;
 
-        count = ldl_phys(sch->curr_status.mba);
+        count = ldl_phys(&address_space_memory, sch->curr_status.mba);
         count++;
-        stl_phys(sch->curr_status.mba, count);
+        stl_phys(&address_space_memory, sch->curr_status.mba, count);
     } else {
         /* Format 0, global area. */
         uint32_t offset;
         uint16_t count;
 
         offset = sch->curr_status.pmcw.mbi << 5;
-        count = lduw_phys(channel_subsys->chnmon_area + offset);
+        count = lduw_phys(&address_space_memory,
+                          channel_subsys->chnmon_area + offset);
         count++;
-        stw_phys(channel_subsys->chnmon_area + offset, count);
+        stw_phys(&address_space_memory,
+                 channel_subsys->chnmon_area + offset, count);
     }
 }
 

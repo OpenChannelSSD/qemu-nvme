@@ -57,6 +57,11 @@ GENERATED_HEADERS += trace/generated-tracers-dtrace.h
 endif
 GENERATED_SOURCES += trace/generated-tracers.c
 
+ifeq ($(TRACE_BACKEND),ust)
+GENERATED_HEADERS += trace/generated-ust-provider.h
+GENERATED_SOURCES += trace/generated-ust.c
+endif
+
 # Don't try to regenerate Makefile or configure
 # We don't generate any of them
 Makefile: ;
@@ -122,13 +127,29 @@ defconfig:
 
 ifneq ($(wildcard config-host.mak),)
 include $(SRC_PATH)/Makefile.objs
+endif
+
+dummy := $(call unnest-vars,, \
+                stub-obj-y \
+                util-obj-y \
+                qga-obj-y \
+                block-obj-y \
+                block-obj-m \
+                common-obj-y \
+                common-obj-m)
+
+ifneq ($(wildcard config-host.mak),)
 include $(SRC_PATH)/tests/Makefile
 endif
 ifeq ($(CONFIG_SMARTCARD_NSS),y)
 include $(SRC_PATH)/libcacard/Makefile
 endif
 
-all: $(DOCS) $(TOOLS) $(HELPERS-y) recurse-all
+all: $(DOCS) $(TOOLS) $(HELPERS-y) recurse-all modules
+
+vl.o: QEMU_CFLAGS+=$(GPROF_CFLAGS)
+
+vl.o: QEMU_CFLAGS+=$(SDL_CFLAGS)
 
 config-host.h: config-host.h-timestamp
 config-host.h-timestamp: config-host.mak
@@ -187,6 +208,9 @@ Makefile: $(version-obj-y) $(version-lobj-y)
 libqemustub.a: $(stub-obj-y)
 libqemuutil.a: $(util-obj-y) qapi-types.o qapi-visit.o
 
+block-modules = $(foreach o,$(block-obj-m),"$(basename $(subst /,-,$o))",) NULL
+util/module.o-cflags = -D'CONFIG_BLOCK_MODULES=$(block-modules)'
+
 ######################################################################
 
 qemu-img.o: qemu-img-cmds.h
@@ -242,6 +266,8 @@ clean:
 	rm -f qemu-options.def
 	find . -name '*.[oda]' -type f -exec rm -f {} +
 	find . -name '*.l[oa]' -type f -exec rm -f {} +
+	find . -name '*$(DSOSUF)' -type f -exec rm -f {} +
+	find . -name '*.mo' -type f -exec rm -f {} +
 	rm -f $(filter-out %.tlb,$(TOOLS)) $(HELPERS-y) qemu-ga TAGS cscope.* *.pod *~ */*~
 	rm -f fsdev/*.pod
 	rm -rf .libs */.libs
@@ -290,7 +316,7 @@ common  de-ch  es     fo  fr-ca  hu     ja  mk  nl-be      pt  sl     tr \
 bepo    cz
 
 ifdef INSTALL_BLOBS
-BLOBS=bios.bin sgabios.bin vgabios.bin vgabios-cirrus.bin \
+BLOBS=bios.bin bios-256k.bin sgabios.bin vgabios.bin vgabios-cirrus.bin \
 vgabios-stdvga.bin vgabios-vmware.bin vgabios-qxl.bin \
 acpi-dsdt.aml q35-acpi-dsdt.aml \
 ppc_rom.bin openbios-sparc32 openbios-sparc64 openbios-ppc QEMU,tcx.bin \
@@ -348,6 +374,12 @@ install-datadir install-localstatedir
 	$(INSTALL_DIR) "$(DESTDIR)$(bindir)"
 ifneq ($(TOOLS),)
 	$(INSTALL_PROG) $(STRIP_OPT) $(TOOLS) "$(DESTDIR)$(bindir)"
+endif
+ifneq ($(CONFIG_MODULES),)
+	$(INSTALL_DIR) "$(DESTDIR)$(qemu_moddir)"
+	for s in $(patsubst %.mo,%$(DSOSUF),$(modules-m)); do \
+		$(INSTALL_PROG) $(STRIP_OPT) $$s "$(DESTDIR)$(qemu_moddir)/$${s//\//-}"; \
+	done
 endif
 ifneq ($(HELPERS-y),)
 	$(INSTALL_DIR) "$(DESTDIR)$(libexecdir)"

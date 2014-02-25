@@ -48,7 +48,9 @@
 #include "qmp-commands.h"
 #include "trace.h"
 #include "exec/cpu-all.h"
+#include "exec/ram_addr.h"
 #include "hw/acpi/acpi.h"
+#include "qemu/host-utils.h"
 
 #ifdef DEBUG_ARCH_INIT
 #define DPRINTF(fmt, ...) \
@@ -162,20 +164,22 @@ static struct {
     uint8_t *encoded_buf;
     /* buffer for storing page content */
     uint8_t *current_buf;
-    /* buffer used for XBZRLE decoding */
-    uint8_t *decoded_buf;
     /* Cache for XBZRLE */
     PageCache *cache;
 } XBZRLE = {
     .encoded_buf = NULL,
     .current_buf = NULL,
-    .decoded_buf = NULL,
     .cache = NULL,
 };
-
+/* buffer used for XBZRLE decoding */
+static uint8_t *xbzrle_decoded_buf;
 
 int64_t xbzrle_cache_resize(int64_t new_size)
 {
+    if (new_size < TARGET_PAGE_SIZE) {
+        return -1;
+    }
+
     if (XBZRLE.cache != NULL) {
         return cache_resize(XBZRLE.cache, new_size / TARGET_PAGE_SIZE) *
             TARGET_PAGE_SIZE;
@@ -280,7 +284,9 @@ static int save_xbzrle_page(QEMUFile *f, uint8_t *current_data,
 
     if (!cache_is_cached(XBZRLE.cache, current_addr)) {
         if (!last_stage) {
-            cache_insert(XBZRLE.cache, current_addr, current_data);
+            if (cache_insert(XBZRLE.cache, current_addr, current_data) == -1) {
+                return -1;
+            }
         }
         acct_info.xbzrle_cache_miss++;
         return -1;
@@ -359,11 +365,10 @@ ram_addr_t migration_bitmap_find_and_reset_dirty(MemoryRegion *mr,
     return (next - base) << TARGET_PAGE_BITS;
 }
 
-static inline bool migration_bitmap_set_dirty(MemoryRegion *mr,
-                                              ram_addr_t offset)
+static inline bool migration_bitmap_set_dirty(ram_addr_t addr)
 {
     bool ret;
-    int nr = (mr->ram_addr + offset) >> TARGET_PAGE_BITS;
+    int nr = addr >> TARGET_PAGE_BITS;
 
     ret = test_and_set_bit(nr, migration_bitmap);
 
@@ -373,12 +378,47 @@ static inline bool migration_bitmap_set_dirty(MemoryRegion *mr,
     return ret;
 }
 
+static void migration_bitmap_sync_range(ram_addr_t start, ram_addr_t length)
+{
+    ram_addr_t addr;
+    unsigned long page = BIT_WORD(start >> TARGET_PAGE_BITS);
+
+    /* start address is aligned at the start of a word? */
+    if (((page * BITS_PER_LONG) << TARGET_PAGE_BITS) == start) {
+        int k;
+        int nr = BITS_TO_LONGS(length >> TARGET_PAGE_BITS);
+        unsigned long *src = ram_list.dirty_memory[DIRTY_MEMORY_MIGRATION];
+
+        for (k = page; k < page + nr; k++) {
+            if (src[k]) {
+                unsigned long new_dirty;
+                new_dirty = ~migration_bitmap[k];
+                migration_bitmap[k] |= src[k];
+                new_dirty &= src[k];
+                migration_dirty_pages += ctpopl(new_dirty);
+                src[k] = 0;
+            }
+        }
+    } else {
+        for (addr = 0; addr < length; addr += TARGET_PAGE_SIZE) {
+            if (cpu_physical_memory_get_dirty(start + addr,
+                                              TARGET_PAGE_SIZE,
+                                              DIRTY_MEMORY_MIGRATION)) {
+                cpu_physical_memory_reset_dirty(start + addr,
+                                                TARGET_PAGE_SIZE,
+                                                DIRTY_MEMORY_MIGRATION);
+                migration_bitmap_set_dirty(start + addr);
+            }
+        }
+    }
+}
+
+
 /* Needs iothread lock! */
 
 static void migration_bitmap_sync(void)
 {
     RAMBlock *block;
-    ram_addr_t addr;
     uint64_t num_dirty_pages_init = migration_dirty_pages;
     MigrationState *s = migrate_get_current();
     static int64_t start_time;
@@ -399,13 +439,7 @@ static void migration_bitmap_sync(void)
     address_space_sync_dirty_bitmap(&address_space_memory);
 
     QTAILQ_FOREACH(block, &ram_list.blocks, next) {
-        for (addr = 0; addr < block->length; addr += TARGET_PAGE_SIZE) {
-            if (memory_region_test_and_clear_dirty(block->mr,
-                                                   addr, TARGET_PAGE_SIZE,
-                                                   DIRTY_MEMORY_MIGRATION)) {
-                migration_bitmap_set_dirty(block->mr, addr);
-            }
-        }
+        migration_bitmap_sync_range(block->mr->ram_addr, block->length);
     }
     trace_migration_bitmap_sync_end(migration_dirty_pages
                                     - num_dirty_pages_init);
@@ -572,6 +606,12 @@ uint64_t ram_bytes_total(void)
     return total;
 }
 
+void free_xbzrle_decoded_buf(void)
+{
+    g_free(xbzrle_decoded_buf);
+    xbzrle_decoded_buf = NULL;
+}
+
 static void migration_end(void)
 {
     if (migration_bitmap) {
@@ -585,8 +625,9 @@ static void migration_end(void)
         g_free(XBZRLE.cache);
         g_free(XBZRLE.encoded_buf);
         g_free(XBZRLE.current_buf);
-        g_free(XBZRLE.decoded_buf);
         XBZRLE.cache = NULL;
+        XBZRLE.encoded_buf = NULL;
+        XBZRLE.current_buf = NULL;
     }
 }
 
@@ -625,8 +666,22 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
             DPRINTF("Error creating cache\n");
             return -1;
         }
-        XBZRLE.encoded_buf = g_malloc0(TARGET_PAGE_SIZE);
-        XBZRLE.current_buf = g_malloc(TARGET_PAGE_SIZE);
+
+        /* We prefer not to abort if there is no memory */
+        XBZRLE.encoded_buf = g_try_malloc0(TARGET_PAGE_SIZE);
+        if (!XBZRLE.encoded_buf) {
+            DPRINTF("Error allocating encoded_buf\n");
+            return -1;
+        }
+
+        XBZRLE.current_buf = g_try_malloc(TARGET_PAGE_SIZE);
+        if (!XBZRLE.current_buf) {
+            DPRINTF("Error allocating current_buf\n");
+            g_free(XBZRLE.encoded_buf);
+            XBZRLE.encoded_buf = NULL;
+            return -1;
+        }
+
         acct_clear();
     }
 
@@ -777,8 +832,8 @@ static int load_xbzrle(QEMUFile *f, ram_addr_t addr, void *host)
     unsigned int xh_len;
     int xh_flags;
 
-    if (!XBZRLE.decoded_buf) {
-        XBZRLE.decoded_buf = g_malloc(TARGET_PAGE_SIZE);
+    if (!xbzrle_decoded_buf) {
+        xbzrle_decoded_buf = g_malloc(TARGET_PAGE_SIZE);
     }
 
     /* extract RLE header */
@@ -795,10 +850,10 @@ static int load_xbzrle(QEMUFile *f, ram_addr_t addr, void *host)
         return -1;
     }
     /* load data and decode */
-    qemu_get_buffer(f, XBZRLE.decoded_buf, xh_len);
+    qemu_get_buffer(f, xbzrle_decoded_buf, xh_len);
 
     /* decode RLE */
-    ret = xbzrle_decode_buffer(XBZRLE.decoded_buf, xh_len, host,
+    ret = xbzrle_decode_buffer(xbzrle_decoded_buf, xh_len, host,
                                TARGET_PAGE_SIZE);
     if (ret == -1) {
         fprintf(stderr, "Failed to load XBZRLE page - decode error!\n");

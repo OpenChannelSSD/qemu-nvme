@@ -35,6 +35,7 @@
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
 #include "exec/address-spaces.h"
+#include "hw/hotplug.h"
 
 //#define DEBUG_PCI
 #ifdef DEBUG_PCI
@@ -46,7 +47,7 @@
 static void pcibus_dev_print(Monitor *mon, DeviceState *dev, int indent);
 static char *pcibus_get_dev_path(DeviceState *dev);
 static char *pcibus_get_fw_dev_path(DeviceState *dev);
-static int pcibus_reset(BusState *qbus);
+static void pcibus_reset(BusState *qbus);
 static void pci_bus_finalize(Object *obj);
 
 static Property pci_props[] = {
@@ -167,15 +168,9 @@ void pci_device_deassert_intx(PCIDevice *dev)
     }
 }
 
-/*
- * This function is called on #RST and FLR.
- * FLR if PCI_EXP_DEVCTL_BCR_FLR is set
- */
-void pci_device_reset(PCIDevice *dev)
+static void pci_do_device_reset(PCIDevice *dev)
 {
     int r;
-
-    qdev_reset_all(&dev->qdev);
 
     dev->irq_state = 0;
     pci_update_irq_status(dev);
@@ -209,30 +204,34 @@ void pci_device_reset(PCIDevice *dev)
 }
 
 /*
- * Trigger pci bus reset under a given bus.
- * To be called on RST# assert.
+ * This function is called on #RST and FLR.
+ * FLR if PCI_EXP_DEVCTL_BCR_FLR is set
  */
-void pci_bus_reset(PCIBus *bus)
+void pci_device_reset(PCIDevice *dev)
 {
-    int i;
-
-    for (i = 0; i < bus->nirq; i++) {
-        bus->irq_count[i] = 0;
-    }
-    for (i = 0; i < ARRAY_SIZE(bus->devices); ++i) {
-        if (bus->devices[i]) {
-            pci_device_reset(bus->devices[i]);
-        }
-    }
+    qdev_reset_all(&dev->qdev);
+    pci_do_device_reset(dev);
 }
 
-static int pcibus_reset(BusState *qbus)
+/*
+ * Trigger pci bus reset under a given bus.
+ * Called via qbus_reset_all on RST# assert, after the devices
+ * have been reset qdev_reset_all-ed already.
+ */
+static void pcibus_reset(BusState *qbus)
 {
-    pci_bus_reset(DO_UPCAST(PCIBus, qbus, qbus));
+    PCIBus *bus = DO_UPCAST(PCIBus, qbus, qbus);
+    int i;
 
-    /* topology traverse is done by pci_bus_reset().
-       Tell qbus/qdev walker not to traverse the tree */
-    return 1;
+    for (i = 0; i < ARRAY_SIZE(bus->devices); ++i) {
+        if (bus->devices[i]) {
+            pci_do_device_reset(bus->devices[i]);
+        }
+    }
+
+    for (i = 0; i < bus->nirq; i++) {
+        assert(bus->irq_count[i] == 0);
+    }
 }
 
 static void pci_host_bus_register(PCIBus *bus, DeviceState *parent)
@@ -346,13 +345,6 @@ void pci_bus_irqs(PCIBus *bus, pci_set_irq_fn set_irq, pci_map_irq_fn map_irq,
     bus->irq_opaque = irq_opaque;
     bus->nirq = nirq;
     bus->irq_count = g_malloc0(nirq * sizeof(bus->irq_count[0]));
-}
-
-void pci_bus_hotplug(PCIBus *bus, pci_hotplug_fn hotplug, DeviceState *qdev)
-{
-    bus->qbus.allow_hotplug = 1;
-    bus->hotplug = hotplug;
-    bus->hotplug_qdev = qdev;
 }
 
 PCIBus *pci_register_bus(DeviceState *parent, const char *name,
@@ -795,6 +787,15 @@ static void pci_config_free(PCIDevice *pci_dev)
     g_free(pci_dev->used);
 }
 
+static void do_pci_unregister_device(PCIDevice *pci_dev)
+{
+    pci_dev->bus->devices[pci_dev->devfn] = NULL;
+    pci_config_free(pci_dev);
+
+    address_space_destroy(&pci_dev->bus_master_as);
+    memory_region_destroy(&pci_dev->bus_master_enable_region);
+}
+
 /* -1 for devfn means auto assign */
 static PCIDevice *do_pci_register_device(PCIDevice *pci_dev, PCIBus *bus,
                                          const char *name, int devfn)
@@ -860,7 +861,7 @@ static PCIDevice *do_pci_register_device(PCIDevice *pci_dev, PCIBus *bus,
         pci_init_mask_bridge(pci_dev);
     }
     if (pci_init_multifunction(bus, pci_dev)) {
-        pci_config_free(pci_dev);
+        do_pci_unregister_device(pci_dev);
         return NULL;
     }
 
@@ -873,15 +874,6 @@ static PCIDevice *do_pci_register_device(PCIDevice *pci_dev, PCIBus *bus,
     bus->devices[devfn] = pci_dev;
     pci_dev->version_id = 2; /* Current pci device vmstate version */
     return pci_dev;
-}
-
-static void do_pci_unregister_device(PCIDevice *pci_dev)
-{
-    pci_dev->bus->devices[pci_dev->devfn] = NULL;
-    pci_config_free(pci_dev);
-
-    address_space_destroy(&pci_dev->bus_master_as);
-    memory_region_destroy(&pci_dev->bus_master_enable_region);
 }
 
 static void pci_unregister_io_regions(PCIDevice *pci_dev)
@@ -1330,7 +1322,7 @@ static const pci_class_desc pci_class_descriptions[] =
     { 0x0601, "ISA bridge", "isa"},
     { 0x0602, "EISA bridge", "eisa"},
     { 0x0603, "MC bridge", "mca"},
-    { 0x0604, "PCI bridge", "pci"},
+    { 0x0604, "PCI bridge", "pci-bridge"},
     { 0x0605, "PCMCIA bridge", "pcmcia"},
     { 0x0606, "NUBUS bridge", "nubus"},
     { 0x0607, "CARDBUS bridge", "cardbus"},
@@ -1706,6 +1698,34 @@ static PCIBus *pci_find_bus_nr(PCIBus *bus, int bus_num)
     return NULL;
 }
 
+void pci_for_each_bus_depth_first(PCIBus *bus,
+                                  void *(*begin)(PCIBus *bus, void *parent_state),
+                                  void (*end)(PCIBus *bus, void *state),
+                                  void *parent_state)
+{
+    PCIBus *sec;
+    void *state;
+
+    if (!bus) {
+        return;
+    }
+
+    if (begin) {
+        state = begin(bus, parent_state);
+    } else {
+        state = parent_state;
+    }
+
+    QLIST_FOREACH(sec, &bus->child, sibling) {
+        pci_for_each_bus_depth_first(sec, begin, end, state);
+    }
+
+    if (end) {
+        end(bus, state);
+    }
+}
+
+
 PCIDevice *pci_find_device(PCIBus *bus, int bus_num, uint8_t devfn)
 {
     bus = pci_find_bus_nr(bus, bus_num);
@@ -1735,11 +1755,7 @@ static int pci_qdev_init(DeviceState *qdev)
                                      pci_dev->devfn);
     if (pci_dev == NULL)
         return -1;
-    if (qdev->hotplugged && pc->no_hotplug) {
-        qerror_report(QERR_DEVICE_NO_HOTPLUG, object_get_typename(OBJECT(pci_dev)));
-        do_pci_unregister_device(pci_dev);
-        return -1;
-    }
+
     if (pc->init) {
         rc = pc->init(pci_dev);
         if (rc != 0) {
@@ -1756,32 +1772,7 @@ static int pci_qdev_init(DeviceState *qdev)
     }
     pci_add_option_rom(pci_dev, is_default_rom);
 
-    if (bus->hotplug) {
-        /* Let buses differentiate between hotplug and when device is
-         * enabled during qemu machine creation. */
-        rc = bus->hotplug(bus->hotplug_qdev, pci_dev,
-                          qdev->hotplugged ? PCI_HOTPLUG_ENABLED:
-                          PCI_COLDPLUG_ENABLED);
-        if (rc != 0) {
-            int r = pci_unregister_device(&pci_dev->qdev);
-            assert(!r);
-            return rc;
-        }
-    }
     return 0;
-}
-
-static int pci_unplug_device(DeviceState *qdev)
-{
-    PCIDevice *dev = PCI_DEVICE(qdev);
-    PCIDeviceClass *pc = PCI_DEVICE_GET_CLASS(dev);
-
-    if (pc->no_hotplug) {
-        qerror_report(QERR_DEVICE_NO_HOTPLUG, object_get_typename(OBJECT(dev)));
-        return -1;
-    }
-    return dev->bus->hotplug(dev->bus->hotplug_qdev, dev,
-                             PCI_HOTPLUG_DISABLED);
 }
 
 PCIDevice *pci_create_multifunction(PCIBus *bus, int devfn, bool multifunction,
@@ -2254,7 +2245,6 @@ static void pci_device_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *k = DEVICE_CLASS(klass);
     k->init = pci_qdev_init;
-    k->unplug = pci_unplug_device;
     k->exit = pci_unregister_device;
     k->bus_type = TYPE_PCI_BUS;
     k->props = pci_props;

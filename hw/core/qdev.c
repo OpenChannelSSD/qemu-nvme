@@ -32,6 +32,7 @@
 #include "qapi/visitor.h"
 #include "qapi/qmp/qjson.h"
 #include "monitor/monitor.h"
+#include "hw/hotplug.h"
 
 int qdev_hotplug = 0;
 static bool qdev_hot_added = false;
@@ -212,13 +213,22 @@ void qdev_unplug(DeviceState *dev, Error **errp)
         error_set(errp, QERR_BUS_NO_HOTPLUG, dev->parent_bus->name);
         return;
     }
-    assert(dc->unplug != NULL);
+
+    if (!dc->hotpluggable) {
+        error_set(errp, QERR_DEVICE_NO_HOTPLUG,
+                  object_get_typename(OBJECT(dev)));
+        return;
+    }
 
     qdev_hot_removed = true;
 
-    if (dc->unplug(dev) < 0) {
-        error_set(errp, QERR_UNDEFINED_ERROR);
-        return;
+    if (dev->parent_bus && dev->parent_bus->hotplug_handler) {
+        hotplug_handler_unplug(dev->parent_bus->hotplug_handler, dev, errp);
+    } else {
+        assert(dc->unplug != NULL);
+        if (dc->unplug(dev) < 0) { /* legacy handler */
+            error_set(errp, QERR_UNDEFINED_ERROR);
+        }
     }
 }
 
@@ -233,19 +243,19 @@ static int qbus_reset_one(BusState *bus, void *opaque)
 {
     BusClass *bc = BUS_GET_CLASS(bus);
     if (bc->reset) {
-        return bc->reset(bus);
+        bc->reset(bus);
     }
     return 0;
 }
 
 void qdev_reset_all(DeviceState *dev)
 {
-    qdev_walk_children(dev, qdev_reset_one, qbus_reset_one, NULL);
+    qdev_walk_children(dev, NULL, NULL, qdev_reset_one, qbus_reset_one, NULL);
 }
 
 void qbus_reset_all(BusState *bus)
 {
-    qbus_walk_children(bus, qdev_reset_one, qbus_reset_one, NULL);
+    qbus_walk_children(bus, NULL, NULL, qdev_reset_one, qbus_reset_one, NULL);
 }
 
 void qbus_reset_all_fn(void *opaque)
@@ -337,22 +347,33 @@ BusState *qdev_get_child_bus(DeviceState *dev, const char *name)
     return NULL;
 }
 
-int qbus_walk_children(BusState *bus, qdev_walkerfn *devfn,
-                       qbus_walkerfn *busfn, void *opaque)
+int qbus_walk_children(BusState *bus,
+                       qdev_walkerfn *pre_devfn, qbus_walkerfn *pre_busfn,
+                       qdev_walkerfn *post_devfn, qbus_walkerfn *post_busfn,
+                       void *opaque)
 {
     BusChild *kid;
     int err;
 
-    if (busfn) {
-        err = busfn(bus, opaque);
+    if (pre_busfn) {
+        err = pre_busfn(bus, opaque);
         if (err) {
             return err;
         }
     }
 
     QTAILQ_FOREACH(kid, &bus->children, sibling) {
-        err = qdev_walk_children(kid->child, devfn, busfn, opaque);
+        err = qdev_walk_children(kid->child,
+                                 pre_devfn, pre_busfn,
+                                 post_devfn, post_busfn, opaque);
         if (err < 0) {
+            return err;
+        }
+    }
+
+    if (post_busfn) {
+        err = post_busfn(bus, opaque);
+        if (err) {
             return err;
         }
     }
@@ -360,22 +381,32 @@ int qbus_walk_children(BusState *bus, qdev_walkerfn *devfn,
     return 0;
 }
 
-int qdev_walk_children(DeviceState *dev, qdev_walkerfn *devfn,
-                       qbus_walkerfn *busfn, void *opaque)
+int qdev_walk_children(DeviceState *dev,
+                       qdev_walkerfn *pre_devfn, qbus_walkerfn *pre_busfn,
+                       qdev_walkerfn *post_devfn, qbus_walkerfn *post_busfn,
+                       void *opaque)
 {
     BusState *bus;
     int err;
 
-    if (devfn) {
-        err = devfn(dev, opaque);
+    if (pre_devfn) {
+        err = pre_devfn(dev, opaque);
         if (err) {
             return err;
         }
     }
 
     QLIST_FOREACH(bus, &dev->child_bus, sibling) {
-        err = qbus_walk_children(bus, devfn, busfn, opaque);
+        err = qbus_walk_children(bus, pre_devfn, pre_busfn,
+                                 post_devfn, post_busfn, opaque);
         if (err < 0) {
+            return err;
+        }
+    }
+
+    if (post_devfn) {
+        err = post_devfn(dev, opaque);
+        if (err) {
             return err;
         }
     }
@@ -481,11 +512,6 @@ BusState *qbus_create(const char *typename, DeviceState *parent, const char *nam
     return bus;
 }
 
-void qbus_free(BusState *bus)
-{
-    object_unparent(OBJECT(bus));
-}
-
 static char *bus_get_fw_dev_path(BusState *bus, DeviceState *dev)
 {
     BusClass *bc = BUS_GET_CLASS(bus);
@@ -562,31 +588,6 @@ static void qdev_get_legacy_property(Object *obj, Visitor *v, void *opaque,
     visit_type_str(v, &ptr, name, errp);
 }
 
-static void qdev_set_legacy_property(Object *obj, Visitor *v, void *opaque,
-                                     const char *name, Error **errp)
-{
-    DeviceState *dev = DEVICE(obj);
-    Property *prop = opaque;
-    Error *local_err = NULL;
-    char *ptr = NULL;
-    int ret;
-
-    if (dev->realized) {
-        qdev_prop_set_after_realize(dev, name, errp);
-        return;
-    }
-
-    visit_type_str(v, &ptr, name, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
-        return;
-    }
-
-    ret = prop->info->parse(dev, prop, ptr);
-    error_set_from_qdev_prop_error(errp, ret, dev, prop, ptr);
-    g_free(ptr);
-}
-
 /**
  * @qdev_add_legacy_property - adds a legacy property
  *
@@ -599,25 +600,20 @@ static void qdev_set_legacy_property(Object *obj, Visitor *v, void *opaque,
 void qdev_property_add_legacy(DeviceState *dev, Property *prop,
                               Error **errp)
 {
-    gchar *name, *type;
+    gchar *name;
 
     /* Register pointer properties as legacy properties */
-    if (!prop->info->print && !prop->info->parse &&
-        (prop->info->set || prop->info->get)) {
+    if (!prop->info->print && prop->info->get) {
         return;
     }
 
     name = g_strdup_printf("legacy-%s", prop->name);
-    type = g_strdup_printf("legacy<%s>",
-                           prop->info->legacy_name ?: prop->info->name);
-
-    object_property_add(OBJECT(dev), name, type,
+    object_property_add(OBJECT(dev), name, "str",
                         prop->info->print ? qdev_get_legacy_property : prop->info->get,
-                        prop->info->parse ? qdev_set_legacy_property : prop->info->set,
+                        NULL,
                         NULL,
                         prop, errp);
 
-    g_free(type);
     g_free(name);
 }
 
@@ -656,14 +652,13 @@ void qdev_property_add_static(DeviceState *dev, Property *prop,
     }
 
     if (prop->qtype == QTYPE_QBOOL) {
-        object_property_set_bool(obj, prop->defval, prop->name, &local_err);
+        object_property_set_bool(obj, prop->defval, prop->name, &error_abort);
     } else if (prop->info->enum_table) {
         object_property_set_str(obj, prop->info->enum_table[prop->defval],
-                                prop->name, &local_err);
+                                prop->name, &error_abort);
     } else if (prop->qtype == QTYPE_QINT) {
-        object_property_set_int(obj, prop->defval, prop->name, &local_err);
+        object_property_set_int(obj, prop->defval, prop->name, &error_abort);
     }
-    assert_no_error(local_err);
 }
 
 static bool device_get_realized(Object *obj, Error **err)
@@ -678,6 +673,11 @@ static void device_set_realized(Object *obj, bool value, Error **err)
     DeviceClass *dc = DEVICE_GET_CLASS(dev);
     Error *local_err = NULL;
 
+    if (dev->hotplugged && !dc->hotpluggable) {
+        error_set(err, QERR_DEVICE_NO_HOTPLUG, object_get_typename(obj));
+        return;
+    }
+
     if (value && !dev->realized) {
         if (!obj->parent && local_err == NULL) {
             static int unattached_count;
@@ -691,6 +691,12 @@ static void device_set_realized(Object *obj, bool value, Error **err)
 
         if (dc->realize) {
             dc->realize(dev, &local_err);
+        }
+
+        if (dev->parent_bus && dev->parent_bus->hotplug_handler &&
+            local_err == NULL) {
+            hotplug_handler_plug(dev->parent_bus->hotplug_handler,
+                                 dev, &local_err);
         }
 
         if (qdev_get_vmsd(dev) && local_err == NULL) {
@@ -718,12 +724,19 @@ static void device_set_realized(Object *obj, bool value, Error **err)
     dev->realized = value;
 }
 
+static bool device_get_hotpluggable(Object *obj, Error **err)
+{
+    DeviceClass *dc = DEVICE_GET_CLASS(obj);
+    DeviceState *dev = DEVICE(obj);
+
+    return dc->hotpluggable && dev->parent_bus->allow_hotplug;
+}
+
 static void device_initfn(Object *obj)
 {
     DeviceState *dev = DEVICE(obj);
     ObjectClass *class;
     Property *prop;
-    Error *err = NULL;
 
     if (qdev_hotplug) {
         dev->hotplugged = 1;
@@ -735,35 +748,25 @@ static void device_initfn(Object *obj)
 
     object_property_add_bool(obj, "realized",
                              device_get_realized, device_set_realized, NULL);
+    object_property_add_bool(obj, "hotpluggable",
+                             device_get_hotpluggable, NULL, NULL);
 
     class = object_get_class(OBJECT(dev));
     do {
         for (prop = DEVICE_CLASS(class)->props; prop && prop->name; prop++) {
-            qdev_property_add_legacy(dev, prop, &err);
-            assert_no_error(err);
-            qdev_property_add_static(dev, prop, &err);
-            assert_no_error(err);
+            qdev_property_add_legacy(dev, prop, &error_abort);
+            qdev_property_add_static(dev, prop, &error_abort);
         }
         class = object_class_get_parent(class);
     } while (class != object_class_by_name(TYPE_DEVICE));
-    if (err != NULL) {
-        qerror_report_err(err);
-        error_free(err);
-        exit(1);
-    }
 
     object_property_add_link(OBJECT(dev), "parent_bus", TYPE_BUS,
-                             (Object **)&dev->parent_bus, &err);
-    assert_no_error(err);
+                             (Object **)&dev->parent_bus, &error_abort);
 }
 
 static void device_post_init(Object *obj)
 {
-    DeviceState *dev = DEVICE(obj);
-    Error *err = NULL;
-
-    qdev_prop_set_globals(dev, &err);
-    assert_no_error(err);
+    qdev_prop_set_globals(DEVICE(obj), &error_abort);
 }
 
 /* Unlink device from bus and free the structure.  */
@@ -783,6 +786,14 @@ static void device_class_base_init(ObjectClass *class, void *data)
      * so do not propagate them to the subclasses.
      */
     klass->props = NULL;
+
+    /* by default all devices were considered as hotpluggable,
+     * so with intent to check it in generic qdev_unplug() /
+     * device_set_realized() functions make every device
+     * hotpluggable. Devices that shouldn't be hotpluggable,
+     * should override it in their class_init()
+     */
+    klass->hotpluggable = true;
 }
 
 static void device_unparent(Object *obj)
@@ -794,7 +805,7 @@ static void device_unparent(Object *obj)
 
     while (dev->num_child_bus) {
         bus = QLIST_FIRST(&dev->child_bus);
-        qbus_free(bus);
+        object_unparent(OBJECT(bus));
     }
     if (dev->realized) {
         object_property_set_bool(obj, false, "realized", NULL);
@@ -868,6 +879,9 @@ static void qbus_initfn(Object *obj)
     BusState *bus = BUS(obj);
 
     QTAILQ_INIT(&bus->children);
+    object_property_add_link(obj, QDEV_HOTPLUG_HANDLER_PROPERTY,
+                             TYPE_HOTPLUG_HANDLER,
+                             (Object **)&bus->hotplug_handler, NULL);
 }
 
 static char *default_bus_get_fw_dev_path(DeviceState *dev)

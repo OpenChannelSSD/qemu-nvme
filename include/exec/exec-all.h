@@ -81,6 +81,7 @@ void cpu_gen_init(void);
 int cpu_gen_code(CPUArchState *env, struct TranslationBlock *tb,
                  int *gen_code_size_ptr);
 bool cpu_restore_state(CPUArchState *env, uintptr_t searched_pc);
+void page_size_init(void);
 
 void QEMU_NORETURN cpu_resume_from_signal(CPUArchState *env1, void *puc);
 void QEMU_NORETURN cpu_io_recompile(CPUArchState *env, uintptr_t retaddr);
@@ -95,13 +96,14 @@ void tb_invalidate_phys_page_range(tb_page_addr_t start, tb_page_addr_t end,
 void tb_invalidate_phys_range(tb_page_addr_t start, tb_page_addr_t end,
                               int is_cpu_write_access);
 #if !defined(CONFIG_USER_ONLY)
+void tcg_cpu_address_space_init(CPUState *cpu, AddressSpace *as);
 /* cputlb.c */
 void tlb_flush_page(CPUArchState *env, target_ulong addr);
 void tlb_flush(CPUArchState *env, int flush_global);
 void tlb_set_page(CPUArchState *env, target_ulong vaddr,
                   hwaddr paddr, int prot,
                   int mmu_idx, target_ulong size);
-void tb_invalidate_phys_addr(hwaddr addr);
+void tb_invalidate_phys_addr(AddressSpace *as, hwaddr addr);
 #else
 static inline void tlb_flush_page(CPUArchState *env, target_ulong addr)
 {
@@ -324,7 +326,7 @@ extern uintptr_t tci_tb_ptr;
 
 void phys_mem_set_alloc(void *(*alloc)(size_t));
 
-struct MemoryRegion *iotlb_to_region(hwaddr index);
+struct MemoryRegion *iotlb_to_region(AddressSpace *as, hwaddr index);
 bool io_mem_read(struct MemoryRegion *mr, hwaddr addr,
                  uint64_t *pvalue, unsigned size);
 bool io_mem_write(struct MemoryRegion *mr, hwaddr addr,

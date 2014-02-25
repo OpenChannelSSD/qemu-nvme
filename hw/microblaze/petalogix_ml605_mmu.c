@@ -39,7 +39,6 @@
 #include "hw/ssi.h"
 
 #include "boot.h"
-#include "pic_cpu.h"
 
 #include "hw/stream.h"
 
@@ -76,26 +75,21 @@ static void
 petalogix_ml605_init(QEMUMachineInitArgs *args)
 {
     ram_addr_t ram_size = args->ram_size;
-    const char *cpu_model = args->cpu_model;
     MemoryRegion *address_space_mem = get_system_memory();
     DeviceState *dev, *dma, *eth0;
     Object *ds, *cs;
     MicroBlazeCPU *cpu;
     SysBusDevice *busdev;
-    CPUMBState *env;
     DriveInfo *dinfo;
     int i;
     hwaddr ddr_base = MEMORY_BASEADDR;
     MemoryRegion *phys_lmb_bram = g_new(MemoryRegion, 1);
     MemoryRegion *phys_ram = g_new(MemoryRegion, 1);
-    qemu_irq irq[32], *cpu_irq;
+    qemu_irq irq[32];
 
     /* init CPUs */
-    if (cpu_model == NULL) {
-        cpu_model = "microblaze";
-    }
-    cpu = cpu_mb_init(cpu_model);
-    env = &cpu->env;
+    cpu = MICROBLAZE_CPU(object_new(TYPE_MICROBLAZE_CPU));
+    object_property_set_bool(OBJECT(cpu), true, "realized", &error_abort);
 
     /* Attach emulated BRAM through the LMB.  */
     memory_region_init_ram(phys_lmb_bram, NULL, "petalogix_ml605.lmb_bram",
@@ -117,8 +111,8 @@ petalogix_ml605_init(QEMUMachineInitArgs *args)
                           2, 0x89, 0x18, 0x0000, 0x0, 0);
 
 
-    cpu_irq = microblaze_pic_init_cpu(env);
-    dev = xilinx_intc_create(INTC_BASEADDR, cpu_irq[0], 4);
+    dev = xilinx_intc_create(INTC_BASEADDR, qdev_get_gpio_in(DEVICE(cpu),
+                             MB_CPU_IRQ), 4);
     for (i = 0; i < 32; i++) {
         irq[i] = qdev_get_gpio_in(dev, i);
     }

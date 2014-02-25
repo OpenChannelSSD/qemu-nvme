@@ -2096,7 +2096,7 @@ ETEXI
 DEF("iscsi", HAS_ARG, QEMU_OPTION_iscsi,
     "-iscsi [user=user][,password=password]\n"
     "       [,header-digest=CRC32C|CR32C-NONE|NONE-CRC32C|NONE\n"
-    "       [,initiator-name=iqn]\n"
+    "       [,initiator-name=initiator-iqn][,id=target-iqn]\n"
     "                iSCSI session parameters\n", QEMU_ARCH_ALL)
 STEXI
 
@@ -2419,6 +2419,8 @@ vc:80Cx24C
 No device is allocated.
 @item null
 void device
+@item chardev:@var{id}
+Use a named character device defined with the @code{-chardev} option.
 @item /dev/XXX
 [Linux only] Use host tty, e.g. @file{/dev/ttyS0}. The host serial port
 parameters are set according to the emulated ones.

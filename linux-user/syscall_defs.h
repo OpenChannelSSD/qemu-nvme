@@ -27,6 +27,7 @@
 #define SOCKOP_getsockopt       15
 #define SOCKOP_sendmsg          16
 #define SOCKOP_recvmsg          17
+#define SOCKOP_accept4          18
 
 #define IPCOP_semop		1
 #define IPCOP_semget		2
@@ -900,6 +901,7 @@ struct target_pollfd {
 #define TARGET_BLKSECTSET TARGET_IO(0x12,102)/* set max sectors per request (ll_rw_blk.c) */
 #define TARGET_BLKSECTGET TARGET_IO(0x12,103)/* get max sectors per request (ll_rw_blk.c) */
 #define TARGET_BLKSSZGET  TARGET_IO(0x12,104)/* get block device sector size */
+#define TARGET_BLKPG      TARGET_IO(0x12,105)/* Partition table and disk geometry handling */
 /* A jump here: 108-111 have been used for various private purposes. */
 #define TARGET_BLKBSZGET  TARGET_IOR(0x12, 112, abi_ulong)
 #define TARGET_BLKBSZSET  TARGET_IOW(0x12, 113, abi_ulong)
