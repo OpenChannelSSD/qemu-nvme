@@ -2150,7 +2150,7 @@ static int nvme_init(PCIDevice *pci_dev)
     }
 
     bs_size = bdrv_getlength(n->conf.bs);
-    if (bs_size <= 0) {
+    if (bs_size < 0) {
         return -1;
     }
 
