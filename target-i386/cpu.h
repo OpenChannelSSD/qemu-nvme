@@ -38,8 +38,10 @@
 
 #ifdef TARGET_X86_64
 #define ELF_MACHINE     EM_X86_64
+#define ELF_MACHINE_UNAME "x86_64"
 #else
 #define ELF_MACHINE     EM_386
+#define ELF_MACHINE_UNAME "i686"
 #endif
 
 #define CPUArchState struct CPUX86State
@@ -1258,6 +1260,9 @@ static inline void cpu_load_efer(CPUX86State *env, uint64_t val)
         env->hflags |= HF_SVME_MASK;
     }
 }
+
+/* fpu_helper.c */
+void cpu_set_mxcsr(CPUX86State *env, uint32_t val);
 
 /* svm_helper.c */
 void cpu_svm_check_intercept_param(CPUX86State *env1, uint32_t type,

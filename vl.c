@@ -38,10 +38,6 @@
 #include <libvdeplug.h>
 #endif
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 #ifdef CONFIG_SDL
 #if defined(__APPLE__) || defined(main)
 #include <SDL.h>
@@ -378,6 +374,10 @@ static QemuOptsList qemu_machine_opts = {
             .name = "firmware",
             .type = QEMU_OPT_STRING,
             .help = "firmware image",
+        },{
+            .name = "kvm-type",
+            .type = QEMU_OPT_STRING,
+            .help = "Specifies the KVM virtualization mode (HV, PR)",
         },
         { /* End of list */ }
     },
@@ -476,6 +476,33 @@ static QemuOptsList qemu_msg_opts = {
             .type = QEMU_OPT_BOOL,
         },
         { /* end of list */ }
+    },
+};
+
+static QemuOptsList qemu_name_opts = {
+    .name = "name",
+    .implied_opt_name = "guest",
+    .merge_lists = true,
+    .head = QTAILQ_HEAD_INITIALIZER(qemu_name_opts.head),
+    .desc = {
+        {
+            .name = "guest",
+            .type = QEMU_OPT_STRING,
+            .help = "Sets the name of the guest.\n"
+                    "This name will be displayed in the SDL window caption.\n"
+                    "The name will also be used for the VNC server",
+        }, {
+            .name = "process",
+            .type = QEMU_OPT_STRING,
+            .help = "Sets the name of the QEMU process, as shown in top etc",
+        }, {
+            .name = "debug-threads",
+            .type = QEMU_OPT_BOOL,
+            .help = "When enabled, name the individual threads; defaults off.\n"
+                    "NOTE: The thread names are for debugging and not a\n"
+                    "stable API.",
+        },
+        { /* End of list */ }
     },
 };
 
@@ -927,6 +954,21 @@ static int parse_sandbox(QemuOpts *opts, void *opaque)
     }
 
     return 0;
+}
+
+static void parse_name(QemuOpts *opts)
+{
+    const char *proc_name;
+
+    if (qemu_opt_get(opts, "debug-threads")) {
+        qemu_thread_naming(qemu_opt_get_bool(opts, "debug-threads", false));
+    }
+    qemu_name = qemu_opt_get(opts, "guest");
+
+    proc_name = qemu_opt_get(opts, "process");
+    if (proc_name) {
+        os_set_proc_name(proc_name);
+    }
 }
 
 bool usb_enabled(bool default_usb)
@@ -1837,6 +1879,8 @@ void qemu_register_suspend_notifier(Notifier *notifier)
 
 void qemu_system_wakeup_request(WakeupReason reason)
 {
+    trace_system_wakeup_request(reason);
+
     if (!runstate_check(RUN_STATE_SUSPENDED)) {
         return;
     }
@@ -2031,6 +2075,16 @@ static bool qxl_vga_available(void)
     return object_class_by_name("qxl-vga");
 }
 
+static bool tcx_vga_available(void)
+{
+    return object_class_by_name("SUNW,tcx");
+}
+
+static bool cg3_vga_available(void)
+{
+    return object_class_by_name("cgthree");
+}
+
 static void select_vgahw (const char *p)
 {
     const char *opts;
@@ -2064,6 +2118,20 @@ static void select_vgahw (const char *p)
             vga_interface_type = VGA_QXL;
         } else {
             fprintf(stderr, "Error: QXL VGA not available\n");
+            exit(0);
+        }
+    } else if (strstart(p, "tcx", &opts)) {
+        if (tcx_vga_available()) {
+            vga_interface_type = VGA_TCX;
+        } else {
+            fprintf(stderr, "Error: TCX framebuffer not available\n");
+            exit(0);
+        }
+    } else if (strstart(p, "cg3", &opts)) {
+        if (cg3_vga_available()) {
+            vga_interface_type = VGA_CG3;
+        } else {
+            fprintf(stderr, "Error: CG3 framebuffer not available\n");
             exit(0);
         }
     } else if (!strstart(p, "none", &opts)) {
@@ -2558,7 +2626,7 @@ static QEMUMachine *machine_parse(const char *name)
     exit(!name || !is_help_option(name));
 }
 
-static int tcg_init(void)
+static int tcg_init(QEMUMachine *machine)
 {
     tcg_exec_init(tcg_tb_size * 1024 * 1024);
     return 0;
@@ -2568,7 +2636,7 @@ static struct {
     const char *opt_name;
     const char *name;
     int (*available)(void);
-    int (*init)(void);
+    int (*init)(QEMUMachine *);
     bool *allowed;
 } accel_list[] = {
     { "tcg", "tcg", tcg_available, tcg_init, &tcg_allowed },
@@ -2577,7 +2645,7 @@ static struct {
     { "qtest", "QTest", qtest_available, qtest_init_accel, &qtest_allowed },
 };
 
-static int configure_accelerator(void)
+static int configure_accelerator(QEMUMachine *machine)
 {
     const char *p;
     char buf[10];
@@ -2604,7 +2672,7 @@ static int configure_accelerator(void)
                     continue;
                 }
                 *(accel_list[i].allowed) = true;
-                ret = accel_list[i].init();
+                ret = accel_list[i].init(machine);
                 if (ret < 0) {
                     init_failed = true;
                     fprintf(stderr, "failed to initialize %s: %s\n",
@@ -2863,6 +2931,7 @@ int main(int argc, char **argv, char **envp)
     qemu_add_opts(&qemu_tpmdev_opts);
     qemu_add_opts(&qemu_realtime_opts);
     qemu_add_opts(&qemu_msg_opts);
+    qemu_add_opts(&qemu_name_opts);
 
     runstate_init();
 
@@ -3608,19 +3677,11 @@ int main(int argc, char **argv, char **envp)
                                 "is no longer supported.\n");
                 break;
             case QEMU_OPTION_name:
-                qemu_name = g_strdup(optarg);
-		 {
-		     char *p = strchr(qemu_name, ',');
-		     if (p != NULL) {
-		        *p++ = 0;
-			if (strncmp(p, "process=", 8)) {
-			    fprintf(stderr, "Unknown subargument %s to -name\n", p);
-			    exit(1);
-			}
-			p += 8;
-			os_set_proc_name(p);
-		     }
-		 }
+                opts = qemu_opts_parse(qemu_find_opts("name"), optarg, 1);
+                if (!opts) {
+                    exit(1);
+                }
+                parse_name(opts);
                 break;
             case QEMU_OPTION_prom_env:
                 if (nb_prom_envs >= MAX_PROM_ENVS) {
@@ -4033,7 +4094,7 @@ int main(int argc, char **argv, char **envp)
         exit(0);
     }
 
-    configure_accelerator();
+    configure_accelerator(machine);
 
     if (qtest_chrdev) {
         Error *local_err = NULL;

@@ -315,7 +315,7 @@ typedef struct X86RegisterInfo32 {
 } X86RegisterInfo32;
 
 #define REGISTER(reg) \
-    [R_##reg] = { .name = #reg, .qapi_enum = X86_C_P_U_REGISTER32_##reg }
+    [R_##reg] = { .name = #reg, .qapi_enum = X86_CPU_REGISTER32_##reg }
 X86RegisterInfo32 x86_reg_info_32[CPU_NB_REGS32] = {
     REGISTER(EAX),
     REGISTER(ECX),
@@ -339,7 +339,7 @@ static const ExtSaveArea ext_save_areas[] = {
     [3] = { .feature = FEAT_7_0_EBX, .bits = CPUID_7_0_EBX_MPX,
             .offset = 0x3c0, .size = 0x40  },
     [4] = { .feature = FEAT_7_0_EBX, .bits = CPUID_7_0_EBX_MPX,
-            .offset = 0x400, .size = 0x10  },
+            .offset = 0x400, .size = 0x40  },
 };
 
 const char *get_register_name_32(unsigned int reg)

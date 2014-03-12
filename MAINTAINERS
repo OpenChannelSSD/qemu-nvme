@@ -158,7 +158,6 @@ Guest CPU Cores (KVM):
 ----------------------
 
 Overall
-M: Gleb Natapov <gleb@redhat.com>
 M: Paolo Bonzini <pbonzini@redhat.com>
 L: kvm@vger.kernel.org
 S: Supported
@@ -176,12 +175,14 @@ S: Maintained
 F: target-ppc/kvm.c
 
 S390
+M: Christian Borntraeger <borntraeger@de.ibm.com>
+M: Cornelia Huck <cornelia.huck@de.ibm.com>
 M: Alexander Graf <agraf@suse.de>
 S: Maintained
 F: target-s390x/kvm.c
+F: hw/intc/s390_flic.[hc]
 
 X86
-M: Gleb Natapov <gleb@redhat.com>
 M: Marcelo Tosatti <mtosatti@redhat.com>
 L: kvm@vger.kernel.org
 S: Supported
@@ -495,10 +496,13 @@ F: hw/s390x/s390-*.c
 
 S390 Virtio-ccw
 M: Cornelia Huck <cornelia.huck@de.ibm.com>
+M: Christian Borntraeger <borntraeger@de.ibm.com>
 M: Alexander Graf <agraf@suse.de>
 S: Supported
 F: hw/s390x/s390-virtio-ccw.c
 F: hw/s390x/css.[hc]
+F: hw/s390x/sclp*.[hc]
+F: hw/s390x/ipl*.[hc]
 T: git git://github.com/cohuck/qemu virtio-ccw-upstr
 
 UniCore32 Machines
@@ -629,6 +633,7 @@ F: hw/block/virtio-blk.c
 
 virtio-ccw
 M: Cornelia Huck <cornelia.huck@de.ibm.com>
+M: Christian Borntraeger <borntraeger@de.ibm.com>
 S: Supported
 F: hw/s390x/virtio-ccw.[hc]
 T: git git://github.com/cohuck/qemu virtio-ccw-upstr
@@ -726,7 +731,7 @@ F: vl.c
 
 Human Monitor (HMP)
 M: Luiz Capitulino <lcapitulino@redhat.com>
-S: Supported
+S: Maintained
 F: monitor.c
 F: hmp.c
 F: hmp-commands.hx
@@ -758,7 +763,7 @@ T: git git://github.com/bonzini/qemu.git nbd-next
 QAPI
 M: Luiz Capitulino <lcapitulino@redhat.com>
 M: Michael Roth <mdroth@linux.vnet.ibm.com>
-S: Supported
+S: Maintained
 F: qapi/
 T: git git://repo.or.cz/qemu/qmp-unstable.git queue/qmp
 
@@ -772,7 +777,7 @@ T: git git://repo.or.cz/qemu/qmp-unstable.git queue/qmp
 
 QMP
 M: Luiz Capitulino <lcapitulino@redhat.com>
-S: Supported
+S: Maintained
 F: qmp.c
 F: monitor.c
 F: qmp-commands.hx

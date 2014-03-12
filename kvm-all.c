@@ -36,6 +36,8 @@
 #include "qemu/event_notifier.h"
 #include "trace.h"
 
+#include "hw/boards.h"
+
 /* This check must be after config-host.h is included */
 #ifdef CONFIG_EVENTFD
 #include <sys/eventfd.h>
@@ -1298,10 +1300,17 @@ static int kvm_irqchip_create(KVMState *s)
         return 0;
     }
 
-    ret = kvm_vm_ioctl(s, KVM_CREATE_IRQCHIP);
+    /* First probe and see if there's a arch-specific hook to create the
+     * in-kernel irqchip for us */
+    ret = kvm_arch_irqchip_create(s);
     if (ret < 0) {
-        fprintf(stderr, "Create kernel irqchip failed\n");
         return ret;
+    } else if (ret == 0) {
+        ret = kvm_vm_ioctl(s, KVM_CREATE_IRQCHIP);
+        if (ret < 0) {
+            fprintf(stderr, "Create kernel irqchip failed\n");
+            return ret;
+        }
     }
 
     kvm_kernel_irqchip = true;
@@ -1332,7 +1341,7 @@ static int kvm_max_vcpus(KVMState *s)
     return (ret) ? ret : kvm_recommended_vcpus(s);
 }
 
-int kvm_init(void)
+int kvm_init(QEMUMachine *machine)
 {
     static const char upgrade_note[] =
         "Please upgrade to at least kernel 2.6.29 or recent kvm-kmod\n"
@@ -1349,7 +1358,8 @@ int kvm_init(void)
     KVMState *s;
     const KVMCapabilityInfo *missing_cap;
     int ret;
-    int i;
+    int i, type = 0;
+    const char *kvm_type;
 
     s = g_malloc0(sizeof(KVMState));
 
@@ -1413,22 +1423,29 @@ int kvm_init(void)
                     nc->name, nc->num, soft_vcpus_limit);
 
             if (nc->num > hard_vcpus_limit) {
-                ret = -EINVAL;
                 fprintf(stderr, "Number of %s cpus requested (%d) exceeds "
                         "the maximum cpus supported by KVM (%d)\n",
                         nc->name, nc->num, hard_vcpus_limit);
-                goto err;
+                exit(1);
             }
         }
         nc++;
     }
 
+    kvm_type = qemu_opt_get(qemu_get_machine_opts(), "kvm-type");
+    if (machine->kvm_type) {
+        type = machine->kvm_type(kvm_type);
+    } else if (kvm_type) {
+        fprintf(stderr, "Invalid argument kvm-type=%s\n", kvm_type);
+        goto err;
+    }
+
     do {
-        ret = kvm_ioctl(s, KVM_CREATE_VM, 0);
+        ret = kvm_ioctl(s, KVM_CREATE_VM, type);
     } while (ret == -EINTR);
 
     if (ret < 0) {
-        fprintf(stderr, "ioctl(KVM_CREATE_VM) failed: %d %s\n", -s->vmfd,
+        fprintf(stderr, "ioctl(KVM_CREATE_VM) failed: %d %s\n", -ret,
                 strerror(-ret));
 
 #ifdef TARGET_S390X
@@ -1777,6 +1794,24 @@ int kvm_vcpu_ioctl(CPUState *cpu, int type, ...)
     return ret;
 }
 
+int kvm_device_ioctl(int fd, int type, ...)
+{
+    int ret;
+    void *arg;
+    va_list ap;
+
+    va_start(ap, type);
+    arg = va_arg(ap, void *);
+    va_end(ap);
+
+    trace_kvm_device_ioctl(fd, type, arg);
+    ret = ioctl(fd, type, arg);
+    if (ret == -1) {
+        ret = -errno;
+    }
+    return ret;
+}
+
 int kvm_has_sync_mmu(void)
 {
     return kvm_check_extension(kvm_state, KVM_CAP_SYNC_MMU);
@@ -2057,4 +2092,25 @@ int kvm_on_sigbus_vcpu(CPUState *cpu, int code, void *addr)
 int kvm_on_sigbus(int code, void *addr)
 {
     return kvm_arch_on_sigbus(code, addr);
+}
+
+int kvm_create_device(KVMState *s, uint64_t type, bool test)
+{
+    int ret;
+    struct kvm_create_device create_dev;
+
+    create_dev.type = type;
+    create_dev.fd = -1;
+    create_dev.flags = test ? KVM_CREATE_DEVICE_TEST : 0;
+
+    if (!kvm_check_extension(s, KVM_CAP_DEVICE_CTRL)) {
+        return -ENOTSUP;
+    }
+
+    ret = kvm_vm_ioctl(s, KVM_CREATE_DEVICE, &create_dev);
+    if (ret) {
+        return ret;
+    }
+
+    return test ? 0 : create_dev.fd;
 }
