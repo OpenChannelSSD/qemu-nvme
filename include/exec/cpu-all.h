@@ -198,126 +198,7 @@ extern unsigned long reserved_va;
 #define RESERVED_VA 0ul
 #endif
 
-/* All direct uses of g2h and h2g need to go away for usermode softmmu.  */
-#define g2h(x) ((void *)((unsigned long)(target_ulong)(x) + GUEST_BASE))
-
-#if HOST_LONG_BITS <= TARGET_VIRT_ADDR_SPACE_BITS
-#define h2g_valid(x) 1
-#else
-#define h2g_valid(x) ({ \
-    unsigned long __guest = (unsigned long)(x) - GUEST_BASE; \
-    (__guest < (1ul << TARGET_VIRT_ADDR_SPACE_BITS)) && \
-    (!RESERVED_VA || (__guest < RESERVED_VA)); \
-})
 #endif
-
-#define h2g_nocheck(x) ({ \
-    unsigned long __ret = (unsigned long)(x) - GUEST_BASE; \
-    (abi_ulong)__ret; \
-})
-
-#define h2g(x) ({ \
-    /* Check if given address fits target address space */ \
-    assert(h2g_valid(x)); \
-    h2g_nocheck(x); \
-})
-
-#define saddr(x) g2h(x)
-#define laddr(x) g2h(x)
-
-#else /* !CONFIG_USER_ONLY */
-/* NOTE: we use double casts if pointers and target_ulong have
-   different sizes */
-#define saddr(x) (uint8_t *)(intptr_t)(x)
-#define laddr(x) (uint8_t *)(intptr_t)(x)
-#endif
-
-#define ldub_raw(p) ldub_p(laddr((p)))
-#define ldsb_raw(p) ldsb_p(laddr((p)))
-#define lduw_raw(p) lduw_p(laddr((p)))
-#define ldsw_raw(p) ldsw_p(laddr((p)))
-#define ldl_raw(p) ldl_p(laddr((p)))
-#define ldq_raw(p) ldq_p(laddr((p)))
-#define ldfl_raw(p) ldfl_p(laddr((p)))
-#define ldfq_raw(p) ldfq_p(laddr((p)))
-#define stb_raw(p, v) stb_p(saddr((p)), v)
-#define stw_raw(p, v) stw_p(saddr((p)), v)
-#define stl_raw(p, v) stl_p(saddr((p)), v)
-#define stq_raw(p, v) stq_p(saddr((p)), v)
-#define stfl_raw(p, v) stfl_p(saddr((p)), v)
-#define stfq_raw(p, v) stfq_p(saddr((p)), v)
-
-
-#if defined(CONFIG_USER_ONLY)
-
-/* if user mode, no other memory access functions */
-#define ldub(p) ldub_raw(p)
-#define ldsb(p) ldsb_raw(p)
-#define lduw(p) lduw_raw(p)
-#define ldsw(p) ldsw_raw(p)
-#define ldl(p) ldl_raw(p)
-#define ldq(p) ldq_raw(p)
-#define ldfl(p) ldfl_raw(p)
-#define ldfq(p) ldfq_raw(p)
-#define stb(p, v) stb_raw(p, v)
-#define stw(p, v) stw_raw(p, v)
-#define stl(p, v) stl_raw(p, v)
-#define stq(p, v) stq_raw(p, v)
-#define stfl(p, v) stfl_raw(p, v)
-#define stfq(p, v) stfq_raw(p, v)
-
-#define cpu_ldub_code(env1, p) ldub_raw(p)
-#define cpu_ldsb_code(env1, p) ldsb_raw(p)
-#define cpu_lduw_code(env1, p) lduw_raw(p)
-#define cpu_ldsw_code(env1, p) ldsw_raw(p)
-#define cpu_ldl_code(env1, p) ldl_raw(p)
-#define cpu_ldq_code(env1, p) ldq_raw(p)
-
-#define cpu_ldub_data(env, addr) ldub_raw(addr)
-#define cpu_lduw_data(env, addr) lduw_raw(addr)
-#define cpu_ldsw_data(env, addr) ldsw_raw(addr)
-#define cpu_ldl_data(env, addr) ldl_raw(addr)
-#define cpu_ldq_data(env, addr) ldq_raw(addr)
-
-#define cpu_stb_data(env, addr, data) stb_raw(addr, data)
-#define cpu_stw_data(env, addr, data) stw_raw(addr, data)
-#define cpu_stl_data(env, addr, data) stl_raw(addr, data)
-#define cpu_stq_data(env, addr, data) stq_raw(addr, data)
-
-#define cpu_ldub_kernel(env, addr) ldub_raw(addr)
-#define cpu_lduw_kernel(env, addr) lduw_raw(addr)
-#define cpu_ldsw_kernel(env, addr) ldsw_raw(addr)
-#define cpu_ldl_kernel(env, addr) ldl_raw(addr)
-#define cpu_ldq_kernel(env, addr) ldq_raw(addr)
-
-#define cpu_stb_kernel(env, addr, data) stb_raw(addr, data)
-#define cpu_stw_kernel(env, addr, data) stw_raw(addr, data)
-#define cpu_stl_kernel(env, addr, data) stl_raw(addr, data)
-#define cpu_stq_kernel(env, addr, data) stq_raw(addr, data)
-
-#define ldub_kernel(p) ldub_raw(p)
-#define ldsb_kernel(p) ldsb_raw(p)
-#define lduw_kernel(p) lduw_raw(p)
-#define ldsw_kernel(p) ldsw_raw(p)
-#define ldl_kernel(p) ldl_raw(p)
-#define ldq_kernel(p) ldq_raw(p)
-#define ldfl_kernel(p) ldfl_raw(p)
-#define ldfq_kernel(p) ldfq_raw(p)
-#define stb_kernel(p, v) stb_raw(p, v)
-#define stw_kernel(p, v) stw_raw(p, v)
-#define stl_kernel(p, v) stl_raw(p, v)
-#define stq_kernel(p, v) stq_raw(p, v)
-#define stfl_kernel(p, v) stfl_raw(p, v)
-#define stfq_kernel(p, vt) stfq_raw(p, v)
-
-#define cpu_ldub_data(env, addr) ldub_raw(addr)
-#define cpu_lduw_data(env, addr) lduw_raw(addr)
-#define cpu_ldl_data(env, addr) ldl_raw(addr)
-
-#define cpu_stb_data(env, addr, data) stb_raw(addr, data)
-#define cpu_stw_data(env, addr, data) stw_raw(addr, data)
-#define cpu_stl_data(env, addr, data) stl_raw(addr, data)
-#endif /* defined(CONFIG_USER_ONLY) */
 
 /* page related stuff */
 
@@ -360,9 +241,6 @@ int page_check_range(target_ulong start, target_ulong len, int flags);
 
 CPUArchState *cpu_copy(CPUArchState *env);
 
-void QEMU_NORETURN cpu_abort(CPUArchState *env, const char *fmt, ...)
-    GCC_FMT_ATTR(2, 3);
-
 /* Flags for use in ENV->INTERRUPT_PENDING.
 
    The numbers assigned here are non-sequential in order to preserve
@@ -384,6 +262,9 @@ void QEMU_NORETURN cpu_abort(CPUArchState *env, const char *fmt, ...)
 /* Debug event pending.  */
 #define CPU_INTERRUPT_DEBUG       0x0080
 
+/* Reset signal.  */
+#define CPU_INTERRUPT_RESET       0x0400
+
 /* Several target-specific external hardware interrupts.  Each target/cpu.h
    should define proper names based on these defines.  */
 #define CPU_INTERRUPT_TGT_EXT_0   0x0008
@@ -398,9 +279,8 @@ void QEMU_NORETURN cpu_abort(CPUArchState *env, const char *fmt, ...)
    instruction being executed.  These, therefore, are not masked while
    single-stepping within the debugger.  */
 #define CPU_INTERRUPT_TGT_INT_0   0x0100
-#define CPU_INTERRUPT_TGT_INT_1   0x0400
-#define CPU_INTERRUPT_TGT_INT_2   0x0800
-#define CPU_INTERRUPT_TGT_INT_3   0x2000
+#define CPU_INTERRUPT_TGT_INT_1   0x0800
+#define CPU_INTERRUPT_TGT_INT_2   0x2000
 
 /* First unused bit: 0x4000.  */
 
@@ -413,35 +293,9 @@ void QEMU_NORETURN cpu_abort(CPUArchState *env, const char *fmt, ...)
      | CPU_INTERRUPT_TGT_EXT_3   \
      | CPU_INTERRUPT_TGT_EXT_4)
 
-/* Breakpoint/watchpoint flags */
-#define BP_MEM_READ           0x01
-#define BP_MEM_WRITE          0x02
-#define BP_MEM_ACCESS         (BP_MEM_READ | BP_MEM_WRITE)
-#define BP_STOP_BEFORE_ACCESS 0x04
-#define BP_WATCHPOINT_HIT     0x08
-#define BP_GDB                0x10
-#define BP_CPU                0x20
-
-int cpu_breakpoint_insert(CPUArchState *env, target_ulong pc, int flags,
-                          CPUBreakpoint **breakpoint);
-int cpu_breakpoint_remove(CPUArchState *env, target_ulong pc, int flags);
-void cpu_breakpoint_remove_by_ref(CPUArchState *env, CPUBreakpoint *breakpoint);
-void cpu_breakpoint_remove_all(CPUArchState *env, int mask);
-int cpu_watchpoint_insert(CPUArchState *env, target_ulong addr, target_ulong len,
-                          int flags, CPUWatchpoint **watchpoint);
-int cpu_watchpoint_remove(CPUArchState *env, target_ulong addr,
-                          target_ulong len, int flags);
-void cpu_watchpoint_remove_by_ref(CPUArchState *env, CPUWatchpoint *watchpoint);
-void cpu_watchpoint_remove_all(CPUArchState *env, int mask);
-
 #if !defined(CONFIG_USER_ONLY)
 
 /* memory API */
-
-extern ram_addr_t ram_size;
-
-/* RAM is pre-allocated and passed into qemu_ram_alloc_from_ptr */
-#define RAM_PREALLOC_MASK   (1 << 0)
 
 typedef struct RAMBlock {
     struct MemoryRegion *mr;
@@ -467,9 +321,6 @@ typedef struct RAMList {
     uint32_t version;
 } RAMList;
 extern RAMList ram_list;
-
-extern const char *mem_path;
-extern int mem_prealloc;
 
 /* Flags stored in the low bits of the TLB virtual address.  These are
    defined so that fast path ram access is all zeros.  */

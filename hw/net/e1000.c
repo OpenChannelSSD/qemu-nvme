@@ -69,23 +69,11 @@ static int debugflags = DBGBIT(TXERR) | DBGBIT(GENERAL);
 
 /*
  * HW models:
- *  E1000_DEV_ID_82540EM works with Windows and Linux
- *  E1000_DEV_ID_82573L OK with windoze and Linux 2.6.22,
- *	appears to perform better than 82540EM, but breaks with Linux 2.6.18
+ *  E1000_DEV_ID_82540EM works with Windows, Linux, and OS X <= 10.8
  *  E1000_DEV_ID_82544GC_COPPER appears to work; not well tested
+ *  E1000_DEV_ID_82545EM_COPPER works with Linux and OS X >= 10.6
  *  Others never tested
  */
-enum { E1000_DEVID = E1000_DEV_ID_82540EM };
-
-/*
- * May need to specify additional MAC-to-PHY entries --
- * Intel's Windows driver refuses to initialize unless they match
- */
-enum {
-    PHY_ID2_INIT = E1000_DEVID == E1000_DEV_ID_82573L ?		0xcc2 :
-                   E1000_DEVID == E1000_DEV_ID_82544GC_COPPER ?	0xc30 :
-                   /* default to E1000_DEV_ID_82540EM */	0xc20
-};
 
 typedef struct E1000State_st {
     /*< private >*/
@@ -151,10 +139,20 @@ typedef struct E1000State_st {
     uint32_t compat_flags;
 } E1000State;
 
-#define TYPE_E1000 "e1000"
+typedef struct E1000BaseClass {
+    PCIDeviceClass parent_class;
+    uint16_t phy_id2;
+} E1000BaseClass;
+
+#define TYPE_E1000_BASE "e1000-base"
 
 #define E1000(obj) \
-    OBJECT_CHECK(E1000State, (obj), TYPE_E1000)
+    OBJECT_CHECK(E1000State, (obj), TYPE_E1000_BASE)
+
+#define E1000_DEVICE_CLASS(klass) \
+     OBJECT_CLASS_CHECK(E1000BaseClass, (klass), TYPE_E1000_BASE)
+#define E1000_DEVICE_GET_CLASS(obj) \
+    OBJECT_GET_CLASS(E1000BaseClass, (obj), TYPE_E1000_BASE)
 
 #define	defreg(x)	x = (E1000_##x>>2)
 enum {
@@ -177,6 +175,8 @@ e1000_link_down(E1000State *s)
 {
     s->mac_reg[STATUS] &= ~E1000_STATUS_LU;
     s->phy_reg[PHY_STATUS] &= ~MII_SR_LINK_STATUS;
+    s->phy_reg[PHY_STATUS] &= ~MII_SR_AUTONEG_COMPLETE;
+    s->phy_reg[PHY_LP_ABILITY] &= ~MII_LPAR_LPACK;
 }
 
 static void
@@ -199,21 +199,9 @@ set_phy_ctrl(E1000State *s, int index, uint16_t val)
     }
     if ((val & MII_CR_AUTO_NEG_EN) && (val & MII_CR_RESTART_AUTO_NEG)) {
         e1000_link_down(s);
-        s->phy_reg[PHY_STATUS] &= ~MII_SR_AUTONEG_COMPLETE;
         DBGOUT(PHY, "Start link auto negotiation\n");
         timer_mod(s->autoneg_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 500);
     }
-}
-
-static void
-e1000_autoneg_timer(void *opaque)
-{
-    E1000State *s = opaque;
-    if (!qemu_get_queue(s->nic)->link_down) {
-        e1000_link_up(s);
-    }
-    s->phy_reg[PHY_STATUS] |= MII_SR_AUTONEG_COMPLETE;
-    DBGOUT(PHY, "Auto negotiation is completed\n");
 }
 
 static void (*phyreg_writeops[])(E1000State *, int, uint16_t) = {
@@ -229,13 +217,15 @@ static const char phy_regcap[0x20] = {
     [PHY_CTRL] = PHY_RW,	[PHY_1000T_CTRL] = PHY_RW,
     [PHY_LP_ABILITY] = PHY_R,	[PHY_1000T_STATUS] = PHY_R,
     [PHY_AUTONEG_ADV] = PHY_RW,	[M88E1000_RX_ERR_CNTR] = PHY_R,
-    [PHY_ID2] = PHY_R,		[M88E1000_PHY_SPEC_STATUS] = PHY_R
+    [PHY_ID2] = PHY_R,		[M88E1000_PHY_SPEC_STATUS] = PHY_R,
+    [PHY_AUTONEG_EXP] = PHY_R,
 };
 
+/* PHY_ID2 documented in 8254x_GBe_SDM.pdf, pp. 250 */
 static const uint16_t phy_reg_init[] = {
     [PHY_CTRL] = 0x1140,
     [PHY_STATUS] = 0x794d, /* link initially up with not completed autoneg */
-    [PHY_ID1] = 0x141,				[PHY_ID2] = PHY_ID2_INIT,
+    [PHY_ID1] = 0x141, /* [PHY_ID2] configured per DevId, from e1000_reset() */
     [PHY_1000T_CTRL] = 0x0e00,			[M88E1000_PHY_SPEC_CTRL] = 0x360,
     [M88E1000_EXT_PHY_SPEC_CTRL] = 0x0d60,	[PHY_AUTONEG_ADV] = 0xde1,
     [PHY_LP_ABILITY] = 0x1e0,			[PHY_1000T_STATUS] = 0x3c00,
@@ -272,10 +262,6 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
     uint32_t pending_ints;
     uint32_t mit_delay;
 
-    if (val && (E1000_DEVID >= E1000_DEV_ID_82547EI_MOBILE)) {
-        /* Only for 8257x */
-        val |= E1000_ICR_INT_ASSERTED;
-    }
     s->mac_reg[ICR] = val;
 
     /*
@@ -349,6 +335,19 @@ set_ics(E1000State *s, int index, uint32_t val)
     set_interrupt_cause(s, 0, val | s->mac_reg[ICR]);
 }
 
+static void
+e1000_autoneg_timer(void *opaque)
+{
+    E1000State *s = opaque;
+    if (!qemu_get_queue(s->nic)->link_down) {
+        e1000_link_up(s);
+        s->phy_reg[PHY_LP_ABILITY] |= MII_LPAR_LPACK;
+        s->phy_reg[PHY_STATUS] |= MII_SR_AUTONEG_COMPLETE;
+        DBGOUT(PHY, "Auto negotiation is completed\n");
+        set_ics(s, 0, E1000_ICS_LSC); /* signal link status change to guest */
+    }
+}
+
 static int
 rxbufsize(uint32_t v)
 {
@@ -375,6 +374,7 @@ rxbufsize(uint32_t v)
 static void e1000_reset(void *opaque)
 {
     E1000State *d = opaque;
+    E1000BaseClass *edc = E1000_DEVICE_GET_CLASS(d);
     uint8_t *macaddr = d->conf.macaddr.a;
     int i;
 
@@ -385,6 +385,7 @@ static void e1000_reset(void *opaque)
     d->mit_ide = 0;
     memset(d->phy_reg, 0, sizeof d->phy_reg);
     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);
+    d->phy_reg[PHY_ID2] = edc->phy_id2;
     memset(d->mac_reg, 0, sizeof d->mac_reg);
     memmove(d->mac_reg, mac_reg_init, sizeof mac_reg_init);
     d->rxbuf_min_shift = 1;
@@ -847,6 +848,14 @@ receive_filter(E1000State *s, const uint8_t *buf, int size)
     return 0;
 }
 
+static bool
+have_autoneg(E1000State *s)
+{
+    return (s->compat_flags & E1000_FLAG_AUTONEG) &&
+           (s->phy_reg[PHY_CTRL] & MII_CR_AUTO_NEG_EN) &&
+           (s->phy_reg[PHY_CTRL] & MII_CR_RESTART_AUTO_NEG);
+}
+
 static void
 e1000_set_link_status(NetClientState *nc)
 {
@@ -856,7 +865,14 @@ e1000_set_link_status(NetClientState *nc)
     if (nc->link_down) {
         e1000_link_down(s);
     } else {
-        e1000_link_up(s);
+        if (have_autoneg(s) &&
+            !(s->phy_reg[PHY_STATUS] & MII_SR_AUTONEG_COMPLETE)) {
+            /* emulate auto-negotiation if supported */
+            timer_mod(s->autoneg_timer,
+                      qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 500);
+        } else {
+            e1000_link_up(s);
+        }
     }
 
     if (s->mac_reg[STATUS] != old_status)
@@ -1282,19 +1298,13 @@ static void e1000_pre_save(void *opaque)
         e1000_mit_timer(s);
     }
 
-    if (!(s->compat_flags & E1000_FLAG_AUTONEG)) {
-        return;
-    }
-
     /*
-     * If link is down and auto-negotiation is ongoing, complete
-     * auto-negotiation immediately.  This allows is to look at
-     * MII_SR_AUTONEG_COMPLETE to infer link status on load.
+     * If link is down and auto-negotiation is supported and ongoing,
+     * complete auto-negotiation immediately. This allows us to look
+     * at MII_SR_AUTONEG_COMPLETE to infer link status on load.
      */
-    if (nc->link_down &&
-        s->phy_reg[PHY_CTRL] & MII_CR_AUTO_NEG_EN &&
-        s->phy_reg[PHY_CTRL] & MII_CR_RESTART_AUTO_NEG) {
-         s->phy_reg[PHY_STATUS] |= MII_SR_AUTONEG_COMPLETE;
+    if (nc->link_down && have_autoneg(s)) {
+        s->phy_reg[PHY_STATUS] |= MII_SR_AUTONEG_COMPLETE;
     }
 }
 
@@ -1316,15 +1326,11 @@ static int e1000_post_load(void *opaque, int version_id)
      * Alternatively, restart link negotiation if it was in progress. */
     nc->link_down = (s->mac_reg[STATUS] & E1000_STATUS_LU) == 0;
 
-    if (!(s->compat_flags & E1000_FLAG_AUTONEG)) {
-        return 0;
-    }
-
-    if (s->phy_reg[PHY_CTRL] & MII_CR_AUTO_NEG_EN &&
-        s->phy_reg[PHY_CTRL] & MII_CR_RESTART_AUTO_NEG &&
+    if (have_autoneg(s) &&
         !(s->phy_reg[PHY_STATUS] & MII_SR_AUTONEG_COMPLETE)) {
         nc->link_down = false;
-        timer_mod(s->autoneg_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 500);
+        timer_mod(s->autoneg_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 500);
     }
 
     return 0;
@@ -1341,8 +1347,7 @@ static const VMStateDescription vmstate_e1000_mit_state = {
     .name = "e1000/mit_state",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields    = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT32(mac_reg[RDTR], E1000State),
         VMSTATE_UINT32(mac_reg[RADV], E1000State),
         VMSTATE_UINT32(mac_reg[TADV], E1000State),
@@ -1356,10 +1361,9 @@ static const VMStateDescription vmstate_e1000 = {
     .name = "e1000",
     .version_id = 2,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .pre_save = e1000_pre_save,
     .post_load = e1000_post_load,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, E1000State),
         VMSTATE_UNUSED_TEST(is_version_1, 4), /* was instance id */
         VMSTATE_UNUSED(4), /* Was mmio_base.  */
@@ -1440,9 +1444,13 @@ static const VMStateDescription vmstate_e1000 = {
     }
 };
 
+/*
+ * EEPROM contents documented in Tables 5-2 and 5-3, pp. 98-102.
+ * Note: A valid DevId will be inserted during pci_e1000_init().
+ */
 static const uint16_t e1000_eeprom_template[64] = {
     0x0000, 0x0000, 0x0000, 0x0000,      0xffff, 0x0000,      0x0000, 0x0000,
-    0x3000, 0x1000, 0x6403, E1000_DEVID, 0x8086, E1000_DEVID, 0x8086, 0x3040,
+    0x3000, 0x1000, 0x6403, 0 /*DevId*/, 0x8086, 0 /*DevId*/, 0x8086, 0x3040,
     0x0008, 0x2000, 0x7e14, 0x0048,      0x1000, 0x00d8,      0x0000, 0x2700,
     0x6cc9, 0x3150, 0x0722, 0x040b,      0x0984, 0x0000,      0xc000, 0x0706,
     0x1008, 0x0000, 0x0f04, 0x7fff,      0x4d01, 0xffff,      0xffff, 0xffff,
@@ -1507,6 +1515,7 @@ static int pci_e1000_init(PCIDevice *pci_dev)
 {
     DeviceState *dev = DEVICE(pci_dev);
     E1000State *d = E1000(pci_dev);
+    PCIDeviceClass *pdc = PCI_DEVICE_GET_CLASS(pci_dev);
     uint8_t *pci_conf;
     uint16_t checksum = 0;
     int i;
@@ -1531,6 +1540,7 @@ static int pci_e1000_init(PCIDevice *pci_dev)
     macaddr = d->conf.macaddr.a;
     for (i = 0; i < 3; i++)
         d->eeprom_data[i] = (macaddr[2*i+1]<<8) | macaddr[2*i];
+    d->eeprom_data[11] = d->eeprom_data[13] = pdc->device_id;
     for (i = 0; i < EEPROM_CHECKSUM_REG; i++)
         checksum += d->eeprom_data[i];
     checksum = (uint16_t) EEPROM_SUM - checksum;
@@ -1564,17 +1574,27 @@ static Property e1000_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
+typedef struct E1000Info {
+    const char *name;
+    uint16_t   device_id;
+    uint8_t    revision;
+    uint16_t   phy_id2;
+} E1000Info;
+
 static void e1000_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+    E1000BaseClass *e = E1000_DEVICE_CLASS(klass);
+    const E1000Info *info = data;
 
     k->init = pci_e1000_init;
     k->exit = pci_e1000_uninit;
     k->romfile = "efi-e1000.rom";
     k->vendor_id = PCI_VENDOR_ID_INTEL;
-    k->device_id = E1000_DEVID;
-    k->revision = 0x03;
+    k->device_id = info->device_id;
+    k->revision = info->revision;
+    e->phy_id2 = info->phy_id2;
     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
     dc->desc = "Intel Gigabit Ethernet";
@@ -1583,16 +1603,57 @@ static void e1000_class_init(ObjectClass *klass, void *data)
     dc->props = e1000_properties;
 }
 
-static const TypeInfo e1000_info = {
-    .name          = TYPE_E1000,
+static const TypeInfo e1000_base_info = {
+    .name          = TYPE_E1000_BASE,
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(E1000State),
-    .class_init    = e1000_class_init,
+    .class_size    = sizeof(E1000BaseClass),
+    .abstract      = true,
+};
+
+static const E1000Info e1000_devices[] = {
+    {
+        .name      = "e1000-82540em",
+        .device_id = E1000_DEV_ID_82540EM,
+        .revision  = 0x03,
+        .phy_id2   = E1000_PHY_ID2_8254xx_DEFAULT,
+    },
+    {
+        .name      = "e1000-82544gc",
+        .device_id = E1000_DEV_ID_82544GC_COPPER,
+        .revision  = 0x03,
+        .phy_id2   = E1000_PHY_ID2_82544x,
+    },
+    {
+        .name      = "e1000-82545em",
+        .device_id = E1000_DEV_ID_82545EM_COPPER,
+        .revision  = 0x03,
+        .phy_id2   = E1000_PHY_ID2_8254xx_DEFAULT,
+    },
+};
+
+static const TypeInfo e1000_default_info = {
+    .name          = "e1000",
+    .parent        = "e1000-82540em",
 };
 
 static void e1000_register_types(void)
 {
-    type_register_static(&e1000_info);
+    int i;
+
+    type_register_static(&e1000_base_info);
+    for (i = 0; i < ARRAY_SIZE(e1000_devices); i++) {
+        const E1000Info *info = &e1000_devices[i];
+        TypeInfo type_info = {};
+
+        type_info.name = info->name;
+        type_info.parent = TYPE_E1000_BASE;
+        type_info.class_data = (void *)info;
+        type_info.class_init = e1000_class_init;
+
+        type_register(&type_info);
+    }
+    type_register_static(&e1000_default_info);
 }
 
 type_init(e1000_register_types)

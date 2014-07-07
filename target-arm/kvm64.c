@@ -77,9 +77,8 @@ bool kvm_arm_get_host_cpu_features(ARMHostCPUClass *ahcc)
 
 int kvm_arch_init_vcpu(CPUState *cs)
 {
-    ARMCPU *cpu = ARM_CPU(cs);
-    struct kvm_vcpu_init init;
     int ret;
+    ARMCPU *cpu = ARM_CPU(cs);
 
     if (cpu->kvm_target == QEMU_KVM_ARM_TARGET_NONE ||
         !arm_feature(&cpu->env, ARM_FEATURE_AARCH64)) {
@@ -87,16 +86,25 @@ int kvm_arch_init_vcpu(CPUState *cs)
         return -EINVAL;
     }
 
-    init.target = cpu->kvm_target;
-    memset(init.features, 0, sizeof(init.features));
+    /* Determine init features for this CPU */
+    memset(cpu->kvm_init_features, 0, sizeof(cpu->kvm_init_features));
     if (cpu->start_powered_off) {
-        init.features[0] = 1 << KVM_ARM_VCPU_POWER_OFF;
+        cpu->kvm_init_features[0] |= 1 << KVM_ARM_VCPU_POWER_OFF;
     }
-    ret = kvm_vcpu_ioctl(cs, KVM_ARM_VCPU_INIT, &init);
+    if (kvm_check_extension(cs->kvm_state, KVM_CAP_ARM_PSCI_0_2)) {
+        cpu->psci_version = 2;
+        cpu->kvm_init_features[0] |= 1 << KVM_ARM_VCPU_PSCI_0_2;
+    }
+
+    /* Do KVM_ARM_VCPU_INIT ioctl */
+    ret = kvm_arm_vcpu_init(cs);
+    if (ret) {
+        return ret;
+    }
 
     /* TODO : support for save/restore/reset of system regs via tuple list */
 
-    return ret;
+    return 0;
 }
 
 #define AARCH64_CORE_REG(x)   (KVM_REG_ARM64 | KVM_REG_SIZE_U64 | \
@@ -121,8 +129,24 @@ int kvm_arch_put_registers(CPUState *cs, int level)
         }
     }
 
+    /* KVM puts SP_EL0 in regs.sp and SP_EL1 in regs.sp_el1. On the
+     * QEMU side we keep the current SP in xregs[31] as well.
+     */
+    if (env->pstate & PSTATE_SP) {
+        env->sp_el[1] = env->xregs[31];
+    } else {
+        env->sp_el[0] = env->xregs[31];
+    }
+
     reg.id = AARCH64_CORE_REG(regs.sp);
-    reg.addr = (uintptr_t) &env->xregs[31];
+    reg.addr = (uintptr_t) &env->sp_el[0];
+    ret = kvm_vcpu_ioctl(cs, KVM_SET_ONE_REG, &reg);
+    if (ret) {
+        return ret;
+    }
+
+    reg.id = AARCH64_CORE_REG(sp_el1);
+    reg.addr = (uintptr_t) &env->sp_el[1];
     ret = kvm_vcpu_ioctl(cs, KVM_SET_ONE_REG, &reg);
     if (ret) {
         return ret;
@@ -144,10 +168,23 @@ int kvm_arch_put_registers(CPUState *cs, int level)
         return ret;
     }
 
+    reg.id = AARCH64_CORE_REG(elr_el1);
+    reg.addr = (uintptr_t) &env->elr_el[1];
+    ret = kvm_vcpu_ioctl(cs, KVM_SET_ONE_REG, &reg);
+    if (ret) {
+        return ret;
+    }
+
+    for (i = 0; i < KVM_NR_SPSR; i++) {
+        reg.id = AARCH64_CORE_REG(spsr[i]);
+        reg.addr = (uintptr_t) &env->banked_spsr[i - 1];
+        ret = kvm_vcpu_ioctl(cs, KVM_SET_ONE_REG, &reg);
+        if (ret) {
+            return ret;
+        }
+    }
+
     /* TODO:
-     * SP_EL1
-     * ELR_EL1
-     * SPSR[]
      * FP state
      * system registers
      */
@@ -174,7 +211,14 @@ int kvm_arch_get_registers(CPUState *cs)
     }
 
     reg.id = AARCH64_CORE_REG(regs.sp);
-    reg.addr = (uintptr_t) &env->xregs[31];
+    reg.addr = (uintptr_t) &env->sp_el[0];
+    ret = kvm_vcpu_ioctl(cs, KVM_GET_ONE_REG, &reg);
+    if (ret) {
+        return ret;
+    }
+
+    reg.id = AARCH64_CORE_REG(sp_el1);
+    reg.addr = (uintptr_t) &env->sp_el[1];
     ret = kvm_vcpu_ioctl(cs, KVM_GET_ONE_REG, &reg);
     if (ret) {
         return ret;
@@ -188,6 +232,15 @@ int kvm_arch_get_registers(CPUState *cs)
     }
     pstate_write(env, val);
 
+    /* KVM puts SP_EL0 in regs.sp and SP_EL1 in regs.sp_el1. On the
+     * QEMU side we keep the current SP in xregs[31] as well.
+     */
+    if (env->pstate & PSTATE_SP) {
+        env->xregs[31] = env->sp_el[1];
+    } else {
+        env->xregs[31] = env->sp_el[0];
+    }
+
     reg.id = AARCH64_CORE_REG(regs.pc);
     reg.addr = (uintptr_t) &env->pc;
     ret = kvm_vcpu_ioctl(cs, KVM_GET_ONE_REG, &reg);
@@ -195,10 +248,30 @@ int kvm_arch_get_registers(CPUState *cs)
         return ret;
     }
 
+    reg.id = AARCH64_CORE_REG(elr_el1);
+    reg.addr = (uintptr_t) &env->elr_el[1];
+    ret = kvm_vcpu_ioctl(cs, KVM_GET_ONE_REG, &reg);
+    if (ret) {
+        return ret;
+    }
+
+    for (i = 0; i < KVM_NR_SPSR; i++) {
+        reg.id = AARCH64_CORE_REG(spsr[i]);
+        reg.addr = (uintptr_t) &env->banked_spsr[i - 1];
+        ret = kvm_vcpu_ioctl(cs, KVM_GET_ONE_REG, &reg);
+        if (ret) {
+            return ret;
+        }
+    }
+
     /* TODO: other registers */
     return ret;
 }
 
-void kvm_arch_reset_vcpu(CPUState *cs)
+void kvm_arm_reset_vcpu(ARMCPU *cpu)
 {
+    /* Re-init VCPU so that all registers are set to
+     * their respective reset values.
+     */
+    kvm_arm_vcpu_init(CPU(cpu));
 }

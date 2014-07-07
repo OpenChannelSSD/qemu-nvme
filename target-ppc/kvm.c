@@ -35,6 +35,7 @@
 #include "hw/sysbus.h"
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_vio.h"
+#include "hw/ppc/ppc.h"
 #include "sysemu/watchdog.h"
 #include "trace.h"
 
@@ -61,12 +62,15 @@ static int cap_booke_sregs;
 static int cap_ppc_smt;
 static int cap_ppc_rma;
 static int cap_spapr_tce;
+static int cap_spapr_multitce;
+static int cap_spapr_vfio;
 static int cap_hior;
 static int cap_one_reg;
 static int cap_epr;
 static int cap_ppc_watchdog;
 static int cap_papr;
 static int cap_htab_fd;
+static int cap_fixup_hcalls;
 
 /* XXX We have a race condition where we actually have a level triggered
  *     interrupt, but the infrastructure can't expose that yet, so the guest
@@ -97,6 +101,8 @@ int kvm_arch_init(KVMState *s)
     cap_ppc_smt = kvm_check_extension(s, KVM_CAP_PPC_SMT);
     cap_ppc_rma = kvm_check_extension(s, KVM_CAP_PPC_RMA);
     cap_spapr_tce = kvm_check_extension(s, KVM_CAP_SPAPR_TCE);
+    cap_spapr_multitce = kvm_check_extension(s, KVM_CAP_SPAPR_MULTITCE);
+    cap_spapr_vfio = false;
     cap_one_reg = kvm_check_extension(s, KVM_CAP_ONE_REG);
     cap_hior = kvm_check_extension(s, KVM_CAP_PPC_HIOR);
     cap_epr = kvm_check_extension(s, KVM_CAP_PPC_EPR);
@@ -104,6 +110,7 @@ int kvm_arch_init(KVMState *s)
     /* Note: we don't set cap_papr here, because this capability is
      * only activated after this by kvmppc_set_papr() */
     cap_htab_fd = kvm_check_extension(s, KVM_CAP_PPC_HTAB_FD);
+    cap_fixup_hcalls = kvm_check_extension(s, KVM_CAP_PPC_FIXUP_HCALL);
 
     if (!cap_interrupt_level) {
         fprintf(stderr, "KVM: Couldn't find level irq capability. Expect the "
@@ -151,7 +158,6 @@ static int kvm_booke206_tlb_init(PowerPCCPU *cpu)
     CPUState *cs = CPU(cpu);
     struct kvm_book3e_206_tlb_params params = {};
     struct kvm_config_tlb cfg = {};
-    struct kvm_enable_cap encap = {};
     unsigned int entries = 0;
     int ret, i;
 
@@ -178,10 +184,7 @@ static int kvm_booke206_tlb_init(PowerPCCPU *cpu)
     cfg.params = (uintptr_t)&params;
     cfg.mmu_type = KVM_MMU_FSL_BOOKE_NOHV;
 
-    encap.cap = KVM_CAP_SW_TLB;
-    encap.args[0] = (uintptr_t)&cfg;
-
-    ret = kvm_vcpu_ioctl(cs, KVM_ENABLE_CAP, &encap);
+    ret = kvm_vcpu_enable_cap(cs, KVM_CAP_SW_TLB, 0, (uintptr_t)&cfg);
     if (ret < 0) {
         fprintf(stderr, "%s: couldn't enable KVM_CAP_SW_TLB: %s\n",
                 __func__, strerror(-ret));
@@ -360,6 +363,10 @@ static void kvm_fixup_page_sizes(PowerPCCPU *cpu)
     /* Convert to QEMU form */
     memset(&env->sps, 0, sizeof(env->sps));
 
+    /*
+     * XXX This loop should be an entry wide AND of the capabilities that
+     *     the selected CPU has with the capabilities that KVM supports.
+     */
     for (ik = iq = 0; ik < KVM_PPC_PAGE_SIZES_MAX_SZ; ik++) {
         struct ppc_one_seg_page_size *qsps = &env->sps.sps[iq];
         struct kvm_ppc_one_seg_page_size *ksps = &smmu_info.sps[ik];
@@ -386,9 +393,7 @@ static void kvm_fixup_page_sizes(PowerPCCPU *cpu)
         }
     }
     env->slb_nr = smmu_info.slb_size;
-    if (smmu_info.flags & KVM_PPC_1T_SEGMENTS) {
-        env->mmu_model |= POWERPC_MMU_1TSEG;
-    } else {
+    if (!(smmu_info.flags & KVM_PPC_1T_SEGMENTS)) {
         env->mmu_model &= ~POWERPC_MMU_1TSEG;
     }
 }
@@ -432,10 +437,6 @@ int kvm_arch_init_vcpu(CPUState *cs)
     }
 
     return ret;
-}
-
-void kvm_arch_reset_vcpu(CPUState *cpu)
-{
 }
 
 static void kvm_sw_tlb_put(PowerPCCPU *cpu)
@@ -866,11 +867,32 @@ int kvm_arch_put_registers(CPUState *cs, int level)
         }
 
 #ifdef TARGET_PPC64
+        if (msr_ts) {
+            for (i = 0; i < ARRAY_SIZE(env->tm_gpr); i++) {
+                kvm_set_one_reg(cs, KVM_REG_PPC_TM_GPR(i), &env->tm_gpr[i]);
+            }
+            for (i = 0; i < ARRAY_SIZE(env->tm_vsr); i++) {
+                kvm_set_one_reg(cs, KVM_REG_PPC_TM_VSR(i), &env->tm_vsr[i]);
+            }
+            kvm_set_one_reg(cs, KVM_REG_PPC_TM_CR, &env->tm_cr);
+            kvm_set_one_reg(cs, KVM_REG_PPC_TM_LR, &env->tm_lr);
+            kvm_set_one_reg(cs, KVM_REG_PPC_TM_CTR, &env->tm_ctr);
+            kvm_set_one_reg(cs, KVM_REG_PPC_TM_FPSCR, &env->tm_fpscr);
+            kvm_set_one_reg(cs, KVM_REG_PPC_TM_AMR, &env->tm_amr);
+            kvm_set_one_reg(cs, KVM_REG_PPC_TM_PPR, &env->tm_ppr);
+            kvm_set_one_reg(cs, KVM_REG_PPC_TM_VRSAVE, &env->tm_vrsave);
+            kvm_set_one_reg(cs, KVM_REG_PPC_TM_VSCR, &env->tm_vscr);
+            kvm_set_one_reg(cs, KVM_REG_PPC_TM_DSCR, &env->tm_dscr);
+            kvm_set_one_reg(cs, KVM_REG_PPC_TM_TAR, &env->tm_tar);
+        }
+
         if (cap_papr) {
             if (kvm_put_vpa(cs) < 0) {
                 DPRINTF("Warning: Unable to set VPA information to KVM\n");
             }
         }
+
+        kvm_set_one_reg(cs, KVM_REG_PPC_TB_OFFSET, &env->tb_env->tb_offset);
 #endif /* TARGET_PPC64 */
     }
 
@@ -1090,11 +1112,32 @@ int kvm_arch_get_registers(CPUState *cs)
         }
 
 #ifdef TARGET_PPC64
+        if (msr_ts) {
+            for (i = 0; i < ARRAY_SIZE(env->tm_gpr); i++) {
+                kvm_get_one_reg(cs, KVM_REG_PPC_TM_GPR(i), &env->tm_gpr[i]);
+            }
+            for (i = 0; i < ARRAY_SIZE(env->tm_vsr); i++) {
+                kvm_get_one_reg(cs, KVM_REG_PPC_TM_VSR(i), &env->tm_vsr[i]);
+            }
+            kvm_get_one_reg(cs, KVM_REG_PPC_TM_CR, &env->tm_cr);
+            kvm_get_one_reg(cs, KVM_REG_PPC_TM_LR, &env->tm_lr);
+            kvm_get_one_reg(cs, KVM_REG_PPC_TM_CTR, &env->tm_ctr);
+            kvm_get_one_reg(cs, KVM_REG_PPC_TM_FPSCR, &env->tm_fpscr);
+            kvm_get_one_reg(cs, KVM_REG_PPC_TM_AMR, &env->tm_amr);
+            kvm_get_one_reg(cs, KVM_REG_PPC_TM_PPR, &env->tm_ppr);
+            kvm_get_one_reg(cs, KVM_REG_PPC_TM_VRSAVE, &env->tm_vrsave);
+            kvm_get_one_reg(cs, KVM_REG_PPC_TM_VSCR, &env->tm_vscr);
+            kvm_get_one_reg(cs, KVM_REG_PPC_TM_DSCR, &env->tm_dscr);
+            kvm_get_one_reg(cs, KVM_REG_PPC_TM_TAR, &env->tm_tar);
+        }
+
         if (cap_papr) {
             if (kvm_get_vpa(cs) < 0) {
                 DPRINTF("Warning: Unable to get VPA information from KVM\n");
             }
         }
+
+        kvm_get_one_reg(cs, KVM_REG_PPC_TB_OFFSET, &env->tb_env->tb_offset);
 #endif
     }
 
@@ -1178,7 +1221,7 @@ static int kvmppc_handle_halt(PowerPCCPU *cpu)
 
     if (!(cs->interrupt_request & CPU_INTERRUPT_HARD) && (msr_ee)) {
         cs->halted = 1;
-        env->exception_index = EXCP_HLT;
+        cs->exception_index = EXCP_HLT;
     }
 
     return 0;
@@ -1292,7 +1335,6 @@ int kvmppc_set_tcr(PowerPCCPU *cpu)
 int kvmppc_booke_watchdog_enable(PowerPCCPU *cpu)
 {
     CPUState *cs = CPU(cpu);
-    struct kvm_enable_cap encap = {};
     int ret;
 
     if (!kvm_enabled()) {
@@ -1304,8 +1346,7 @@ int kvmppc_booke_watchdog_enable(PowerPCCPU *cpu)
         return -1;
     }
 
-    encap.cap = KVM_CAP_PPC_BOOKE_WATCHDOG;
-    ret = kvm_vcpu_ioctl(cs, KVM_ENABLE_CAP, &encap);
+    ret = kvm_vcpu_enable_cap(cs, KVM_CAP_PPC_BOOKE_WATCHDOG, 0);
     if (ret < 0) {
         fprintf(stderr, "%s: couldn't enable KVM_CAP_PPC_BOOKE_WATCHDOG: %s\n",
                 __func__, strerror(-ret));
@@ -1486,34 +1527,30 @@ int kvmppc_get_hypercall(CPUPPCState *env, uint8_t *buf, int buf_len)
     }
 
     /*
-     * Fallback to always fail hypercalls:
+     * Fallback to always fail hypercalls regardless of endianness:
      *
+     *     tdi 0,r0,72 (becomes b .+8 in wrong endian, nop in good endian)
      *     li r3, -1
-     *     nop
-     *     nop
-     *     nop
+     *     b .+8       (becomes nop in wrong endian)
+     *     bswap32(li r3, -1)
      */
 
-    hc[0] = 0x3860ffff;
-    hc[1] = 0x60000000;
-    hc[2] = 0x60000000;
-    hc[3] = 0x60000000;
+    hc[0] = cpu_to_be32(0x08000048);
+    hc[1] = cpu_to_be32(0x3860ffff);
+    hc[2] = cpu_to_be32(0x48000008);
+    hc[3] = cpu_to_be32(bswap32(0x3860ffff));
 
     return 0;
 }
 
 void kvmppc_set_papr(PowerPCCPU *cpu)
 {
-    CPUPPCState *env = &cpu->env;
     CPUState *cs = CPU(cpu);
-    struct kvm_enable_cap cap = {};
     int ret;
 
-    cap.cap = KVM_CAP_PPC_PAPR;
-    ret = kvm_vcpu_ioctl(cs, KVM_ENABLE_CAP, &cap);
-
+    ret = kvm_vcpu_enable_cap(cs, KVM_CAP_PPC_PAPR, 0);
     if (ret) {
-        cpu_abort(env, "This KVM version does not support PAPR\n");
+        cpu_abort(cs, "This KVM version does not support PAPR\n");
     }
 
     /* Update the capability flag so we sync the right information
@@ -1521,19 +1558,19 @@ void kvmppc_set_papr(PowerPCCPU *cpu)
     cap_papr = 1;
 }
 
+int kvmppc_set_compat(PowerPCCPU *cpu, uint32_t cpu_version)
+{
+    return kvm_set_one_reg(CPU(cpu), KVM_REG_PPC_ARCH_COMPAT, &cpu_version);
+}
+
 void kvmppc_set_mpic_proxy(PowerPCCPU *cpu, int mpic_proxy)
 {
-    CPUPPCState *env = &cpu->env;
     CPUState *cs = CPU(cpu);
-    struct kvm_enable_cap cap = {};
     int ret;
 
-    cap.cap = KVM_CAP_PPC_EPR;
-    cap.args[0] = mpic_proxy;
-    ret = kvm_vcpu_ioctl(cs, KVM_ENABLE_CAP, &cap);
-
+    ret = kvm_vcpu_enable_cap(cs, KVM_CAP_PPC_EPR, 0, mpic_proxy);
     if (ret && mpic_proxy) {
-        cpu_abort(env, "This KVM version does not support EPR\n");
+        cpu_abort(cs, "This KVM version does not support EPR\n");
     }
 }
 
@@ -1620,7 +1657,13 @@ uint64_t kvmppc_rma_size(uint64_t current_size, unsigned int hash_shift)
 }
 #endif
 
-void *kvmppc_create_spapr_tce(uint32_t liobn, uint32_t window_size, int *pfd)
+bool kvmppc_spapr_use_multitce(void)
+{
+    return cap_spapr_multitce;
+}
+
+void *kvmppc_create_spapr_tce(uint32_t liobn, uint32_t window_size, int *pfd,
+                              bool vfio_accel)
 {
     struct kvm_create_spapr_tce args = {
         .liobn = liobn,
@@ -1634,7 +1677,7 @@ void *kvmppc_create_spapr_tce(uint32_t liobn, uint32_t window_size, int *pfd)
      * destroying the table, which the upper layers -will- do
      */
     *pfd = -1;
-    if (!cap_spapr_tce) {
+    if (!cap_spapr_tce || (vfio_accel && !cap_spapr_vfio)) {
         return NULL;
     }
 
@@ -1660,7 +1703,7 @@ void *kvmppc_create_spapr_tce(uint32_t liobn, uint32_t window_size, int *pfd)
     return table;
 }
 
-int kvmppc_remove_spapr_tce(void *table, int fd, uint32_t window_size)
+int kvmppc_remove_spapr_tce(void *table, int fd, uint32_t nb_table)
 {
     long len;
 
@@ -1668,7 +1711,7 @@ int kvmppc_remove_spapr_tce(void *table, int fd, uint32_t window_size)
         return -1;
     }
 
-    len = (window_size / SPAPR_TCE_PAGE_SIZE)*sizeof(uint64_t);
+    len = nb_table * sizeof(uint64_t);
     if ((munmap(table, len) < 0) ||
         (close(fd) < 0)) {
         fprintf(stderr, "KVM: Unexpected error removing TCE table: %s",
@@ -1780,6 +1823,23 @@ bool kvmppc_has_cap_htab_fd(void)
     return cap_htab_fd;
 }
 
+bool kvmppc_has_cap_fixup_hcalls(void)
+{
+    return cap_fixup_hcalls;
+}
+
+static PowerPCCPUClass *ppc_cpu_get_family_class(PowerPCCPUClass *pcc)
+{
+    ObjectClass *oc = OBJECT_CLASS(pcc);
+
+    while (oc && !object_class_is_abstract(oc)) {
+        oc = object_class_get_parent(oc);
+    }
+    assert(oc);
+
+    return POWERPC_CPU_CLASS(oc);
+}
+
 static int kvm_ppc_register_host_cpu_type(void)
 {
     TypeInfo type_info = {
@@ -1789,6 +1849,7 @@ static int kvm_ppc_register_host_cpu_type(void)
     };
     uint32_t host_pvr = mfpvr();
     PowerPCCPUClass *pvr_pcc;
+    DeviceClass *dc;
 
     pvr_pcc = ppc_cpu_class_by_pvr(host_pvr);
     if (pvr_pcc == NULL) {
@@ -1799,6 +1860,14 @@ static int kvm_ppc_register_host_cpu_type(void)
     }
     type_info.parent = object_class_get_name(OBJECT_CLASS(pvr_pcc));
     type_register(&type_info);
+
+    /* Register generic family CPU class for a family */
+    pvr_pcc = ppc_cpu_get_family_class(pvr_pcc);
+    dc = DEVICE_CLASS(pvr_pcc);
+    type_info.parent = object_class_get_name(OBJECT_CLASS(pvr_pcc));
+    type_info.name = g_strdup_printf("%s-"TYPE_POWERPC_CPU, dc->desc);
+    type_register(&type_info);
+
     return 0;
 }
 

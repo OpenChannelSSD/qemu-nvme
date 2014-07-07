@@ -24,10 +24,9 @@
 
 #define CMD_NOFILE_OK   0x01
 
-char *progname;
+static char *progname;
 
-BlockDriverState *qemuio_bs;
-extern int qemuio_misalign;
+static BlockDriverState *qemuio_bs;
 
 /* qemu-io commands passed using -c */
 static int ncmdline;
@@ -55,6 +54,7 @@ static int openfile(char *name, int flags, int growable, QDict *opts)
 
     if (qemuio_bs) {
         fprintf(stderr, "file open already, try 'help close'\n");
+        QDECREF(opts);
         return 1;
     }
 
@@ -62,18 +62,20 @@ static int openfile(char *name, int flags, int growable, QDict *opts)
         if (bdrv_open(&qemuio_bs, name, NULL, opts, flags | BDRV_O_PROTOCOL,
                       NULL, &local_err))
         {
-            fprintf(stderr, "%s: can't open device %s: %s\n", progname, name,
+            fprintf(stderr, "%s: can't open%s%s: %s\n", progname,
+                    name ? " device " : "", name ?: "",
                     error_get_pretty(local_err));
             error_free(local_err);
             return 1;
         }
     } else {
-        qemuio_bs = bdrv_new("hda");
+        qemuio_bs = bdrv_new("hda", &error_abort);
 
         if (bdrv_open(&qemuio_bs, name, NULL, opts, flags, NULL, &local_err)
             < 0)
         {
-            fprintf(stderr, "%s: can't open device %s: %s\n", progname, name,
+            fprintf(stderr, "%s: can't open%s%s: %s\n", progname,
+                    name ? " device " : "", name ?: "",
                     error_get_pretty(local_err));
             error_free(local_err);
             bdrv_unref(qemuio_bs);
@@ -119,6 +121,7 @@ static const cmdinfo_t open_cmd = {
 
 static QemuOptsList empty_opts = {
     .name = "drive",
+    .merge_lists = true,
     .head = QTAILQ_HEAD_INITIALIZER(empty_opts.head),
     .desc = {
         /* no elements => accept any params */
@@ -133,7 +136,7 @@ static int open_f(BlockDriverState *bs, int argc, char **argv)
     int growable = 0;
     int c;
     QemuOpts *qopts;
-    QDict *opts = NULL;
+    QDict *opts;
 
     while ((c = getopt(argc, argv, "snrgo:")) != EOF) {
         switch (c) {
@@ -150,15 +153,14 @@ static int open_f(BlockDriverState *bs, int argc, char **argv)
             growable = 1;
             break;
         case 'o':
-            qopts = qemu_opts_parse(&empty_opts, optarg, 0);
-            if (qopts == NULL) {
+            if (!qemu_opts_parse(&empty_opts, optarg, 0)) {
                 printf("could not parse option list -- %s\n", optarg);
+                qemu_opts_reset(&empty_opts);
                 return 0;
             }
-            opts = qemu_opts_to_qdict(qopts, opts);
-            qemu_opts_del(qopts);
             break;
         default:
+            qemu_opts_reset(&empty_opts);
             return qemuio_command_usage(&open_cmd);
         }
     }
@@ -167,11 +169,16 @@ static int open_f(BlockDriverState *bs, int argc, char **argv)
         flags |= BDRV_O_RDWR;
     }
 
+    qopts = qemu_opts_find(&empty_opts, NULL);
+    opts = qopts ? qemu_opts_to_qdict(qopts, NULL) : NULL;
+    qemu_opts_reset(&empty_opts);
+
     if (optind == argc - 1) {
         return openfile(argv[optind], flags, growable, opts);
     } else if (optind == argc) {
         return openfile(NULL, flags, growable, opts);
     } else {
+        QDECREF(opts);
         return qemuio_command_usage(&open_cmd);
     }
 }
@@ -194,10 +201,11 @@ static const cmdinfo_t quit_cmd = {
 static void usage(const char *name)
 {
     printf(
-"Usage: %s [-h] [-V] [-rsnm] [-c cmd] ... [file]\n"
+"Usage: %s [-h] [-V] [-rsnm] [-c STRING] ... [file]\n"
 "QEMU Disk exerciser\n"
 "\n"
-"  -c, --cmd            command to execute\n"
+"  -c, --cmd STRING     execute command with its arguments\n"
+"                       from the given string\n"
 "  -r, --read-only      export read-only\n"
 "  -s, --snapshot       use snapshot file\n"
 "  -n, --nocache        disable host cache\n"
@@ -208,8 +216,10 @@ static void usage(const char *name)
 "  -T, --trace FILE     enable trace events listed in the given file\n"
 "  -h, --help           display this help and exit\n"
 "  -V, --version        output version information and exit\n"
+"\n"
+"See '%s -c help' for information on available commands."
 "\n",
-    name);
+    name, name);
 }
 
 static char *get_prompt(void)
@@ -408,7 +418,7 @@ int main(int argc, char **argv)
             readonly = 1;
             break;
         case 'm':
-            qemuio_misalign = 1;
+            qemuio_misalign = true;
             break;
         case 'g':
             growable = 1;
@@ -423,7 +433,7 @@ int main(int argc, char **argv)
             }
             break;
         case 'T':
-            if (!trace_backend_init(optarg, NULL)) {
+            if (!trace_init_backends(optarg, NULL)) {
                 exit(1); /* error message will have been printed */
             }
             break;

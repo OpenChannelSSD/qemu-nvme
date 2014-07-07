@@ -41,6 +41,7 @@
 #include "hw/sysbus.h"
 #include "hw/pci/msi.h"
 #include "qemu/bitops.h"
+#include "qapi/qmp/qerror.h"
 
 //#define DEBUG_OPENPIC
 
@@ -123,7 +124,7 @@ static FslMpicInfo fsl_mpic_42 = {
 #define TCCR_TOG          0x80000000 /* toggles when decrement to zero */
 
 #define IDR_EP_SHIFT      31
-#define IDR_EP_MASK       (1 << IDR_EP_SHIFT)
+#define IDR_EP_MASK       (1U << IDR_EP_SHIFT)
 #define IDR_CI0_SHIFT     30
 #define IDR_CI1_SHIFT     29
 #define IDR_P1_SHIFT      1
@@ -191,6 +192,7 @@ static uint32_t openpic_cpu_read_internal(void *opaque, hwaddr addr,
                                           int idx);
 static void openpic_cpu_write_internal(void *opaque, hwaddr addr,
                                        uint32_t val, int idx);
+static void openpic_reset(DeviceState *d);
 
 typedef enum IRQType {
     IRQ_TYPE_NORMAL = 0,
@@ -220,17 +222,17 @@ typedef struct IRQSource {
 } IRQSource;
 
 #define IVPR_MASK_SHIFT       31
-#define IVPR_MASK_MASK        (1 << IVPR_MASK_SHIFT)
+#define IVPR_MASK_MASK        (1U << IVPR_MASK_SHIFT)
 #define IVPR_ACTIVITY_SHIFT   30
-#define IVPR_ACTIVITY_MASK    (1 << IVPR_ACTIVITY_SHIFT)
+#define IVPR_ACTIVITY_MASK    (1U << IVPR_ACTIVITY_SHIFT)
 #define IVPR_MODE_SHIFT       29
-#define IVPR_MODE_MASK        (1 << IVPR_MODE_SHIFT)
+#define IVPR_MODE_MASK        (1U << IVPR_MODE_SHIFT)
 #define IVPR_POLARITY_SHIFT   23
-#define IVPR_POLARITY_MASK    (1 << IVPR_POLARITY_SHIFT)
+#define IVPR_POLARITY_MASK    (1U << IVPR_POLARITY_SHIFT)
 #define IVPR_SENSE_SHIFT      22
-#define IVPR_SENSE_MASK       (1 << IVPR_SENSE_SHIFT)
+#define IVPR_SENSE_MASK       (1U << IVPR_SENSE_SHIFT)
 
-#define IVPR_PRIORITY_MASK     (0xF << 16)
+#define IVPR_PRIORITY_MASK     (0xFU << 16)
 #define IVPR_PRIORITY(_ivprr_) ((int)(((_ivprr_) & IVPR_PRIORITY_MASK) >> 16))
 #define IVPR_VECTOR(opp, _ivprr_) ((_ivprr_) & (opp)->vector_mask)
 
@@ -308,11 +310,6 @@ static inline void IRQ_setbit(IRQQueue *q, int n_IRQ)
 static inline void IRQ_resetbit(IRQQueue *q, int n_IRQ)
 {
     clear_bit(n_IRQ, q->queue);
-}
-
-static inline int IRQ_testbit(IRQQueue *q, int n_IRQ)
-{
-    return test_bit(n_IRQ, q->queue);
 }
 
 static void IRQ_check(OpenPICState *opp, IRQQueue *q)
@@ -531,55 +528,6 @@ static void openpic_set_irq(void *opaque, int n_IRQ, int level)
             openpic_update_irq(opp, n_IRQ);
         }
     }
-}
-
-static void openpic_reset(DeviceState *d)
-{
-    OpenPICState *opp = OPENPIC(d);
-    int i;
-
-    opp->gcr = GCR_RESET;
-    /* Initialise controller registers */
-    opp->frr = ((opp->nb_irqs - 1) << FRR_NIRQ_SHIFT) |
-               ((opp->nb_cpus - 1) << FRR_NCPU_SHIFT) |
-               (opp->vid << FRR_VID_SHIFT);
-
-    opp->pir = 0;
-    opp->spve = -1 & opp->vector_mask;
-    opp->tfrr = opp->tfrr_reset;
-    /* Initialise IRQ sources */
-    for (i = 0; i < opp->max_irq; i++) {
-        opp->src[i].ivpr = opp->ivpr_reset;
-        opp->src[i].idr  = opp->idr_reset;
-
-        switch (opp->src[i].type) {
-        case IRQ_TYPE_NORMAL:
-            opp->src[i].level = !!(opp->ivpr_reset & IVPR_SENSE_MASK);
-            break;
-
-        case IRQ_TYPE_FSLINT:
-            opp->src[i].ivpr |= IVPR_POLARITY_MASK;
-            break;
-
-        case IRQ_TYPE_FSLSPECIAL:
-            break;
-        }
-    }
-    /* Initialise IRQ destinations */
-    for (i = 0; i < MAX_CPU; i++) {
-        opp->dst[i].ctpr      = 15;
-        memset(&opp->dst[i].raised, 0, sizeof(IRQQueue));
-        opp->dst[i].raised.next = -1;
-        memset(&opp->dst[i].servicing, 0, sizeof(IRQQueue));
-        opp->dst[i].servicing.next = -1;
-    }
-    /* Initialise timers */
-    for (i = 0; i < OPENPIC_MAX_TMR; i++) {
-        opp->timers[i].tccr = 0;
-        opp->timers[i].tbcr = TBCR_CI;
-    }
-    /* Go out of RESET state */
-    opp->gcr = 0;
 }
 
 static inline uint32_t read_IRQreg_idr(OpenPICState *opp, int n_IRQ)
@@ -1416,7 +1364,7 @@ static void openpic_load_IRQ_queue(QEMUFile* f, IRQQueue *q)
 static int openpic_load(QEMUFile* f, void *opaque, int version_id)
 {
     OpenPICState *opp = (OpenPICState *)opaque;
-    unsigned int i;
+    unsigned int i, nb_cpus;
 
     if (version_id != 1) {
         return -EINVAL;
@@ -1428,7 +1376,11 @@ static int openpic_load(QEMUFile* f, void *opaque, int version_id)
     qemu_get_be32s(f, &opp->spve);
     qemu_get_be32s(f, &opp->tfrr);
 
-    qemu_get_be32s(f, &opp->nb_cpus);
+    qemu_get_be32s(f, &nb_cpus);
+    if (opp->nb_cpus != nb_cpus) {
+        return -EINVAL;
+    }
+    assert(nb_cpus > 0 && nb_cpus <= MAX_CPU);
 
     for (i = 0; i < opp->nb_cpus; i++) {
         qemu_get_sbe32s(f, &opp->dst[i].ctpr);
@@ -1459,6 +1411,55 @@ static int openpic_load(QEMUFile* f, void *opaque, int version_id)
     }
 
     return 0;
+}
+
+static void openpic_reset(DeviceState *d)
+{
+    OpenPICState *opp = OPENPIC(d);
+    int i;
+
+    opp->gcr = GCR_RESET;
+    /* Initialise controller registers */
+    opp->frr = ((opp->nb_irqs - 1) << FRR_NIRQ_SHIFT) |
+               ((opp->nb_cpus - 1) << FRR_NCPU_SHIFT) |
+               (opp->vid << FRR_VID_SHIFT);
+
+    opp->pir = 0;
+    opp->spve = -1 & opp->vector_mask;
+    opp->tfrr = opp->tfrr_reset;
+    /* Initialise IRQ sources */
+    for (i = 0; i < opp->max_irq; i++) {
+        opp->src[i].ivpr = opp->ivpr_reset;
+        switch (opp->src[i].type) {
+        case IRQ_TYPE_NORMAL:
+            opp->src[i].level = !!(opp->ivpr_reset & IVPR_SENSE_MASK);
+            break;
+
+        case IRQ_TYPE_FSLINT:
+            opp->src[i].ivpr |= IVPR_POLARITY_MASK;
+            break;
+
+        case IRQ_TYPE_FSLSPECIAL:
+            break;
+        }
+
+        write_IRQreg_idr(opp, i, opp->idr_reset);
+    }
+    /* Initialise IRQ destinations */
+    for (i = 0; i < MAX_CPU; i++) {
+        opp->dst[i].ctpr      = 15;
+        memset(&opp->dst[i].raised, 0, sizeof(IRQQueue));
+        opp->dst[i].raised.next = -1;
+        memset(&opp->dst[i].servicing, 0, sizeof(IRQQueue));
+        opp->dst[i].servicing.next = -1;
+    }
+    /* Initialise timers */
+    for (i = 0; i < OPENPIC_MAX_TMR; i++) {
+        opp->timers[i].tccr = 0;
+        opp->timers[i].tbcr = TBCR_CI;
+    }
+    /* Go out of RESET state */
+    opp->gcr = 0;
 }
 
 typedef struct MemReg {
@@ -1566,6 +1567,13 @@ static void openpic_realize(DeviceState *dev, Error **errp)
                 OPENPIC_SUMMARY_REG_START, OPENPIC_SUMMARY_REG_SIZE},
         {NULL}
     };
+
+    if (opp->nb_cpus > MAX_CPU) {
+        error_set(errp, QERR_PROPERTY_VALUE_OUT_OF_RANGE,
+                  TYPE_OPENPIC, "nb_cpus", (uint64_t)opp->nb_cpus,
+                  (uint64_t)0, (uint64_t)MAX_CPU);
+        return;
+    }
 
     switch (opp->model) {
     case OPENPIC_MODEL_FSL_MPIC_20:

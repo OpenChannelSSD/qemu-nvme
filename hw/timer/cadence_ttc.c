@@ -346,11 +346,13 @@ static void cadence_ttc_write(void *opaque, hwaddr offset,
     case 0x34:
     case 0x38:
         s->reg_match[0] = value & 0xffff;
+        break;
 
     case 0x3c: /* match register */
     case 0x40:
     case 0x44:
         s->reg_match[1] = value & 0xffff;
+        break;
 
     case 0x48: /* match register */
     case 0x4c:
@@ -404,21 +406,19 @@ static void cadence_timer_init(uint32_t freq, CadenceTimerState *s)
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cadence_timer_tick, s);
 }
 
-static int cadence_ttc_init(SysBusDevice *dev)
+static void cadence_ttc_init(Object *obj)
 {
-    CadenceTTCState *s = CADENCE_TTC(dev);
+    CadenceTTCState *s = CADENCE_TTC(obj);
     int i;
 
     for (i = 0; i < 3; ++i) {
         cadence_timer_init(133000000, &s->timer[i]);
-        sysbus_init_irq(dev, &s->timer[i].irq);
+        sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->timer[i].irq);
     }
 
-    memory_region_init_io(&s->iomem, OBJECT(s), &cadence_ttc_ops, s,
+    memory_region_init_io(&s->iomem, obj, &cadence_ttc_ops, s,
                           "timer", 0x1000);
-    sysbus_init_mmio(dev, &s->iomem);
-
-    return 0;
+    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
 }
 
 static void cadence_timer_pre_save(void *opaque)
@@ -441,7 +441,6 @@ static const VMStateDescription vmstate_cadence_timer = {
     .name = "cadence_timer",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .pre_save = cadence_timer_pre_save,
     .post_load = cadence_timer_post_load,
     .fields = (VMStateField[]) {
@@ -462,7 +461,6 @@ static const VMStateDescription vmstate_cadence_ttc = {
     .name = "cadence_TTC",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .fields = (VMStateField[]) {
         VMSTATE_STRUCT_ARRAY(timer, CadenceTTCState, 3, 0,
                             vmstate_cadence_timer,
@@ -474,9 +472,7 @@ static const VMStateDescription vmstate_cadence_ttc = {
 static void cadence_ttc_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
 
-    sdc->init = cadence_ttc_init;
     dc->vmsd = &vmstate_cadence_ttc;
 }
 
@@ -484,6 +480,7 @@ static const TypeInfo cadence_ttc_info = {
     .name  = TYPE_CADENCE_TTC,
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size  = sizeof(CadenceTTCState),
+    .instance_init = cadence_ttc_init,
     .class_init = cadence_ttc_class_init,
 };
 

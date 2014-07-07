@@ -18,17 +18,19 @@
 #include "net/hub.h"
 #include "qapi/visitor.h"
 #include "sysemu/char.h"
+#include "sysemu/iothread.h"
 
 static void get_pointer(Object *obj, Visitor *v, Property *prop,
-                        const char *(*print)(void *ptr),
+                        char *(*print)(void *ptr),
                         const char *name, Error **errp)
 {
     DeviceState *dev = DEVICE(obj);
     void **ptr = qdev_get_prop_ptr(dev, prop);
     char *p;
 
-    p = (char *) (*ptr ? print(*ptr) : "");
+    p = *ptr ? print(*ptr) : g_strdup("");
     visit_type_str(v, &p, name, errp);
+    g_free(p);
 }
 
 static void set_pointer(Object *obj, Visitor *v, Property *prop,
@@ -91,9 +93,9 @@ static void release_drive(Object *obj, const char *name, void *opaque)
     }
 }
 
-static const char *print_drive(void *ptr)
+static char *print_drive(void *ptr)
 {
-    return bdrv_get_device_name(ptr);
+    return g_strdup(bdrv_get_device_name(ptr));
 }
 
 static void get_drive(Object *obj, Visitor *v, void *opaque,
@@ -145,11 +147,12 @@ static void release_chr(Object *obj, const char *name, void *opaque)
 }
 
 
-static const char *print_chr(void *ptr)
+static char *print_chr(void *ptr)
 {
     CharDriverState *chr = ptr;
+    const char *val = chr->label ? chr->label : "";
 
-    return chr->label ? chr->label : "";
+    return g_strdup(val);
 }
 
 static void get_chr(Object *obj, Visitor *v, void *opaque,
@@ -177,7 +180,6 @@ PropertyInfo qdev_prop_chr = {
 static int parse_netdev(DeviceState *dev, const char *str, void **ptr)
 {
     NICPeers *peers_ptr = (NICPeers *)ptr;
-    NICConf *conf = container_of(peers_ptr, NICConf, peers);
     NetClientState **ncs = peers_ptr->ncs;
     NetClientState *peers[MAX_QUEUE_NUM];
     int queues, i = 0;
@@ -216,7 +218,7 @@ static int parse_netdev(DeviceState *dev, const char *str, void **ptr)
         ncs[i]->queue_index = i;
     }
 
-    conf->queues = queues;
+    peers_ptr->queues = queues;
 
     return 0;
 
@@ -224,11 +226,12 @@ err:
     return ret;
 }
 
-static const char *print_netdev(void *ptr)
+static char *print_netdev(void *ptr)
 {
     NetClientState *netdev = ptr;
+    const char *val = netdev->name ? netdev->name : "";
 
-    return netdev->name ? netdev->name : "";
+    return g_strdup(val);
 }
 
 static void get_netdev(Object *obj, Visitor *v, void *opaque,
@@ -334,13 +337,13 @@ PropertyInfo qdev_prop_vlan = {
 int qdev_prop_set_drive(DeviceState *dev, const char *name,
                         BlockDriverState *value)
 {
-    Error *errp = NULL;
+    Error *err = NULL;
     const char *bdrv_name = value ? bdrv_get_device_name(value) : "";
     object_property_set_str(OBJECT(dev), bdrv_name,
-                            name, &errp);
-    if (errp) {
-        qerror_report_err(errp);
-        error_free(errp);
+                            name, &err);
+    if (err) {
+        qerror_report_err(err);
+        error_free(err);
         return -1;
     }
     return 0;
@@ -385,11 +388,27 @@ void qdev_set_nic_properties(DeviceState *dev, NICInfo *nd)
 static int qdev_add_one_global(QemuOpts *opts, void *opaque)
 {
     GlobalProperty *g;
+    ObjectClass *oc;
 
     g = g_malloc0(sizeof(*g));
     g->driver   = qemu_opt_get(opts, "driver");
     g->property = qemu_opt_get(opts, "property");
     g->value    = qemu_opt_get(opts, "value");
+    oc = object_class_by_name(g->driver);
+    if (oc) {
+        DeviceClass *dc = DEVICE_CLASS(oc);
+
+        if (dc->hotpluggable) {
+            /* If hotpluggable then skip not_used checking. */
+            g->not_used = false;
+        } else {
+            /* Maybe a typo. */
+            g->not_used = true;
+        }
+    } else {
+        /* Maybe a typo. */
+        g->not_used = true;
+    }
     qdev_prop_register_global(g);
     return 0;
 }

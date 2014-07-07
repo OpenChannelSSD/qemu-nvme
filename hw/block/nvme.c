@@ -313,8 +313,9 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     NvmeCtrl *n = cq->ctrl;
     NvmeSQueue *sq = req->sq;
     NvmeCqe *cqe = &req->cqe;
+    uint8_t phase = cq->phase;
     hwaddr addr;
-    
+
     if (cq->phys_contig) {
         addr = cq->dma_addr + cq->tail * n->cqe_size;
     } else {
@@ -323,7 +324,7 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     }
     nvme_inc_cq_tail(cq);
 
-    cqe->status = cpu_to_le16((req->status << 1) | cq->phase);
+    cqe->status = cpu_to_le16((req->status << 1) | phase);
     cqe->sq_id = cpu_to_le16(sq->sqid);
     cqe->sq_head = cpu_to_le16(sq->head);
     pci_dma_write(&n->parent_obj, addr, (void *)cqe, sizeof(*cqe));
@@ -960,7 +961,7 @@ static uint16_t nvme_compare(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_SUCCESS;
 }
 
-static void nvme_flush_cb(void *opaque, int ret)
+static void nvme_misc_cb(void *opaque, int ret)
 {
     NvmeRequest *req = opaque;
     NvmeSQueue *sq = req->sq;
@@ -980,7 +981,30 @@ static uint16_t nvme_flush(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
     bdrv_acct_start(n->conf.bs, &req->acct, 0, BDRV_ACCT_FLUSH);
-    req->aiocb = bdrv_aio_flush(n->conf.bs, nvme_flush_cb, req);
+    req->aiocb = bdrv_aio_flush(n->conf.bs, nvme_misc_cb, req);
+    return NVME_NO_COMPLETE;
+}
+
+static uint16_t nvme_write_zeros(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+    NvmeRequest *req)
+{
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
+    uint64_t slba = le64_to_cpu(rw->slba);
+    uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
+    uint64_t aio_slba = ns->start_block + (slba << (data_shift - BDRV_SECTOR_BITS));
+    uint32_t aio_nlb = nlb << (data_shift - BDRV_SECTOR_BITS);
+
+    if ((slba + nlb) > ns->id_ns.nsze) {
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
+            offsetof(NvmeRwCmd, nlb), slba + nlb, ns->id);
+        return NVME_LBA_RANGE | NVME_DNR;
+    }
+
+    bdrv_acct_start(n->conf.bs, &req->acct, 0, BDRV_ACCT_WRITE);
+    req->aiocb = bdrv_aio_write_zeroes(n->conf.bs, aio_slba, aio_nlb, 0,
+                                        nvme_misc_cb, req);
     return NVME_NO_COMPLETE;
 }
 
@@ -1031,6 +1055,12 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     case NVME_CMD_COMPARE:
         if (NVME_ONCS_COMPARE & n->oncs) {
             return nvme_compare(n, ns, cmd, req);
+        }
+        return NVME_INVALID_OPCODE | NVME_DNR;
+
+    case NVME_CMD_WRITE_ZEROS:
+        if (NVME_ONCS_WRITE_ZEROS & n->oncs) {
+            return nvme_write_zeros(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
 
@@ -1470,16 +1500,16 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     uint32_t trans_len;
     time_t current_seconds;
     NvmeSmartLog smart;
-    BlockStats *s = bdrv_query_stats(n->conf.bs);
+    //BlockStats *s = bdrv_query_stats(n->conf.bs);
 
     trans_len = MIN(sizeof(smart), buf_len);
     memset(&smart, 0x0, sizeof(smart));
-    smart.data_units_read[0] = cpu_to_le64(s->stats->rd_bytes);
-    smart.data_units_written[0] = cpu_to_le64(s->stats->wr_bytes);
-    smart.host_read_commands[0] = cpu_to_le64(s->stats->rd_operations);
-    smart.host_write_commands[0] = cpu_to_le64(s->stats->wr_operations);
+    //smart.data_units_read[0] = cpu_to_le64(s->stats->rd_bytes);
+    //smart.data_units_written[0] = cpu_to_le64(s->stats->wr_bytes);
+    //smart.host_read_commands[0] = cpu_to_le64(s->stats->rd_operations);
+    //smart.host_write_commands[0] = cpu_to_le64(s->stats->wr_operations);
 
-    g_free(s);
+    //g_free(s);
     smart.number_of_error_log_entries[0] = cpu_to_le64(n->num_errors);
     smart.temperature[0] = n->temperature & 0xff;
     smart.temperature[1] = (n->temperature >> 8) & 0xff;
@@ -2004,7 +2034,7 @@ static int nvme_check_constraints(NvmeCtrl *n)
         (n->mpsmax > 0xf || n->mpsmax > n->mpsmin) ||
         (n->oacs & ~(NVME_OACS_FORMAT)) ||
         (n->oncs & ~(NVME_ONCS_COMPARE | NVME_ONCS_WRITE_UNCORR |
-            NVME_ONCS_DSM))) {
+            NVME_ONCS_DSM | NVME_ONCS_WRITE_ZEROS))) {
         return -1;
     }
     return 0;

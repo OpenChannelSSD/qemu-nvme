@@ -37,6 +37,7 @@
 #include "bios-linker-loader.h"
 #include "hw/loader.h"
 #include "hw/isa/isa.h"
+#include "hw/acpi/memory_hotplug.h"
 
 /* Supported chipsets: */
 #include "hw/acpi/piix4.h"
@@ -52,7 +53,7 @@
 #include "qom/qom-qobject.h"
 
 typedef struct AcpiCpuInfo {
-    DECLARE_BITMAP(found_cpus, MAX_CPUMASK_BITS + 1);
+    DECLARE_BITMAP(found_cpus, ACPI_CPU_HOTPLUG_ID_LIMIT);
 } AcpiCpuInfo;
 
 typedef struct AcpiMcfgInfo {
@@ -117,7 +118,7 @@ int acpi_add_cpu_info(Object *o, void *opaque)
 
     if (object_dynamic_cast(o, TYPE_CPU)) {
         apic_id = object_property_get_int(o, "apic-id", NULL);
-        assert(apic_id <= MAX_CPUMASK_BITS);
+        assert(apic_id < ACPI_CPU_HOTPLUG_ID_LIMIT);
 
         set_bit(apic_id, cpu->found_cpus);
     }
@@ -156,18 +157,21 @@ static void acpi_get_pm_info(AcpiPmInfo *pm)
     } else {
         pm->s3_disabled = false;
     }
+    qobject_decref(o);
     o = object_property_get_qobject(obj, ACPI_PM_PROP_S4_DISABLED, NULL);
     if (o) {
         pm->s4_disabled = qint_get_int(qobject_to_qint(o));
     } else {
         pm->s4_disabled = false;
     }
+    qobject_decref(o);
     o = object_property_get_qobject(obj, ACPI_PM_PROP_S4_VAL, NULL);
     if (o) {
         pm->s4_val = qint_get_int(qobject_to_qint(o));
     } else {
         pm->s4_val = false;
     }
+    qobject_decref(o);
 
     /* Fill in mandatory properties */
     pm->sci_int = object_property_get_int(obj, ACPI_PM_PROP_SCI_INT, NULL);
@@ -226,14 +230,14 @@ static void acpi_get_pci_info(PcPciInfo *info)
 
 static void
 build_header(GArray *linker, GArray *table_data,
-             AcpiTableHeader *h, uint32_t sig, int len, uint8_t rev)
+             AcpiTableHeader *h, const char *sig, int len, uint8_t rev)
 {
-    h->signature = cpu_to_le32(sig);
+    memcpy(&h->signature, sig, 4);
     h->length = cpu_to_le32(len);
     h->revision = rev;
     memcpy(h->oem_id, ACPI_BUILD_APPNAME6, 6);
     memcpy(h->oem_table_id, ACPI_BUILD_APPNAME4, 4);
-    memcpy(h->oem_table_id + 4, (void *)&sig, 4);
+    memcpy(h->oem_table_id + 4, sig, 4);
     h->oem_revision = cpu_to_le32(1);
     memcpy(h->asl_compiler_id, ACPI_BUILD_APPNAME4, 4);
     h->asl_compiler_revision = cpu_to_le32(1);
@@ -391,7 +395,7 @@ static void build_append_int(GArray *table, uint32_t value)
         build_append_byte(table, 0x01); /* OneOp */
     } else if (value <= 0xFF) {
         build_append_value(table, value, 1);
-    } else if (value <= 0xFFFFF) {
+    } else if (value <= 0xFFFF) {
         build_append_value(table, value, 2);
     } else {
         build_append_value(table, value, 4);
@@ -495,7 +499,7 @@ static void
 build_facs(GArray *table_data, GArray *linker, PcGuestInfo *guest_info)
 {
     AcpiFacsDescriptorRev1 *facs = acpi_data_push(table_data, sizeof *facs);
-    facs->signature = cpu_to_le32(ACPI_FACS_SIGNATURE);
+    memcpy(&facs->signature, "FACS", 4);
     facs->length = cpu_to_le32(sizeof(*facs));
 }
 
@@ -552,7 +556,7 @@ build_fadt(GArray *table_data, GArray *linker, AcpiPmInfo *pm,
     fadt_setup(fadt, pm);
 
     build_header(linker, table_data,
-                 (void *)fadt, ACPI_FACP_SIGNATURE, sizeof(*fadt), 1);
+                 (void *)fadt, "FACP", sizeof(*fadt), 1);
 }
 
 static void
@@ -621,7 +625,7 @@ build_madt(GArray *table_data, GArray *linker, AcpiCpuInfo *cpu,
     local_nmi->lint         = 1; /* ACPI_LINT1 */
 
     build_header(linker, table_data,
-                 (void *)(table_data->data + madt_start), ACPI_APIC_SIGNATURE,
+                 (void *)(table_data->data + madt_start), "APIC",
                  table_data->len - madt_start, 1);
 }
 
@@ -663,6 +667,14 @@ static inline char acpi_get_hex(uint32_t val)
 #define ACPI_PCIQXL_OFFSET_ADR (*ssdt_pciqxl_adr - *ssdt_pciqxl_start)
 #define ACPI_PCIQXL_SIZEOF (*ssdt_pciqxl_end - *ssdt_pciqxl_start)
 #define ACPI_PCIQXL_AML (ssdp_pcihp_aml + *ssdt_pciqxl_start)
+
+#include "hw/i386/ssdt-mem.hex"
+
+/* 0x5B 0x82 DeviceOp PkgLength NameString DimmID */
+#define ACPI_MEM_OFFSET_HEX (*ssdt_mem_name - *ssdt_mem_start + 2)
+#define ACPI_MEM_OFFSET_ID (*ssdt_mem_id - *ssdt_mem_start + 7)
+#define ACPI_MEM_SIZEOF (*ssdt_mem_end - *ssdt_mem_start)
+#define ACPI_MEM_AML (ssdm_mem_aml + *ssdt_mem_start)
 
 #define ACPI_SSDT_SIGNATURE 0x54445353 /* SSDT */
 #define ACPI_SSDT_HEADER_LENGTH 36
@@ -841,7 +853,7 @@ static void build_pci_bus_end(PCIBus *bus, void *bus_state)
         pc = PCI_DEVICE_GET_CLASS(pdev);
         dc = DEVICE_GET_CLASS(pdev);
 
-        if (pc->class_id == PCI_CLASS_BRIDGE_ISA) {
+        if (pc->class_id == PCI_CLASS_BRIDGE_ISA || pc->is_bridge) {
             set_bit(slot, slot_device_system);
         }
 
@@ -882,7 +894,7 @@ static void build_pci_bus_end(PCIBus *bus, void *bus_state)
             memcpy(pcihp, ACPI_PCIVGA_AML, ACPI_PCIVGA_SIZEOF);
             patch_pcivga(i, pcihp);
         } else if (system) {
-            /* Nothing to do: system devices are in DSDT. */
+            /* Nothing to do: system devices are in DSDT or in SSDT above. */
         } else if (present) {
             void *pcihp = acpi_data_push(bus_table,
                                          ACPI_PCINOHP_SIZEOF);
@@ -907,7 +919,7 @@ static void build_pci_bus_end(PCIBus *bus, void *bus_state)
 
             build_append_byte(notify, 0x7B); /* AndOp */
             build_append_byte(notify, 0x68); /* Arg0Op */
-            build_append_int(notify, 0x1 << i);
+            build_append_int(notify, 0x1U << i);
             build_append_byte(notify, 0x00); /* NullName */
             build_append_byte(notify, 0x86); /* NotifyOp */
             build_append_nameseg(notify, "S%.02X_", PCI_DEVFN(i, 0));
@@ -973,6 +985,7 @@ static void build_pci_bus_end(PCIBus *bus, void *bus_state)
         }
     }
 
+    qobject_decref(bsel);
     build_free_array(bus_table);
     build_pci_bus_state_cleanup(child);
     g_free(child);
@@ -999,10 +1012,17 @@ build_ssdt(GArray *table_data, GArray *linker,
            AcpiCpuInfo *cpu, AcpiPmInfo *pm, AcpiMiscInfo *misc,
            PcPciInfo *pci, PcGuestInfo *guest_info)
 {
-    int acpi_cpus = MIN(0xff, guest_info->apic_id_limit);
+    MachineState *machine = MACHINE(qdev_get_machine());
+    uint32_t nr_mem = machine->ram_slots;
+    unsigned acpi_cpus = guest_info->apic_id_limit;
     int ssdt_start = table_data->len;
     uint8_t *ssdt_ptr;
     int i;
+
+    /* The current AML generator can cover the APIC ID range [0..255],
+     * inclusive, for VCPU hotplug. */
+    QEMU_BUILD_BUG_ON(ACPI_CPU_HOTPLUG_ID_LIMIT > 256);
+    g_assert(acpi_cpus <= ACPI_CPU_HOTPLUG_ID_LIMIT);
 
     /* Copy header and patch values in the S3_ / S4_ / S5_ packages */
     ssdt_ptr = acpi_data_push(table_data, sizeof(ssdp_misc_aml));
@@ -1019,8 +1039,11 @@ build_ssdt(GArray *table_data, GArray *linker,
 
     patch_pci_windows(pci, ssdt_ptr, sizeof(ssdp_misc_aml));
 
-    *(uint16_t *)(ssdt_ptr + *ssdt_isa_pest) =
-        cpu_to_le16(misc->pvpanic_port);
+    ACPI_BUILD_SET_LE(ssdt_ptr, sizeof(ssdp_misc_aml),
+                      ssdt_isa_pest[0], 16, misc->pvpanic_port);
+
+    ACPI_BUILD_SET_LE(ssdt_ptr, sizeof(ssdp_misc_aml),
+                      ssdt_mctrl_nr_slots[0], 32, nr_mem);
 
     {
         GArray *sb_scope = build_alloc_array();
@@ -1050,9 +1073,21 @@ build_ssdt(GArray *table_data, GArray *linker,
 
         {
             GArray *package = build_alloc_array();
-            uint8_t op = 0x12; /* PackageOp */
+            uint8_t op;
 
-            build_append_byte(package, acpi_cpus); /* NumElements */
+            /*
+             * Note: The ability to create variable-sized packages was first introduced in ACPI 2.0. ACPI 1.0 only
+             * allowed fixed-size packages with up to 255 elements.
+             * Windows guests up to win2k8 fail when VarPackageOp is used.
+             */
+            if (acpi_cpus <= 255) {
+                op = 0x12; /* PackageOp */
+                build_append_byte(package, acpi_cpus); /* NumElements */
+            } else {
+                op = 0x13; /* VarPackageOp */
+                build_append_int(package, acpi_cpus); /* VarNumElements */
+            }
+
             for (i = 0; i < acpi_cpus; i++) {
                 uint8_t b = test_bit(i, cpu->found_cpus) ? 0x01 : 0x00;
                 build_append_byte(package, b);
@@ -1061,6 +1096,27 @@ build_ssdt(GArray *table_data, GArray *linker,
             build_package(package, op, 2);
             build_append_array(sb_scope, package);
             build_free_array(package);
+        }
+
+        if (nr_mem) {
+            assert(nr_mem <= ACPI_MAX_RAM_SLOTS);
+            /* build memory devices */
+            for (i = 0; i < nr_mem; i++) {
+                char id[3];
+                uint8_t *mem = acpi_data_push(sb_scope, ACPI_MEM_SIZEOF);
+
+                snprintf(id, sizeof(id), "%02X", i);
+                memcpy(mem, ACPI_MEM_AML, ACPI_MEM_SIZEOF);
+                memcpy(mem + ACPI_MEM_OFFSET_HEX, id, 2);
+                memcpy(mem + ACPI_MEM_OFFSET_ID, id, 2);
+            }
+
+            /* build Method(MEMORY_SLOT_NOTIFY_METHOD, 2) {
+             *     If (LEqual(Arg0, 0x00)) {Notify(MP00, Arg1)} ...
+             */
+            build_append_notify_method(sb_scope,
+                                       stringify(MEMORY_SLOT_NOTIFY_METHOD),
+                                       "MP%0.02X", nr_mem);
         }
 
         {
@@ -1093,7 +1149,7 @@ build_ssdt(GArray *table_data, GArray *linker,
 
     build_header(linker, table_data,
                  (void *)(table_data->data + ssdt_start),
-                 ACPI_SSDT_SIGNATURE, table_data->len - ssdt_start, 1);
+                 "SSDT", table_data->len - ssdt_start, 1);
 }
 
 static void
@@ -1108,18 +1164,25 @@ build_hpet(GArray *table_data, GArray *linker)
     hpet->timer_block_id = cpu_to_le32(0x8086a201);
     hpet->addr.address = cpu_to_le64(HPET_BASE);
     build_header(linker, table_data,
-                 (void *)hpet, ACPI_HPET_SIGNATURE, sizeof(*hpet), 1);
+                 (void *)hpet, "HPET", sizeof(*hpet), 1);
 }
 
+typedef enum {
+    MEM_AFFINITY_NOFLAGS      = 0,
+    MEM_AFFINITY_ENABLED      = (1 << 0),
+    MEM_AFFINITY_HOTPLUGGABLE = (1 << 1),
+    MEM_AFFINITY_NON_VOLATILE = (1 << 2),
+} MemoryAffinityFlags;
+
 static void
-acpi_build_srat_memory(AcpiSratMemoryAffinity *numamem,
-                       uint64_t base, uint64_t len, int node, int enabled)
+acpi_build_srat_memory(AcpiSratMemoryAffinity *numamem, uint64_t base,
+                       uint64_t len, int node, MemoryAffinityFlags flags)
 {
     numamem->type = ACPI_SRAT_MEMORY;
     numamem->length = sizeof(*numamem);
     memset(numamem->proximity, 0, 4);
     numamem->proximity[0] = node;
-    numamem->flags = cpu_to_le32(!!enabled);
+    numamem->flags = cpu_to_le32(flags);
     numamem->base_addr = cpu_to_le64(base);
     numamem->range_length = cpu_to_le64(len);
 }
@@ -1136,6 +1199,10 @@ build_srat(GArray *table_data, GArray *linker,
     uint64_t curnode;
     int srat_start, numa_start, slots;
     uint64_t mem_len, mem_base, next_base;
+    PCMachineState *pcms = PC_MACHINE(qdev_get_machine());
+    ram_addr_t hotplugabble_address_space_size =
+        object_property_get_int(OBJECT(pcms), PC_MACHINE_MEMHP_REGION_SIZE,
+                                NULL);
 
     srat_start = table_data->len;
 
@@ -1167,7 +1234,7 @@ build_srat(GArray *table_data, GArray *linker,
     numa_start = table_data->len;
 
     numamem = acpi_data_push(table_data, sizeof *numamem);
-    acpi_build_srat_memory(numamem, 0, 640*1024, 0, 1);
+    acpi_build_srat_memory(numamem, 0, 640*1024, 0, MEM_AFFINITY_ENABLED);
     next_base = 1024 * 1024;
     for (i = 1; i < guest_info->numa_nodes + 1; ++i) {
         mem_base = next_base;
@@ -1183,24 +1250,39 @@ build_srat(GArray *table_data, GArray *linker,
             mem_len -= next_base - guest_info->ram_size_below_4g;
             if (mem_len > 0) {
                 numamem = acpi_data_push(table_data, sizeof *numamem);
-                acpi_build_srat_memory(numamem, mem_base, mem_len, i-1, 1);
+                acpi_build_srat_memory(numamem, mem_base, mem_len, i - 1,
+                                       MEM_AFFINITY_ENABLED);
             }
             mem_base = 1ULL << 32;
             mem_len = next_base - guest_info->ram_size_below_4g;
             next_base += (1ULL << 32) - guest_info->ram_size_below_4g;
         }
         numamem = acpi_data_push(table_data, sizeof *numamem);
-        acpi_build_srat_memory(numamem, mem_base, mem_len, i - 1, 1);
+        acpi_build_srat_memory(numamem, mem_base, mem_len, i - 1,
+                               MEM_AFFINITY_ENABLED);
     }
     slots = (table_data->len - numa_start) / sizeof *numamem;
     for (; slots < guest_info->numa_nodes + 2; slots++) {
         numamem = acpi_data_push(table_data, sizeof *numamem);
-        acpi_build_srat_memory(numamem, 0, 0, 0, 0);
+        acpi_build_srat_memory(numamem, 0, 0, 0, MEM_AFFINITY_NOFLAGS);
+    }
+
+    /*
+     * Entry is required for Windows to enable memory hotplug in OS.
+     * Memory devices may override proximity set by this entry,
+     * providing _PXM method if necessary.
+     */
+    if (hotplugabble_address_space_size) {
+        numamem = acpi_data_push(table_data, sizeof *numamem);
+        acpi_build_srat_memory(numamem, pcms->hotplug_memory_base,
+                               hotplugabble_address_space_size, 0,
+                               MEM_AFFINITY_HOTPLUGGABLE |
+                               MEM_AFFINITY_ENABLED);
     }
 
     build_header(linker, table_data,
                  (void *)(table_data->data + srat_start),
-                 ACPI_SRAT_SIGNATURE,
+                 "SRAT",
                  table_data->len - srat_start, 1);
 }
 
@@ -1208,7 +1290,7 @@ static void
 build_mcfg_q35(GArray *table_data, GArray *linker, AcpiMcfgInfo *info)
 {
     AcpiTableMcfg *mcfg;
-    uint32_t sig;
+    const char *sig;
     int len = sizeof(*mcfg) + 1 * sizeof(mcfg->allocation[0]);
 
     mcfg = acpi_data_push(table_data, len);
@@ -1225,9 +1307,10 @@ build_mcfg_q35(GArray *table_data, GArray *linker, AcpiMcfgInfo *info)
      * ACPI spec requires OSPMs to ignore such tables.
      */
     if (info->mcfg_base == PCIE_BASE_ADDR_UNMAPPED) {
-        sig = ACPI_RSRV_SIGNATURE;
+        /* Reserved signature: ignored by OSPM */
+        sig = "QEMU";
     } else {
-        sig = ACPI_MCFG_SIGNATURE;
+        sig = "MCFG";
     }
     build_header(linker, table_data, (void *)mcfg, sig, len, 1);
 }
@@ -1243,7 +1326,7 @@ build_dsdt(GArray *table_data, GArray *linker, AcpiMiscInfo *misc)
     memcpy(dsdt, misc->dsdt_code, misc->dsdt_size);
 
     memset(dsdt, 0, sizeof *dsdt);
-    build_header(linker, table_data, dsdt, ACPI_DSDT_SIGNATURE,
+    build_header(linker, table_data, dsdt, "DSDT",
                  misc->dsdt_size, 1);
 }
 
@@ -1268,7 +1351,7 @@ build_rsdt(GArray *table_data, GArray *linker, GArray *table_offsets)
                                        sizeof(uint32_t));
     }
     build_header(linker, table_data,
-                 (void *)rsdt, ACPI_RSDT_SIGNATURE, rsdt_len, 1);
+                 (void *)rsdt, "RSDT", rsdt_len, 1);
 }
 
 static GArray *
@@ -1279,7 +1362,7 @@ build_rsdp(GArray *rsdp_table, GArray *linker, unsigned rsdt)
     bios_linker_loader_alloc(linker, ACPI_BUILD_RSDP_FILE, 1,
                              true /* fseg memory */);
 
-    rsdp->signature = cpu_to_le64(ACPI_RSDP_SIGNATURE);
+    memcpy(&rsdp->signature, "RSD PTR ", 8);
     memcpy(rsdp->oem_id, ACPI_BUILD_APPNAME6, 6);
     rsdp->rsdt_physical_address = cpu_to_le32(rsdt);
     /* Address to be filled by Guest linker */
@@ -1344,10 +1427,12 @@ static bool acpi_get_mcfg(AcpiMcfgInfo *mcfg)
         return false;
     }
     mcfg->mcfg_base = qint_get_int(qobject_to_qint(o));
+    qobject_decref(o);
 
     o = object_property_get_qobject(pci_host, PCIE_HOST_MCFG_SIZE, NULL);
     assert(o);
     mcfg->mcfg_size = qint_get_int(qobject_to_qint(o));
+    qobject_decref(o);
     return true;
 }
 
@@ -1392,15 +1477,16 @@ void acpi_build(PcGuestInfo *guest_info, AcpiBuildTables *tables)
     /* ACPI tables pointed to by RSDT */
     acpi_add_table(table_offsets, tables->table_data);
     build_fadt(tables->table_data, tables->linker, &pm, facs, dsdt);
-    acpi_add_table(table_offsets, tables->table_data);
 
+    acpi_add_table(table_offsets, tables->table_data);
     build_ssdt(tables->table_data, tables->linker, &cpu, &pm, &misc, &pci,
                guest_info);
-    acpi_add_table(table_offsets, tables->table_data);
 
-    build_madt(tables->table_data, tables->linker, &cpu, guest_info);
     acpi_add_table(table_offsets, tables->table_data);
+    build_madt(tables->table_data, tables->linker, &cpu, guest_info);
+
     if (misc.has_hpet) {
+        acpi_add_table(table_offsets, tables->table_data);
         build_hpet(tables->table_data, tables->linker);
     }
     if (guest_info->numa_nodes) {
@@ -1479,8 +1565,7 @@ static const VMStateDescription vmstate_acpi_build = {
     .name = "acpi_build",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT8(patched, AcpiBuildState),
         VMSTATE_END_OF_LIST()
     },

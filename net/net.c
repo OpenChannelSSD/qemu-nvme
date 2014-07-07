@@ -49,6 +49,23 @@
 
 static QTAILQ_HEAD(, NetClientState) net_clients;
 
+const char *host_net_devices[] = {
+    "tap",
+    "socket",
+    "dump",
+#ifdef CONFIG_NET_BRIDGE
+    "bridge",
+#endif
+#ifdef CONFIG_SLIRP
+    "user",
+#endif
+#ifdef CONFIG_VDE
+    "vde",
+#endif
+    "vhost-user",
+    NULL,
+};
+
 int default_net = 1;
 
 /***********************************************************/
@@ -233,7 +250,7 @@ NICState *qemu_new_nic(NetClientInfo *info,
 {
     NetClientState **peers = conf->peers.ncs;
     NICState *nic;
-    int i, queues = MAX(1, conf->queues);
+    int i, queues = MAX(1, conf->peers.queues);
 
     assert(info->type == NET_CLIENT_OPTIONS_KIND_NIC);
     assert(info->size >= sizeof(NICState));
@@ -346,7 +363,7 @@ void qemu_del_net_client(NetClientState *nc)
 
 void qemu_del_nic(NICState *nic)
 {
-    int i, queues = MAX(nic->conf->queues, 1);
+    int i, queues = MAX(nic->conf->peers.queues, 1);
 
     /* If this is a peer NIC and peer has already been deleted, free it now. */
     if (nic->peer_deleted) {
@@ -473,7 +490,7 @@ ssize_t qemu_deliver_packet(NetClientState *sender,
 
     if (ret == 0) {
         nc->receive_disabled = 1;
-    };
+    }
 
     return ret;
 }
@@ -633,7 +650,7 @@ int qemu_find_net_clients_except(const char *id, NetClientState **ncs,
         if (nc->info->type == type) {
             continue;
         }
-        if (!strcmp(nc->name, id)) {
+        if (!id || !strcmp(nc->name, id)) {
             if (ret < max) {
                 ncs[ret] = nc;
             }
@@ -786,6 +803,12 @@ static int (* const net_client_init_fun[NET_CLIENT_OPTIONS_KIND_MAX])(
         [NET_CLIENT_OPTIONS_KIND_BRIDGE]    = net_init_bridge,
 #endif
         [NET_CLIENT_OPTIONS_KIND_HUBPORT]   = net_init_hubport,
+#ifdef CONFIG_VHOST_NET_USED
+        [NET_CLIENT_OPTIONS_KIND_VHOST_USER] = net_init_vhost_user,
+#endif
+#ifdef CONFIG_L2TPV3
+        [NET_CLIENT_OPTIONS_KIND_L2TPV3]    = net_init_l2tpv3,
+#endif
 };
 
 
@@ -819,6 +842,12 @@ static int net_client_init1(const void *object, int is_netdev, Error **errp)
         case NET_CLIENT_OPTIONS_KIND_BRIDGE:
 #endif
         case NET_CLIENT_OPTIONS_KIND_HUBPORT:
+#ifdef CONFIG_VHOST_NET_USED
+        case NET_CLIENT_OPTIONS_KIND_VHOST_USER:
+#endif
+#ifdef CONFIG_L2TPV3
+        case NET_CLIENT_OPTIONS_KIND_L2TPV3:
+#endif
             break;
 
         default:
@@ -897,21 +926,11 @@ int net_client_init(QemuOpts *opts, int is_netdev, Error **errp)
 static int net_host_check_device(const char *device)
 {
     int i;
-    const char *valid_param_list[] = { "tap", "socket", "dump"
-#ifdef CONFIG_NET_BRIDGE
-                                       , "bridge"
-#endif
-#ifdef CONFIG_SLIRP
-                                       ,"user"
-#endif
-#ifdef CONFIG_VDE
-                                       ,"vde"
-#endif
-    };
-    for (i = 0; i < ARRAY_SIZE(valid_param_list); i++) {
-        if (!strncmp(valid_param_list[i], device,
-                     strlen(valid_param_list[i])))
+    for (i = 0; host_net_devices[i]; i++) {
+        if (!strncmp(host_net_devices[i], device,
+                     strlen(host_net_devices[i]))) {
             return 1;
+        }
     }
 
     return 0;
@@ -952,10 +971,12 @@ void net_host_device_remove(Monitor *mon, const QDict *qdict)
 
     nc = net_hub_find_client_by_name(vlan_id, device);
     if (!nc) {
+        error_report("Host network device '%s' on hub '%d' not found",
+                     device, vlan_id);
         return;
     }
     if (!net_host_check_device(nc->model)) {
-        monitor_printf(mon, "invalid host network device %s\n", device);
+        error_report("invalid host network device '%s'", device);
         return;
     }
     qemu_del_net_client(nc);
@@ -1043,7 +1064,7 @@ RxFilterInfoList *qmp_query_rx_filter(bool has_name, const char *name,
         if (nc->info->type != NET_CLIENT_OPTIONS_KIND_NIC) {
             if (has_name) {
                 error_setg(errp, "net client(%s) isn't a NIC", name);
-                break;
+                return NULL;
             }
             continue;
         }
@@ -1062,11 +1083,15 @@ RxFilterInfoList *qmp_query_rx_filter(bool has_name, const char *name,
         } else if (has_name) {
             error_setg(errp, "net client(%s) doesn't support"
                        " rx-filter querying", name);
+            return NULL;
+        }
+
+        if (has_name) {
             break;
         }
     }
 
-    if (filter_list == NULL && !error_is_set(errp) && has_name) {
+    if (filter_list == NULL && has_name) {
         error_setg(errp, "invalid net client name: %s", name);
     }
 

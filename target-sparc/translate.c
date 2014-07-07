@@ -26,11 +26,11 @@
 
 #include "cpu.h"
 #include "disas/disas.h"
-#include "helper.h"
+#include "exec/helper-proto.h"
 #include "tcg-op.h"
+#include "exec/cpu_ldst.h"
 
-#define GEN_HELPER 1
-#include "helper.h"
+#include "exec/helper-gen.h"
 
 #define DEBUG_DISAS
 
@@ -5270,8 +5270,8 @@ static inline void gen_intermediate_code_internal(SPARCCPU *cpu,
         max_insns = CF_COUNT_MASK;
     gen_tb_start();
     do {
-        if (unlikely(!QTAILQ_EMPTY(&env->breakpoints))) {
-            QTAILQ_FOREACH(bp, &env->breakpoints, entry) {
+        if (unlikely(!QTAILQ_EMPTY(&cs->breakpoints))) {
+            QTAILQ_FOREACH(bp, &cs->breakpoints, entry) {
                 if (bp->pc == dc->pc) {
                     if (dc->pc != pc_start)
                         save_state(dc);

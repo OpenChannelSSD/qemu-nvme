@@ -180,11 +180,16 @@ PCIESlot *ioh3420_init(PCIBus *bus, int devfn, bool multifunction,
     return PCIE_SLOT(d);
 }
 
+static Property ioh3420_props[] = {
+    DEFINE_PROP_BIT(COMPAT_PROP_PCP, PCIDevice, cap_present,
+                    QEMU_PCIE_SLTCAP_PCP_BITNR, true),
+    DEFINE_PROP_END_OF_LIST()
+};
+
 static const VMStateDescription vmstate_ioh3420 = {
     .name = "ioh-3240-express-root-port",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .post_load = pcie_cap_slot_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_PCIE_DEVICE(parent_obj.parent_obj.parent_obj, PCIESlot),
@@ -211,6 +216,7 @@ static void ioh3420_class_init(ObjectClass *klass, void *data)
     dc->desc = "Intel IOH device id 3420 PCIE Root Port";
     dc->reset = ioh3420_reset;
     dc->vmsd = &vmstate_ioh3420;
+    dc->props = ioh3420_props;
 }
 
 static const TypeInfo ioh3420_info = {

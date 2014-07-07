@@ -719,8 +719,7 @@ static const VMStateDescription vmstate_dbdma_channel = {
     .name = "dbdma_channel",
     .version_id = 0,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, struct DBDMA_channel, DBDMA_REGS),
         VMSTATE_END_OF_LIST()
     }
@@ -730,8 +729,7 @@ static const VMStateDescription vmstate_dbdma = {
     .name = "dbdma",
     .version_id = 2,
     .minimum_version_id = 2,
-    .minimum_version_id_old = 2,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_STRUCT_ARRAY(channels, DBDMAState, DBDMA_CHANNELS, 1,
                              vmstate_dbdma_channel, DBDMA_channel),
         VMSTATE_END_OF_LIST()
@@ -750,8 +748,14 @@ static void dbdma_reset(void *opaque)
 void* DBDMA_init (MemoryRegion **dbdma_mem)
 {
     DBDMAState *s;
+    int i;
 
     s = g_malloc0(sizeof(DBDMAState));
+
+    for (i = 0; i < DBDMA_CHANNELS; i++) {
+        DBDMA_io *io = &s->channels[i].io;
+        qemu_iovec_init(&io->iov, 1);
+    }
 
     memory_region_init_io(&s->mem, NULL, &dbdma_ops, s, "dbdma", 0x1000);
     *dbdma_mem = &s->mem;

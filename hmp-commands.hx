@@ -176,7 +176,7 @@ ETEXI
 
     {
         .name       = "drive_del",
-        .args_type  = "id:s",
+        .args_type  = "id:B",
         .params     = "device",
         .help       = "remove host block device",
         .user_print = monitor_user_noop,
@@ -335,6 +335,7 @@ ETEXI
         .params     = "tag|id",
         .help       = "restore a VM snapshot from its tag or id",
         .mhandler.cmd = do_loadvm,
+        .command_completion = loadvm_completion,
     },
 
 STEXI
@@ -350,6 +351,7 @@ ETEXI
         .params     = "tag|id",
         .help       = "delete a VM snapshot from its tag or id",
         .mhandler.cmd = do_delvm,
+        .command_completion = delvm_completion,
     },
 
 STEXI
@@ -556,6 +558,7 @@ ETEXI
         .params     = "keys [hold_ms]",
         .help       = "send keys to the VM (e.g. 'sendkey ctrl-alt-f1', default hold time=100 ms)",
         .mhandler.cmd = hmp_send_key,
+        .command_completion = sendkey_completion,
     },
 
 STEXI
@@ -658,6 +661,7 @@ ETEXI
         .help       = "add device, like -device on the command line",
         .user_print = monitor_user_noop,
         .mhandler.cmd_new = do_device_add,
+        .command_completion = device_add_completion,
     },
 
 STEXI
@@ -673,6 +677,7 @@ ETEXI
         .params     = "device",
         .help       = "remove device",
         .mhandler.cmd = hmp_device_del,
+        .command_completion = device_del_completion,
     },
 
 STEXI
@@ -849,6 +854,7 @@ ETEXI
         .params     = "device data",
         .help       = "Write to a ring buffer character device",
         .mhandler.cmd = hmp_ringbuf_write,
+        .command_completion = ringbuf_write_completion,
     },
 
 STEXI
@@ -865,6 +871,7 @@ ETEXI
         .params     = "device size",
         .help       = "Read from a ring buffer character device",
         .mhandler.cmd = hmp_ringbuf_read,
+        .command_completion = ringbuf_write_completion,
     },
 
 STEXI
@@ -970,6 +977,7 @@ ETEXI
         .params     = "capability state",
         .help       = "Enable/Disable the usage of a capability for migration",
         .mhandler.cmd = hmp_migrate_set_capability,
+        .command_completion = migrate_set_capability_completion,
     },
 
 STEXI
@@ -998,26 +1006,34 @@ ETEXI
 
     {
         .name       = "dump-guest-memory",
-        .args_type  = "paging:-p,filename:F,begin:i?,length:i?",
-        .params     = "[-p] filename [begin] [length]",
-        .help       = "dump guest memory to file"
-                      "\n\t\t\t begin(optional): the starting physical address"
-                      "\n\t\t\t length(optional): the memory size, in bytes",
+        .args_type  = "paging:-p,zlib:-z,lzo:-l,snappy:-s,filename:F,begin:i?,length:i?",
+        .params     = "[-p] [-z|-l|-s] filename [begin length]",
+        .help       = "dump guest memory into file 'filename'.\n\t\t\t"
+                      "-p: do paging to get guest's memory mapping.\n\t\t\t"
+                      "-z: dump in kdump-compressed format, with zlib compression.\n\t\t\t"
+                      "-l: dump in kdump-compressed format, with lzo compression.\n\t\t\t"
+                      "-s: dump in kdump-compressed format, with snappy compression.\n\t\t\t"
+                      "begin: the starting physical address.\n\t\t\t"
+                      "length: the memory size, in bytes.",
         .mhandler.cmd = hmp_dump_guest_memory,
     },
 
 
 STEXI
-@item dump-guest-memory [-p] @var{protocol} @var{begin} @var{length}
+@item dump-guest-memory [-p] @var{filename} @var{begin} @var{length}
+@item dump-guest-memory [-z|-l|-s] @var{filename}
 @findex dump-guest-memory
 Dump guest memory to @var{protocol}. The file can be processed with crash or
-gdb.
-  filename: dump file name
-    paging: do paging to get guest's memory mapping
+gdb. Without -z|-l|-s, the dump format is ELF.
+        -p: do paging to get guest's memory mapping.
+        -z: dump in kdump-compressed format, with zlib compression.
+        -l: dump in kdump-compressed format, with lzo compression.
+        -s: dump in kdump-compressed format, with snappy compression.
+  filename: dump file name.
      begin: the starting physical address. It's optional, and should be
-            specified with length together.
+            specified together with length.
     length: the memory size, in bytes. It's optional, and should be specified
-            with begin together.
+            together with begin.
 ETEXI
 
     {
@@ -1195,9 +1211,10 @@ ETEXI
     {
         .name       = "host_net_add",
         .args_type  = "device:s,opts:s?",
-        .params     = "tap|user|socket|vde|netmap|dump [options]",
+        .params     = "tap|user|socket|vde|netmap|bridge|vhost-user|dump [options]",
         .help       = "add host VLAN client",
         .mhandler.cmd = net_host_device_add,
+        .command_completion = host_net_add_completion,
     },
 
 STEXI
@@ -1212,6 +1229,7 @@ ETEXI
         .params     = "vlan_id name",
         .help       = "remove host VLAN client",
         .mhandler.cmd = net_host_device_remove,
+        .command_completion = host_net_remove_completion,
     },
 
 STEXI
@@ -1223,9 +1241,10 @@ ETEXI
     {
         .name       = "netdev_add",
         .args_type  = "netdev:O",
-        .params     = "[user|tap|socket|hubport|netmap],id=str[,prop=value][,...]",
+        .params     = "[user|tap|socket|vde|bridge|hubport|netmap|vhost-user],id=str[,prop=value][,...]",
         .help       = "add host network device",
         .mhandler.cmd = hmp_netdev_add,
+        .command_completion = netdev_add_completion,
     },
 
 STEXI
@@ -1240,6 +1259,7 @@ ETEXI
         .params     = "id",
         .help       = "remove host network device",
         .mhandler.cmd = hmp_netdev_del,
+        .command_completion = netdev_del_completion,
     },
 
 STEXI
@@ -1254,6 +1274,7 @@ ETEXI
         .params     = "[qom-type=]type,id=str[,prop=value][,...]",
         .help       = "create QOM object",
         .mhandler.cmd = hmp_object_add,
+        .command_completion = object_add_completion,
     },
 
 STEXI
@@ -1268,6 +1289,7 @@ ETEXI
         .params     = "id",
         .help       = "destroy QOM object",
         .mhandler.cmd = hmp_object_del,
+        .command_completion = object_del_completion,
     },
 
 STEXI
@@ -1327,6 +1349,7 @@ ETEXI
         .params     = "name on|off",
         .help       = "change the link status of a network adapter",
         .mhandler.cmd = hmp_set_link,
+        .command_completion = set_link_completion,
     },
 
 STEXI
@@ -1341,6 +1364,7 @@ ETEXI
         .params     = "[reset|shutdown|poweroff|pause|debug|none]",
         .help       = "change watchdog action",
         .mhandler.cmd = do_watchdog_action,
+        .command_completion = watchdog_action_completion,
     },
 
 STEXI
@@ -1610,6 +1634,7 @@ ETEXI
         .params     = "args",
         .help       = "add chardev",
         .mhandler.cmd = hmp_chardev_add,
+        .command_completion = chardev_add_completion,
     },
 
 STEXI
@@ -1626,6 +1651,7 @@ ETEXI
         .params     = "id",
         .help       = "remove chardev",
         .mhandler.cmd = hmp_chardev_remove,
+        .command_completion = chardev_remove_completion,
     },
 
 STEXI

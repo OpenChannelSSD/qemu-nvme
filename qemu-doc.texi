@@ -589,6 +589,22 @@ check -r all} is required, which may take some time.
 
 This option can only be enabled if @code{compat=1.1} is specified.
 
+@item nocow
+If this option is set to @code{on}, it will trun off COW of the file. It's only
+valid on btrfs, no effect on other file systems.
+
+Btrfs has low performance when hosting a VM image file, even more when the guest
+on the VM also using btrfs as file system. Turning off COW is a way to mitigate
+this bad performance. Generally there are two ways to turn off COW on btrfs:
+a) Disable it by mounting with nodatacow, then all newly created files will be
+NOCOW. b) For an empty file, add the NOCOW file attribute. That's what this option
+does.
+
+Note: this option is only valid to new or empty files. If there is an existing
+file which is COW and has data blocks already, it couldn't be changed to NOCOW
+by setting @code{nocow=on}. One can issue @code{lsattr filename} to check if
+the NOCOW flag is set or not (Capitabl 'C' is NOCOW flag).
+
 @end table
 
 @item qed
@@ -823,7 +839,7 @@ In this case, the block device must be exported using qemu-nbd:
 qemu-nbd --socket=/tmp/my_socket my_disk.qcow2
 @end example
 
-The use of qemu-nbd allows to share a disk between several guests:
+The use of qemu-nbd allows sharing of a disk between several guests:
 @example
 qemu-nbd --socket=/tmp/my_socket --share=2 my_disk.qcow2
 @end example
@@ -1938,7 +1954,7 @@ The following options are specific to the PowerPC emulation:
 
 @item -g @var{W}x@var{H}[x@var{DEPTH}]
 
-Set the initial VGA graphic mode. The default is 800x600x15.
+Set the initial VGA graphic mode. The default is 800x600x32.
 
 @item -prom-env @var{string}
 
@@ -1996,7 +2012,7 @@ QEMU emulates the following sun4m peripherals:
 @item
 IOMMU
 @item
-TCX Frame buffer
+TCX or cgthree Frame buffer
 @item
 Lance (Am7990) Ethernet
 @item
@@ -2023,7 +2039,7 @@ firmware implementation. The goal is to implement a 100% IEEE
 
 A sample Linux 2.6 series kernel and ram disk image are available on
 the QEMU web site. There are still issues with NetBSD and OpenBSD, but
-some kernel versions work. Please note that currently Solaris kernels
+some kernel versions work. Please note that currently older Solaris kernels
 don't work probably due to interface issues between OpenBIOS and
 Solaris.
 
@@ -2035,8 +2051,9 @@ The following options are specific to the Sparc32 emulation:
 
 @item -g @var{W}x@var{H}x[x@var{DEPTH}]
 
-Set the initial TCX graphic mode. The default is 1024x768x8, currently
-the only other possible mode is 1024x768x24.
+Set the initial graphics mode. For TCX, the default is 1024x768x8 with the
+option of 1024x768x24. For cgthree, the default is 1024x768x8 with the option
+of 1152x900x8 for people who wish to use OBP.
 
 @item -prom-env @var{string}
 

@@ -12,7 +12,7 @@ block-obj-y += main-loop.o iohandler.o qemu-timer.o
 block-obj-$(CONFIG_POSIX) += aio-posix.o
 block-obj-$(CONFIG_WIN32) += aio-win32.o
 block-obj-y += block/
-block-obj-y += qapi-types.o qapi-visit.o
+block-obj-y += qapi-types.o qapi-visit.o qapi-event.o
 block-obj-y += qemu-io-cmds.o
 
 block-obj-y += qemu-coroutine.o qemu-coroutine-lock.o qemu-coroutine-io.o
@@ -31,6 +31,8 @@ libcacard-y += libcacard/vcard_emul_nss.o
 libcacard-y += libcacard/vcard_emul_type.o
 libcacard-y += libcacard/card_7816.o
 libcacard-y += libcacard/vcardt.o
+libcacard/vcard_emul_nss.o-cflags := $(NSS_CFLAGS)
+libcacard/vcard_emul_nss.o-libs := $(NSS_LIBS)
 
 ######################################################################
 # Target independent part of system emulation. The long term path is to
@@ -39,6 +41,7 @@ libcacard-y += libcacard/vcardt.o
 
 ifeq ($(CONFIG_SOFTMMU),y)
 common-obj-y = blockdev.o blockdev-nbd.o block/
+common-obj-y += iothread.o
 common-obj-y += net/
 common-obj-y += qdev-monitor.o device-hotplug.o
 common-obj-$(CONFIG_WIN32) += os-win32.o
@@ -63,9 +66,11 @@ common-obj-y += hw/
 
 common-obj-y += ui/
 common-obj-y += bt-host.o bt-vhci.o
+bt-host.o-cflags := $(BLUEZ_CFLAGS)
 
 common-obj-y += dma-helpers.o
 common-obj-y += vl.o
+vl.o-cflags := $(GPROF_CFLAGS) $(SDL_CFLAGS)
 common-obj-y += tpm.o
 
 common-obj-$(CONFIG_SLIRP) += slirp/

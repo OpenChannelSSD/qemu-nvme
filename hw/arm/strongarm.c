@@ -199,7 +199,6 @@ static VMStateDescription vmstate_strongarm_pic_regs = {
     .name = "strongarm_pic",
     .version_id = 0,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
     .post_load = strongarm_pic_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_UINT32(pending, StrongARMPICState),
@@ -424,7 +423,6 @@ static const VMStateDescription vmstate_strongarm_rtc_regs = {
     .name = "strongarm-rtc",
     .version_id = 0,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
     .pre_save = strongarm_rtc_pre_save,
     .post_load = strongarm_rtc_post_load,
     .fields = (VMStateField[]) {
@@ -482,7 +480,6 @@ struct StrongARMGPIOInfo {
     uint32_t rising;
     uint32_t falling;
     uint32_t status;
-    uint32_t gpsr;
     uint32_t gafr;
 
     uint32_t prev_level;
@@ -546,14 +543,14 @@ static uint64_t strongarm_gpio_read(void *opaque, hwaddr offset,
         return s->dir;
 
     case GPSR:        /* GPIO Pin-Output Set registers */
-        DPRINTF("%s: Read from a write-only register 0x" TARGET_FMT_plx "\n",
-                        __func__, offset);
-        return s->gpsr;    /* Return last written value.  */
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "strongarm GPIO: read from write only register GPSR\n");
+        return 0;
 
     case GPCR:        /* GPIO Pin-Output Clear registers */
-        DPRINTF("%s: Read from a write-only register 0x" TARGET_FMT_plx "\n",
-                        __func__, offset);
-        return 31337;        /* Specified as unpredictable in the docs.  */
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "strongarm GPIO: read from write only register GPCR\n");
+        return 0;
 
     case GRER:        /* GPIO Rising-Edge Detect Enable registers */
         return s->rising;
@@ -592,7 +589,6 @@ static void strongarm_gpio_write(void *opaque, hwaddr offset,
     case GPSR:        /* GPIO Pin-Output Set registers */
         s->olevel |= value;
         strongarm_gpio_handler_update(s);
-        s->gpsr = value;
         break;
 
     case GPCR:        /* GPIO Pin-Output Clear registers */
@@ -670,7 +666,6 @@ static const VMStateDescription vmstate_strongarm_gpio_regs = {
     .name = "strongarm-gpio",
     .version_id = 0,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
     .fields = (VMStateField[]) {
         VMSTATE_UINT32(ilevel, StrongARMGPIOInfo),
         VMSTATE_UINT32(olevel, StrongARMGPIOInfo),
@@ -679,6 +674,7 @@ static const VMStateDescription vmstate_strongarm_gpio_regs = {
         VMSTATE_UINT32(falling, StrongARMGPIOInfo),
         VMSTATE_UINT32(status, StrongARMGPIOInfo),
         VMSTATE_UINT32(gafr, StrongARMGPIOInfo),
+        VMSTATE_UINT32(prev_level, StrongARMGPIOInfo),
         VMSTATE_END_OF_LIST(),
     },
 };
@@ -690,6 +686,7 @@ static void strongarm_gpio_class_init(ObjectClass *klass, void *data)
 
     k->init = strongarm_gpio_initfn;
     dc->desc = "StrongARM GPIO controller";
+    dc->vmsd = &vmstate_strongarm_gpio_regs;
 }
 
 static const TypeInfo strongarm_gpio_info = {
@@ -842,7 +839,6 @@ static const VMStateDescription vmstate_strongarm_ppc_regs = {
     .name = "strongarm-ppc",
     .version_id = 0,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
     .fields = (VMStateField[]) {
         VMSTATE_UINT32(ilevel, StrongARMPPCInfo),
         VMSTATE_UINT32(olevel, StrongARMPPCInfo),
@@ -850,6 +846,7 @@ static const VMStateDescription vmstate_strongarm_ppc_regs = {
         VMSTATE_UINT32(ppar, StrongARMPPCInfo),
         VMSTATE_UINT32(psdr, StrongARMPPCInfo),
         VMSTATE_UINT32(ppfr, StrongARMPPCInfo),
+        VMSTATE_UINT32(prev_level, StrongARMPPCInfo),
         VMSTATE_END_OF_LIST(),
     },
 };
@@ -861,6 +858,7 @@ static void strongarm_ppc_class_init(ObjectClass *klass, void *data)
 
     k->init = strongarm_ppc_init;
     dc->desc = "StrongARM PPC controller";
+    dc->vmsd = &vmstate_strongarm_ppc_regs;
 }
 
 static const TypeInfo strongarm_ppc_info = {
@@ -1293,7 +1291,6 @@ static const VMStateDescription vmstate_strongarm_uart_regs = {
     .name = "strongarm-uart",
     .version_id = 0,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
     .post_load = strongarm_uart_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_UINT8(utcr0, StrongARMUARTState),
@@ -1553,7 +1550,6 @@ static const VMStateDescription vmstate_strongarm_ssp_regs = {
     .name = "strongarm-ssp",
     .version_id = 0,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
     .post_load = strongarm_ssp_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_UINT16_ARRAY(sscr, StrongARMSSPState, 2),

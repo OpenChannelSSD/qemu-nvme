@@ -50,6 +50,7 @@ BlockDeviceInfo *bdrv_block_device_info(BlockDriverState *bs)
     }
 
     info->backing_file_depth = bdrv_get_backing_file_depth(bs);
+    info->detect_zeroes = bs->detect_zeroes;
 
     if (bs->io_limits_enabled) {
         ThrottleConfig cfg;
@@ -292,7 +293,7 @@ void bdrv_query_info(BlockDriverState *bs,
     qapi_free_BlockInfo(info);
 }
 
-BlockStats *bdrv_query_stats(const BlockDriverState *bs)
+static BlockStats *bdrv_query_stats(const BlockDriverState *bs)
 {
     BlockStats *s;
 
@@ -359,7 +360,11 @@ BlockStatsList *qmp_query_blockstats(Error **errp)
 
      while ((bs = bdrv_next(bs))) {
         BlockStatsList *info = g_malloc0(sizeof(*info));
+        AioContext *ctx = bdrv_get_aio_context(bs);
+
+        aio_context_acquire(ctx);
         info->value = bdrv_query_stats(bs);
+        aio_context_release(ctx);
 
         *p_next = info;
         p_next = &info->next;
@@ -474,6 +479,7 @@ static void dump_qobject(fprintf_function func_fprintf, void *f,
         case QTYPE_QERROR: {
             QString *value = qerror_human((QError *)obj);
             func_fprintf(f, "%s", qstring_get_str(value));
+            QDECREF(value);
             break;
         }
         case QTYPE_NONE:
@@ -532,12 +538,11 @@ static void dump_qdict(fprintf_function func_fprintf, void *f, int indentation,
 void bdrv_image_info_specific_dump(fprintf_function func_fprintf, void *f,
                                    ImageInfoSpecific *info_spec)
 {
-    Error *local_err = NULL;
     QmpOutputVisitor *ov = qmp_output_visitor_new();
     QObject *obj, *data;
 
     visit_type_ImageInfoSpecific(qmp_output_get_visitor(ov), &info_spec, NULL,
-                                 &local_err);
+                                 &error_abort);
     obj = qmp_output_get_qobject(ov);
     assert(qobject_type(obj) == QTYPE_QDICT);
     data = qdict_get(qobject_to_qdict(obj), "data");

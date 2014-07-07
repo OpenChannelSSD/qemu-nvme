@@ -178,10 +178,10 @@ _rm_test_img()
     local img=$1
     if [ "$IMGFMT" = "vmdk" ]; then
         # Remove all the extents for vmdk
-        $QEMU_IMG info $img 2>/dev/null | grep 'filename:' | cut -f 2 -d: \
+        "$QEMU_IMG" info "$img" 2>/dev/null | grep 'filename:' | cut -f 2 -d: \
             | xargs -I {} rm -f "{}"
     fi
-    rm -f $img
+    rm -f "$img"
 }
 
 _cleanup_test_img()
@@ -318,9 +318,9 @@ _do()
         status=1; exit
     fi
 
-    (eval "echo '---' \"$_cmd\"") >>$here/$seq.full
+    (eval "echo '---' \"$_cmd\"") >>"$OUTPUT_DIR/$seq.full"
     (eval "$_cmd") >$tmp._out 2>&1; ret=$?
-    cat $tmp._out >>$here/$seq.full
+    cat $tmp._out >>"$OUTPUT_DIR/$seq.full"
     if [ $# -eq 2 ]; then
         if [ $ret -eq 0 ]; then
             echo "done"
@@ -344,7 +344,7 @@ _do()
 #
 _notrun()
 {
-    echo "$*" >$seq.notrun
+    echo "$*" >"$OUTPUT_DIR/$seq.notrun"
     echo "$seq not run: $*"
     status=0
     exit
@@ -354,7 +354,7 @@ _notrun()
 #
 _fail()
 {
-    echo "$*" | tee -a $here/$seq.full
+    echo "$*" | tee -a "$OUTPUT_DIR/$seq.full"
     echo "(see $seq.full for details)"
     status=1
     exit 1
@@ -364,6 +364,9 @@ _fail()
 #
 _supported_fmt()
 {
+    # "generic" is suitable for most image formats. For some formats it doesn't
+    # work, however (most notably read-only formats), so they can opt out by
+    # setting IMGFMT_GENERIC to false.
     for f; do
         if [ "$f" = "$IMGFMT" -o "$f" = "generic" -a "$IMGFMT_GENERIC" = "true" ]; then
             return

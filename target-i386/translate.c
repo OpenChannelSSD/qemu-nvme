@@ -27,10 +27,10 @@
 #include "cpu.h"
 #include "disas/disas.h"
 #include "tcg-op.h"
+#include "exec/cpu_ldst.h"
 
-#include "helper.h"
-#define GEN_HELPER 1
-#include "helper.h"
+#include "exec/helper-proto.h"
+#include "exec/helper-gen.h"
 
 #define PREFIX_REPZ   0x01
 #define PREFIX_REPNZ  0x02
@@ -1504,14 +1504,6 @@ static void gen_shift_rm_im(DisasContext *s, TCGMemOp ot, int op1, int op2,
         tcg_gen_mov_tl(cpu_cc_dst, cpu_T[0]);
         set_cc_op(s, (is_right ? CC_OP_SARB : CC_OP_SHLB) + ot);
     }
-}
-
-static inline void tcg_gen_lshift(TCGv ret, TCGv arg1, target_long arg2)
-{
-    if (arg2 >= 0)
-        tcg_gen_shli_tl(ret, arg1, arg2);
-    else
-        tcg_gen_shri_tl(ret, arg1, -arg2);
 }
 
 static void gen_rot_rm_T1(DisasContext *s, TCGMemOp ot, int op1, int is_right)
@@ -6708,41 +6700,63 @@ static target_ulong disas_insn(CPUX86State *env, DisasContext *s,
         }
     bt_op:
         tcg_gen_andi_tl(cpu_T[1], cpu_T[1], (1 << (3 + ot)) - 1);
+        tcg_gen_shr_tl(cpu_tmp4, cpu_T[0], cpu_T[1]);
         switch(op) {
         case 0:
-            tcg_gen_shr_tl(cpu_cc_src, cpu_T[0], cpu_T[1]);
-            tcg_gen_movi_tl(cpu_cc_dst, 0);
             break;
         case 1:
-            tcg_gen_shr_tl(cpu_tmp4, cpu_T[0], cpu_T[1]);
             tcg_gen_movi_tl(cpu_tmp0, 1);
             tcg_gen_shl_tl(cpu_tmp0, cpu_tmp0, cpu_T[1]);
             tcg_gen_or_tl(cpu_T[0], cpu_T[0], cpu_tmp0);
             break;
         case 2:
-            tcg_gen_shr_tl(cpu_tmp4, cpu_T[0], cpu_T[1]);
             tcg_gen_movi_tl(cpu_tmp0, 1);
             tcg_gen_shl_tl(cpu_tmp0, cpu_tmp0, cpu_T[1]);
-            tcg_gen_not_tl(cpu_tmp0, cpu_tmp0);
-            tcg_gen_and_tl(cpu_T[0], cpu_T[0], cpu_tmp0);
+            tcg_gen_andc_tl(cpu_T[0], cpu_T[0], cpu_tmp0);
             break;
         default:
         case 3:
-            tcg_gen_shr_tl(cpu_tmp4, cpu_T[0], cpu_T[1]);
             tcg_gen_movi_tl(cpu_tmp0, 1);
             tcg_gen_shl_tl(cpu_tmp0, cpu_tmp0, cpu_T[1]);
             tcg_gen_xor_tl(cpu_T[0], cpu_T[0], cpu_tmp0);
             break;
         }
-        set_cc_op(s, CC_OP_SARB + ot);
         if (op != 0) {
             if (mod != 3) {
                 gen_op_st_v(s, ot, cpu_T[0], cpu_A0);
             } else {
                 gen_op_mov_reg_v(ot, rm, cpu_T[0]);
             }
+        }
+
+        /* Delay all CC updates until after the store above.  Note that
+           C is the result of the test, Z is unchanged, and the others
+           are all undefined.  */
+        switch (s->cc_op) {
+        case CC_OP_MULB ... CC_OP_MULQ:
+        case CC_OP_ADDB ... CC_OP_ADDQ:
+        case CC_OP_ADCB ... CC_OP_ADCQ:
+        case CC_OP_SUBB ... CC_OP_SUBQ:
+        case CC_OP_SBBB ... CC_OP_SBBQ:
+        case CC_OP_LOGICB ... CC_OP_LOGICQ:
+        case CC_OP_INCB ... CC_OP_INCQ:
+        case CC_OP_DECB ... CC_OP_DECQ:
+        case CC_OP_SHLB ... CC_OP_SHLQ:
+        case CC_OP_SARB ... CC_OP_SARQ:
+        case CC_OP_BMILGB ... CC_OP_BMILGQ:
+            /* Z was going to be computed from the non-zero status of CC_DST.
+               We can get that same Z value (and the new C value) by leaving
+               CC_DST alone, setting CC_SRC, and using a CC_OP_SAR of the
+               same width.  */
             tcg_gen_mov_tl(cpu_cc_src, cpu_tmp4);
-            tcg_gen_movi_tl(cpu_cc_dst, 0);
+            set_cc_op(s, ((s->cc_op - CC_OP_MULB) & 3) + CC_OP_SARB);
+            break;
+        default:
+            /* Otherwise, generate EFLAGS and replace the C bit.  */
+            gen_compute_eflags(s);
+            tcg_gen_deposit_tl(cpu_cc_src, cpu_cc_src, cpu_tmp4,
+                               ctz32(CC_C), 1);
+            break;
         }
         break;
     case 0x1bc: /* bsf / tzcnt */
@@ -7965,8 +7979,8 @@ static inline void gen_intermediate_code_internal(X86CPU *cpu,
 
     gen_tb_start();
     for(;;) {
-        if (unlikely(!QTAILQ_EMPTY(&env->breakpoints))) {
-            QTAILQ_FOREACH(bp, &env->breakpoints, entry) {
+        if (unlikely(!QTAILQ_EMPTY(&cs->breakpoints))) {
+            QTAILQ_FOREACH(bp, &cs->breakpoints, entry) {
                 if (bp->pc == pc_ptr &&
                     !((bp->flags & BP_CPU) && (tb->flags & HF_RF_MASK))) {
                     gen_debug(dc, pc_ptr - dc->cs_base);

@@ -126,6 +126,29 @@ wrong fix or hiding corruption that has already occurred.
 Only the formats @code{qcow2}, @code{qed} and @code{vdi} support
 consistency checks.
 
+In case the image does not have any inconsistencies, check exits with @code{0}.
+Other exit codes indicate the kind of inconsistency found or if another error
+occurred. The following table summarizes all exit codes of the check subcommand:
+
+@table @option
+
+@item 0
+Check completed, the image is (now) consistent
+@item 1
+Check not completed because of internal errors
+@item 2
+Check completed, image is corrupted
+@item 3
+Check completed, image has leaked clusters, but is not corrupted
+@item 63
+Checks are not supported by the image format
+
+@end table
+
+If @code{-r} is specified, exit codes representing the image state refer to the
+state after (the attempt at) repairing it. That is, a successful @code{-r all}
+will yield the exit code 0, independently of the image state before.
+
 @item create [-f @var{fmt}] [-o @var{options}] @var{filename} [@var{size}]
 
 Create the new disk image @var{filename} of size @var{size} and format
@@ -450,6 +473,22 @@ tables must be rebuilt, i.e. on the next open an (automatic) @code{qemu-img
 check -r all} is required, which may take some time.
 
 This option can only be enabled if @code{compat=1.1} is specified.
+
+@item nocow
+If this option is set to @code{on}, it will trun off COW of the file. It's only
+valid on btrfs, no effect on other file systems.
+
+Btrfs has low performance when hosting a VM image file, even more when the guest
+on the VM also using btrfs as file system. Turning off COW is a way to mitigate
+this bad performance. Generally there are two ways to turn off COW on btrfs:
+a) Disable it by mounting with nodatacow, then all newly created files will be
+NOCOW. b) For an empty file, add the NOCOW file attribute. That's what this option
+does.
+
+Note: this option is only valid to new or empty files. If there is an existing
+file which is COW and has data blocks already, it couldn't be changed to NOCOW
+by setting @code{nocow=on}. One can issue @code{lsattr filename} to check if
+the NOCOW flag is set or not (Capitabl 'C' is NOCOW flag).
 
 @end table
 

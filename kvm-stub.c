@@ -14,7 +14,6 @@
 #include "hw/hw.h"
 #include "cpu.h"
 #include "sysemu/kvm.h"
-#include "sysemu/qemumachine.h"
 
 #ifndef CONFIG_USER_ONLY
 #include "hw/pci/msi.h"
@@ -23,6 +22,7 @@
 KVMState *kvm_state;
 bool kvm_kernel_irqchip;
 bool kvm_async_interrupts_allowed;
+bool kvm_eventfds_allowed;
 bool kvm_irqfds_allowed;
 bool kvm_msi_via_irqfd_allowed;
 bool kvm_gsi_routing_allowed;
@@ -35,7 +35,7 @@ int kvm_init_vcpu(CPUState *cpu)
     return -ENOSYS;
 }
 
-int kvm_init(QEMUMachine *machine)
+int kvm_init(MachineClass *mc)
 {
     return -ENOSYS;
 }
@@ -133,6 +133,11 @@ void kvm_irqchip_release_virq(KVMState *s, int virq)
 }
 
 int kvm_irqchip_update_msi_route(KVMState *s, int virq, MSIMessage msg)
+{
+    return -ENOSYS;
+}
+
+int kvm_irqchip_add_adapter_route(KVMState *s, AdapterInfo *adapter)
 {
     return -ENOSYS;
 }

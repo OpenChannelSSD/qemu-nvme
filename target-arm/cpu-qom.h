@@ -94,6 +94,12 @@ typedef struct ARMCPU {
     /* 'compatible' string for this CPU for Linux device trees */
     const char *dtb_compatible;
 
+    /* PSCI version for this CPU
+     * Bits[31:16] = Major Version
+     * Bits[15:0] = Minor Version
+     */
+    uint32_t psci_version;
+
     /* Should CPU start in PSCI powered-off state? */
     bool start_powered_off;
 
@@ -101,6 +107,9 @@ typedef struct ARMCPU {
      * QEMU_KVM_ARM_TARGET_NONE if the kernel doesn't support this CPU type.
      */
     uint32_t kvm_target;
+
+    /* KVM init features for this CPU */
+    uint32_t kvm_init_features[7];
 
     /* The instance init functions for implementation-specific subclasses
      * set these fields to specify the implementation-dependent values of
@@ -116,6 +125,7 @@ typedef struct ARMCPU {
     uint32_t reset_fpsid;
     uint32_t mvfr0;
     uint32_t mvfr1;
+    uint32_t mvfr2;
     uint32_t ctr;
     uint32_t reset_sctlr;
     uint32_t id_pfr0;
@@ -147,9 +157,12 @@ typedef struct ARMCPU {
      * in the order L1DCache, L1ICache, L2DCache, L2ICache, etc.
      */
     uint32_t ccsidr[16];
-    uint32_t reset_cbar;
+    uint64_t reset_cbar;
     uint32_t reset_auxcr;
     bool reset_hivecs;
+    /* DCZ blocksize, in log_2(words), ie low 4 bits of DCZID_EL0 */
+    uint32_t dcz_blocksize;
+    uint64_t rvbar;
 } ARMCPU;
 
 #define TYPE_AARCH64_CPU "aarch64-cpu"
@@ -196,10 +209,10 @@ void arm_gt_ptimer_cb(void *opaque);
 void arm_gt_vtimer_cb(void *opaque);
 
 #ifdef TARGET_AARCH64
-void aarch64_cpu_dump_state(CPUState *cs, FILE *f,
-                            fprintf_function cpu_fprintf, int flags);
 int aarch64_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
 int aarch64_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
+
+void aarch64_cpu_do_interrupt(CPUState *cs);
 #endif
 
 #endif

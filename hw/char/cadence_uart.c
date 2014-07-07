@@ -306,7 +306,8 @@ static gboolean cadence_uart_xmit(GIOChannel *chan, GIOCondition cond,
     memmove(s->tx_fifo, s->tx_fifo + ret, s->tx_count);
 
     if (s->tx_count) {
-        int r = qemu_chr_fe_add_watch(s->chr, G_IO_OUT, cadence_uart_xmit, s);
+        int r = qemu_chr_fe_add_watch(s->chr, G_IO_OUT|G_IO_HUP,
+                                      cadence_uart_xmit, s);
         assert(r);
     }
 
@@ -504,7 +505,6 @@ static const VMStateDescription vmstate_cadence_uart = {
     .name = "cadence_uart",
     .version_id = 2,
     .minimum_version_id = 2,
-    .minimum_version_id_old = 2,
     .post_load = cadence_uart_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_UINT32_ARRAY(r, UartState, R_MAX),

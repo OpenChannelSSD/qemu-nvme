@@ -95,12 +95,22 @@ specifies the maximum number of hotpluggable CPUs.
 ETEXI
 
 DEF("numa", HAS_ARG, QEMU_OPTION_numa,
-    "-numa node[,mem=size][,cpus=cpu[-cpu]][,nodeid=node]\n", QEMU_ARCH_ALL)
+    "-numa node[,mem=size][,cpus=cpu[-cpu]][,nodeid=node]\n"
+    "-numa node[,memdev=id][,cpus=cpu[-cpu]][,nodeid=node]\n", QEMU_ARCH_ALL)
 STEXI
-@item -numa @var{opts}
+@item -numa node[,mem=@var{size}][,cpus=@var{cpu[-cpu]}][,nodeid=@var{node}]
+@item -numa node[,memdev=@var{id}][,cpus=@var{cpu[-cpu]}][,nodeid=@var{node}]
 @findex -numa
-Simulate a multi node NUMA system. If mem and cpus are omitted, resources
-are split equally.
+Simulate a multi node NUMA system. If @samp{mem}, @samp{memdev}
+and @samp{cpus} are omitted, resources are split equally. Also, note
+that the -@option{numa} option doesn't allocate any of the specified
+resources. That is, it just assigns existing resources to NUMA nodes. This
+means that one still has to use the @option{-m}, @option{-smp} options
+to allocate RAM and VCPUs respectively, and possibly @option{-object}
+to specify the memory backend for the @samp{memdev} suboption.
+
+@samp{mem} and @samp{memdev} are mutually exclusive.  Furthermore, if one
+node uses @samp{memdev}, all of them have to use it.
 ETEXI
 
 DEF("add-fd", HAS_ARG, QEMU_OPTION_add_fd,
@@ -210,14 +220,20 @@ use is discouraged as it may be removed from future versions.
 ETEXI
 
 DEF("m", HAS_ARG, QEMU_OPTION_m,
-    "-m megs         set virtual RAM size to megs MB [default="
-    stringify(DEFAULT_RAM_SIZE) "]\n", QEMU_ARCH_ALL)
+    "-m[emory] [size=]megs[,slots=n,maxmem=size]\n"
+    "                configure guest RAM\n"
+    "                size: initial amount of guest memory (default: "
+    stringify(DEFAULT_RAM_SIZE) "MiB)\n"
+    "                slots: number of hotplug slots (default: none)\n"
+    "                maxmem: maximum amount of guest memory (default: none)\n",
+    QEMU_ARCH_ALL)
 STEXI
-@item -m @var{megs}
+@item -m [size=]@var{megs}
 @findex -m
 Set virtual RAM size to @var{megs} megabytes. Default is 128 MiB.  Optionally,
 a suffix of ``M'' or ``G'' can be used to signify a value in megabytes or
-gigabytes respectively.
+gigabytes respectively. Optional pair @var{slots}, @var{maxmem} could be used
+to set amount of hotluggable memory slots and possible maximum amount of memory.
 ETEXI
 
 DEF("mem-path", HAS_ARG, QEMU_OPTION_mempath,
@@ -408,8 +424,10 @@ DEF("drive", HAS_ARG, QEMU_OPTION_drive,
     "-drive [file=file][,if=type][,bus=n][,unit=m][,media=d][,index=i]\n"
     "       [,cyls=c,heads=h,secs=s[,trans=t]][,snapshot=on|off]\n"
     "       [,cache=writethrough|writeback|none|directsync|unsafe][,format=f]\n"
-    "       [,serial=s][,addr=A][,id=name][,aio=threads|native]\n"
+    "       [,serial=s][,addr=A][,rerror=ignore|stop|report]\n"
+    "       [,werror=ignore|stop|report|enospc][,id=name][,aio=threads|native]\n"
     "       [,readonly=on|off][,copy-on-read=on|off]\n"
+    "       [,detect-zeroes=on|off|unmap]\n"
     "       [[,bps=b]|[[,bps_rd=r][,bps_wr=w]]]\n"
     "       [[,iops=i]|[[,iops_rd=r][,iops_wr=w]]]\n"
     "       [[,bps_max=bm]|[[,bps_rd_max=rm][,bps_wr_max=wm]]]\n"
@@ -444,7 +462,8 @@ This option defines the type of the media: disk or cdrom.
 @item cyls=@var{c},heads=@var{h},secs=@var{s}[,trans=@var{t}]
 These options have the same definition as they have in @option{-hdachs}.
 @item snapshot=@var{snapshot}
-@var{snapshot} is "on" or "off" and allows to enable snapshot for given drive (see @option{-snapshot}).
+@var{snapshot} is "on" or "off" and controls snapshot mode for the given drive
+(see @option{-snapshot}).
 @item cache=@var{cache}
 @var{cache} is "none", "writeback", "unsafe", "directsync" or "writethrough" and controls how the host cache is used to access block data.
 @item aio=@var{aio}
@@ -470,6 +489,11 @@ Open drive @option{file} as read-only. Guest write attempts will fail.
 @item copy-on-read=@var{copy-on-read}
 @var{copy-on-read} is "on" or "off" and enables whether to copy read backing
 file sectors into the image file.
+@item detect-zeroes=@var{detect-zeroes}
+@var{detect-zeroes} is "off", "on" or "unmap" and enables the automatic
+conversion of plain zero writes by the OS to driver specific optimized
+zero write commands. You may even choose "unmap" if @var{discard} is set
+to "unmap" to allow a zero write to be converted to an UNMAP operation.
 @end table
 
 By default, the @option{cache=writeback} mode is used. It will report data
@@ -810,6 +834,7 @@ ETEXI
 DEF("display", HAS_ARG, QEMU_OPTION_display,
     "-display sdl[,frame=on|off][,alt_grab=on|off][,ctrl_grab=on|off]\n"
     "            [,window_close=on|off]|curses|none|\n"
+    "            gtk[,grab_on_hover=on|off]|\n"
     "            vnc=<display>[,<optargs>]\n"
     "                select display type\n", QEMU_ARCH_ALL)
 STEXI
@@ -833,6 +858,10 @@ graphics card, but its output will not be displayed to the QEMU
 user. This option differs from the -nographic option in that it
 only affects what is done with video output; -nographic also changes
 the destination of the serial and parallel port data.
+@item gtk
+Display video output in a GTK window. This interface provides drop-down
+menus and other UI elements to configure and control the VM during
+runtime.
 @item vnc
 Start a VNC server on display <arg>
 @end table
@@ -1038,7 +1067,7 @@ Rotate graphical output some deg left (only PXA LCD).
 ETEXI
 
 DEF("vga", HAS_ARG, QEMU_OPTION_vga,
-    "-vga [std|cirrus|vmware|qxl|xenfb|none]\n"
+    "-vga [std|cirrus|vmware|qxl|xenfb|tcx|cg3|none]\n"
     "                select video card type\n", QEMU_ARCH_ALL)
 STEXI
 @item -vga @var{type}
@@ -1063,6 +1092,14 @@ card.
 QXL paravirtual graphic card.  It is VGA compatible (including VESA
 2.0 VBE support).  Works best with qxl guest drivers installed though.
 Recommended choice when using the spice protocol.
+@item tcx
+(sun4m only) Sun TCX framebuffer. This is the default framebuffer for
+sun4m machines and offers both 8-bit and 24-bit colour depths at a
+fixed resolution of 1024x768.
+@item cg3
+(sun4m only) Sun cgthree framebuffer. This is a simple 8-bit framebuffer
+for sun4m machines available in both 1024x768 (OpenBIOS) and 1152x900 (OBP)
+resolutions aimed at people wishing to run older Solaris versions.
 @item none
 Disable VGA card.
 @end table
@@ -1229,7 +1266,7 @@ Disable adaptive encodings. Adaptive encodings are enabled by default.
 An adaptive encoding will try to detect frequently updated screen regions,
 and send updates in these regions using a lossy encoding (like JPEG).
 This can be really helpful to save bandwidth when playing videos. Disabling
-adaptive encodings allows to restore the original static behavior of encodings
+adaptive encodings restores the original static behavior of encodings
 like Tight.
 
 @item share=[allow-exclusive|force-shared|ignore]
@@ -1317,7 +1354,7 @@ ETEXI
 DEF("smbios", HAS_ARG, QEMU_OPTION_smbios,
     "-smbios file=binary\n"
     "                load SMBIOS entry from binary file\n"
-    "-smbios type=0[,vendor=str][,version=str][,date=str][,release=%d.%d]\n"
+    "-smbios type=0[,vendor=str][,version=str][,date=str][,release=%d.%d][,uefi=on|off]\n"
     "                specify SMBIOS type 0 fields\n"
     "-smbios type=1[,manufacturer=str][,product=str][,version=str][,serial=str]\n"
     "              [,uuid=uuid][,sku=str][,family=str]\n"
@@ -1327,7 +1364,7 @@ STEXI
 @findex -smbios
 Load SMBIOS entry from binary file.
 
-@item -smbios type=0[,vendor=@var{str}][,version=@var{str}][,date=@var{str}][,release=@var{%d.%d}]
+@item -smbios type=0[,vendor=@var{str}][,version=@var{str}][,date=@var{str}][,release=@var{%d.%d}][,uefi=on|off]
 Specify SMBIOS type 0 fields
 
 @item -smbios type=1[,manufacturer=@var{str}][,product=@var{str}] [,version=@var{str}][,serial=@var{str}][,uuid=@var{uuid}][,sku=@var{str}] [,family=@var{str}]
@@ -1396,6 +1433,29 @@ DEF("net", HAS_ARG, QEMU_OPTION_net,
     "                (default=" DEFAULT_BRIDGE_INTERFACE ") using the program 'helper'\n"
     "                (default=" DEFAULT_BRIDGE_HELPER ")\n"
 #endif
+#ifdef __linux__
+    "-net l2tpv3[,vlan=n][,name=str],src=srcaddr,dst=dstaddr[,srcport=srcport][,dstport=dstport],txsession=txsession[,rxsession=rxsession][,ipv6=on/off][,udp=on/off][,cookie64=on/off][,counter][,pincounter][,txcookie=txcookie][,rxcookie=rxcookie][,offset=offset]\n"
+    "                connect the VLAN to an Ethernet over L2TPv3 pseudowire\n"
+    "                Linux kernel 3.3+ as well as most routers can talk\n"
+    "                L2TPv3. This transport allows to connect a VM to a VM,\n"
+    "                VM to a router and even VM to Host. It is a nearly-universal\n"
+    "                standard (RFC3391). Note - this implementation uses static\n"
+    "                pre-configured tunnels (same as the Linux kernel).\n"
+    "                use 'src=' to specify source address\n"
+    "                use 'dst=' to specify destination address\n"
+    "                use 'udp=on' to specify udp encapsulation\n"
+    "                use 'dstport=' to specify destination udp port\n"
+    "                use 'dstport=' to specify destination udp port\n"
+    "                use 'ipv6=on' to force v6\n"
+    "                L2TPv3 uses cookies to prevent misconfiguration as\n"
+    "                well as a weak security measure\n"
+    "                use 'rxcookie=0x012345678' to specify a rxcookie\n"
+    "                use 'txcookie=0x012345678' to specify a txcookie\n"
+    "                use 'cookie64=on' to set cookie size to 64 bit, otherwise 32\n"
+    "                use 'counter=off' to force a 'cut-down' L2TPv3 with no counter\n"
+    "                use 'pincounter=on' to work around broken counter handling in peer\n"
+    "                use 'offset=X' to add an extra offset between header and data\n"
+#endif
     "-net socket[,vlan=n][,name=str][,fd=h][,listen=[host]:port][,connect=host:port]\n"
     "                connect the vlan 'n' to another VLAN using a socket connection\n"
     "-net socket[,vlan=n][,name=str][,fd=h][,mcast=maddr:port[,localaddr=addr]]\n"
@@ -1433,6 +1493,7 @@ DEF("netdev", HAS_ARG, QEMU_OPTION_netdev,
 #ifdef CONFIG_NETMAP
     "netmap|"
 #endif
+    "vhost-user|"
     "socket|"
     "hubport],id=str[,option][,option][,...]\n", QEMU_ARCH_ALL)
 STEXI
@@ -1740,6 +1801,65 @@ qemu-system-i386 linux.img \
                  -net socket,mcast=239.192.168.1:1102,localaddr=1.2.3.4
 @end example
 
+@item -netdev l2tpv3,id=@var{id},src=@var{srcaddr},dst=@var{dstaddr}[,srcport=@var{srcport}][,dstport=@var{dstport}],txsession=@var{txsession}[,rxsession=@var{rxsession}][,ipv6][,udp][,cookie64][,counter][,pincounter][,txcookie=@var{txcookie}][,rxcookie=@var{rxcookie}][,offset=@var{offset}]
+@item -net l2tpv3[,vlan=@var{n}][,name=@var{name}],src=@var{srcaddr},dst=@var{dstaddr}[,srcport=@var{srcport}][,dstport=@var{dstport}],txsession=@var{txsession}[,rxsession=@var{rxsession}][,ipv6][,udp][,cookie64][,counter][,pincounter][,txcookie=@var{txcookie}][,rxcookie=@var{rxcookie}][,offset=@var{offset}]
+Connect VLAN @var{n} to L2TPv3 pseudowire. L2TPv3 (RFC3391) is a popular
+protocol to transport Ethernet (and other Layer 2) data frames between
+two systems. It is present in routers, firewalls and the Linux kernel
+(from version 3.3 onwards).
+
+This transport allows a VM to communicate to another VM, router or firewall directly.
+
+@item src=@var{srcaddr}
+    source address (mandatory)
+@item dst=@var{dstaddr}
+    destination address (mandatory)
+@item udp
+    select udp encapsulation (default is ip).
+@item srcport=@var{srcport}
+    source udp port.
+@item dstport=@var{dstport}
+    destination udp port.
+@item ipv6
+    force v6, otherwise defaults to v4.
+@item rxcookie=@var{rxcookie}
+@item txcookie=@var{txcookie}
+    Cookies are a weak form of security in the l2tpv3 specification.
+Their function is mostly to prevent misconfiguration. By default they are 32
+bit.
+@item cookie64
+    Set cookie size to 64 bit instead of the default 32
+@item counter=off
+    Force a 'cut-down' L2TPv3 with no counter as in
+draft-mkonstan-l2tpext-keyed-ipv6-tunnel-00
+@item pincounter=on
+    Work around broken counter handling in peer. This may also help on
+networks which have packet reorder.
+@item offset=@var{offset}
+    Add an extra offset between header and data
+
+For example, to attach a VM running on host 4.3.2.1 via L2TPv3 to the bridge br-lan
+on the remote Linux host 1.2.3.4:
+@example
+# Setup tunnel on linux host using raw ip as encapsulation
+# on 1.2.3.4
+ip l2tp add tunnel remote 4.3.2.1 local 1.2.3.4 tunnel_id 1 peer_tunnel_id 1 \
+    encap udp udp_sport 16384 udp_dport 16384
+ip l2tp add session tunnel_id 1 name vmtunnel0 session_id \
+    0xFFFFFFFF peer_session_id 0xFFFFFFFF
+ifconfig vmtunnel0 mtu 1500
+ifconfig vmtunnel0 up
+brctl addif br-lan vmtunnel0
+
+
+# on 4.3.2.1
+# launch QEMU instance - if your network has reorder or is very lossy add ,pincounter
+
+qemu-system-i386 linux.img -net nic -net l2tpv3,src=4.2.3.1,dst=1.2.3.4,udp,srcport=16384,dstport=16384,rxsession=0xffffffff,txsession=0xffffffff,counter
+
+
+@end example
+
 @item -netdev vde,id=@var{id}[,sock=@var{socketpath}][,port=@var{n}][,group=@var{groupname}][,mode=@var{octalmode}]
 @item -net vde[,vlan=@var{n}][,name=@var{name}][,sock=@var{socketpath}] [,port=@var{n}][,group=@var{groupname}][,mode=@var{octalmode}]
 Connect VLAN @var{n} to PORT @var{n} of a vde switch running on host and
@@ -1763,6 +1883,23 @@ Create a hub port on QEMU "vlan" @var{hubid}.
 The hubport netdev lets you connect a NIC to a QEMU "vlan" instead of a single
 netdev.  @code{-net} and @code{-device} with parameter @option{vlan} create the
 required hub automatically.
+
+@item -netdev vhost-user,chardev=@var{id}[,vhostforce=on|off]
+
+Establish a vhost-user netdev, backed by a chardev @var{id}. The chardev should
+be a unix domain socket backed one. The vhost-user uses a specifically defined
+protocol to pass vhost ioctl replacement messages to an application on the other
+end of the socket. On non-MSIX guests, the feature can be forced with
+@var{vhostforce}.
+
+Example:
+@example
+qemu -m 512 -object memory-backend-file,id=mem,size=512M,mem-path=/hugetlbfs,share=on \
+     -numa node,memdev=mem \
+     -chardev socket,path=/path/to/socket \
+     -netdev type=vhost-user,id=net0,chardev=chr0 \
+     -device virtio-net-pci,netdev=net0
+@end example
 
 @item -net dump[,vlan=@var{n}][,file=@var{file}][,len=@var{len}]
 Dump network traffic on VLAN @var{n} to file @var{file} (@file{qemu-vlan0.pcap} by default).
@@ -2173,6 +2310,74 @@ qemu-system-x86_64 --drive file=gluster://192.0.2.1/testvol/a.img
 @end example
 
 See also @url{http://www.gluster.org}.
+
+@item HTTP/HTTPS/FTP/FTPS/TFTP
+QEMU supports read-only access to files accessed over http(s), ftp(s) and tftp.
+
+Syntax using a single filename:
+@example
+<protocol>://[<username>[:<password>]@@]<host>/<path>
+@end example
+
+where:
+@table @option
+@item protocol
+'http', 'https', 'ftp', 'ftps', or 'tftp'.
+
+@item username
+Optional username for authentication to the remote server.
+
+@item password
+Optional password for authentication to the remote server.
+
+@item host
+Address of the remote server.
+
+@item path
+Path on the remote server, including any query string.
+@end table
+
+The following options are also supported:
+@table @option
+@item url
+The full URL when passing options to the driver explicitly.
+
+@item readahead
+The amount of data to read ahead with each range request to the remote server.
+This value may optionally have the suffix 'T', 'G', 'M', 'K', 'k' or 'b'. If it
+does not have a suffix, it will be assumed to be in bytes. The value must be a
+multiple of 512 bytes. It defaults to 256k.
+
+@item sslverify
+Whether to verify the remote server's certificate when connecting over SSL. It
+can have the value 'on' or 'off'. It defaults to 'on'.
+@end table
+
+Note that when passing options to qemu explicitly, @option{driver} is the value
+of <protocol>.
+
+Example: boot from a remote Fedora 20 live ISO image
+@example
+qemu-system-x86_64 --drive media=cdrom,file=http://dl.fedoraproject.org/pub/fedora/linux/releases/20/Live/x86_64/Fedora-Live-Desktop-x86_64-20-1.iso,readonly
+
+qemu-system-x86_64 --drive media=cdrom,file.driver=http,file.url=http://dl.fedoraproject.org/pub/fedora/linux/releases/20/Live/x86_64/Fedora-Live-Desktop-x86_64-20-1.iso,readonly
+@end example
+
+Example: boot from a remote Fedora 20 cloud image using a local overlay for
+writes, copy-on-read, and a readahead of 64k
+@example
+qemu-img create -f qcow2 -o backing_file='json:@{"file.driver":"http",, "file.url":"https://dl.fedoraproject.org/pub/fedora/linux/releases/20/Images/x86_64/Fedora-x86_64-20-20131211.1-sda.qcow2",, "file.readahead":"64k"@}' /tmp/Fedora-x86_64-20-20131211.1-sda.qcow2
+
+qemu-system-x86_64 -drive file=/tmp/Fedora-x86_64-20-20131211.1-sda.qcow2,copy-on-read=on
+@end example
+
+Example: boot from an image stored on a VMware vSphere server with a self-signed
+certificate using a local overlay for writes and a readahead of 64k
+@example
+qemu-img create -f qcow2 -o backing_file='json:@{"file.driver":"https",, "file.url":"https://user:password@@vsphere.example.com/folder/test/test-flat.vmdk?dcPath=Datacenter&dsName=datastore1",, "file.sslverify":"off",, "file.readahead":"64k"@}' /tmp/test.qcow2
+
+qemu-system-x86_64 -drive file=/tmp/test.qcow2
+@end example
 ETEXI
 
 STEXI
@@ -2792,7 +2997,7 @@ UTC or local time, respectively. @code{localtime} is required for correct date i
 MS-DOS or Windows. To start at a specific point in time, provide @var{date} in the
 format @code{2006-06-17T16:01:21} or @code{2006-06-17}. The default base is UTC.
 
-By default the RTC is driven by the host system time. This allows to use the
+By default the RTC is driven by the host system time. This allows using of the
 RTC as accurate reference clock inside the guest, specifically if the host
 time is smoothly following an accurate external reference clock, e.g. via NTP.
 If you want to isolate the guest time from the host, you can set @option{clock}
@@ -2979,7 +3184,8 @@ STEXI
 Set OpenBIOS nvram @var{variable} to given @var{value} (PPC, SPARC only).
 ETEXI
 DEF("semihosting", 0, QEMU_OPTION_semihosting,
-    "-semihosting    semihosting mode\n", QEMU_ARCH_ARM | QEMU_ARCH_M68K | QEMU_ARCH_XTENSA)
+    "-semihosting    semihosting mode\n",
+    QEMU_ARCH_ARM | QEMU_ARCH_M68K | QEMU_ARCH_XTENSA | QEMU_ARCH_LM32)
 STEXI
 @item -semihosting
 @findex -semihosting
@@ -3126,6 +3332,20 @@ STEXI
 @item -msg timestamp[=on|off]
 @findex -msg
 prepend a timestamp to each log message.(default:on)
+ETEXI
+
+DEF("dump-vmstate", HAS_ARG, QEMU_OPTION_dump_vmstate,
+    "-dump-vmstate <file>\n"
+    "                Output vmstate information in JSON format to file.\n"
+    "                Use the scripts/vmstate-static-checker.py file to\n"
+    "                check for possible regressions in migration code\n"
+    "                by comparing two such vmstate dumps.",
+    QEMU_ARCH_ALL)
+STEXI
+@item -dump-vmstate @var{file}
+@findex -dump-vmstate
+Dump json-encoded vmstate information for current machine type to file
+in @var{file}
 ETEXI
 
 HXCOMM This is the last statement. Insert new options before this line!

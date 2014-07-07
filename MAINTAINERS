@@ -52,6 +52,13 @@ General Project Administration
 ------------------------------
 M: Anthony Liguori <aliguori@amazon.com>
 
+Responsible Disclosure, Reporting Security Issues
+------------------------------
+W: http://wiki.qemu.org/SecurityProcess
+M: Michael S. Tsirkin <mst@redhat.com>
+M: Anthony Liguori <aliguori@amazon.com>
+L: secalert@redhat.com
+
 Guest CPU cores (TCG):
 ----------------------
 Alpha
@@ -169,6 +176,11 @@ M: Peter Maydell <peter.maydell@linaro.org>
 S: Maintained
 F: target-arm/kvm.c
 
+MIPS
+M: James Hogan <james.hogan@imgtec.com>
+S: Maintained
+F: target-mips/kvm.c
+
 PPC
 M: Alexander Graf <agraf@suse.de>
 S: Maintained
@@ -236,8 +248,8 @@ S: Maintained
 F: hw/*/exynos*
 
 Calxeda Highbank
-M: Mark Langsdorf <mark.langsdorf@calxeda.com>
-S: Supported
+M: Rob Herring <robh@kernel.org>
+S: Maintained
 F: hw/arm/highbank.c
 F: hw/net/xgmac.c
 
@@ -304,7 +316,7 @@ S: Maintained
 F: hw/*/versatile*
 
 Xilinx Zynq
-M: Peter Crosthwaite <peter.crosthwaite@petalogix.com>
+M: Peter Crosthwaite <peter.crosthwaite@xilinx.com>
 S: Maintained
 F: hw/arm/xilinx_zynq.c
 F: hw/misc/zynq_slcr.c
@@ -353,7 +365,7 @@ S: Maintained
 F: hw/microblaze/petalogix_s3adsp1800_mmu.c
 
 petalogix_ml605
-M: Peter Crosthwaite <peter.crosthwaite@petalogix.com>
+M: Peter Crosthwaite <peter.crosthwaite@xilinx.com>
 S: Maintained
 F: hw/microblaze/petalogix_ml605_mmu.c
 
@@ -592,7 +604,7 @@ S: Orphan
 F: hw/scsi/lsi53c895a.c
 
 SSI
-M: Peter Crosthwaite <peter.crosthwaite@petalogix.com>
+M: Peter Crosthwaite <peter.crosthwaite@xilinx.com>
 S: Maintained
 F: hw/ssi/*
 F: hw/block/m25p80.c
@@ -601,6 +613,7 @@ USB
 M: Gerd Hoffmann <kraxel@redhat.com>
 S: Maintained
 F: hw/usb/*
+F: tests/usb-hcd-ehci-test.c
 
 VFIO
 M: Alex Williamson <alex.williamson@redhat.com>
@@ -623,6 +636,7 @@ M: Aneesh Kumar K.V <aneesh.kumar@linux.vnet.ibm.com>
 S: Supported
 F: hw/9pfs/
 F: fsdev/
+F: tests/virtio-9p-test.c
 T: git git://github.com/kvaneesh/QEMU.git
 
 virtio-blk
@@ -648,9 +662,16 @@ nvme
 M: Keith Busch <keith.busch@intel.com>
 S: Supported
 F: hw/block/nvme*
+F: tests/nvme-test.c
+
+megasas
+M: Hannes Reinecke <hare@suse.de>
+S: Supported
+F: hw/scsi/megasas.c
+F: hw/scsi/mfi.h
 
 Xilinx EDK
-M: Peter Crosthwaite <peter.crosthwaite@petalogix.com>
+M: Peter Crosthwaite <peter.crosthwaite@xilinx.com>
 M: Edgar E. Iglesias <edgar.iglesias@gmail.com>
 S: Maintained
 F: hw/*/xilinx_*
@@ -664,6 +685,9 @@ M: Gerd Hoffmann <kraxel@redhat.com>
 S: Maintained
 F: audio/
 F: hw/audio/
+F: tests/ac97-test.c
+F: tests/es1370-test.c
+F: tests/intel-hda-test.c
 
 Block
 M: Kevin Wolf <kwolf@redhat.com>
@@ -672,6 +696,8 @@ S: Supported
 F: block*
 F: block/
 F: hw/block/
+F: qemu-img*
+F: qemu-io*
 T: git git://repo.or.cz/qemu/kevin.git block
 T: git git://github.com/stefanha/qemu.git block
 
@@ -694,7 +720,7 @@ F: include/hw/cpu/icc_bus.h
 F: hw/cpu/icc_bus.c
 
 Device Tree
-M: Peter Crosthwaite <peter.crosthwaite@petalogix.com>
+M: Peter Crosthwaite <peter.crosthwaite@xilinx.com>
 M: Alexander Graf <agraf@suse.de>
 S: Maintained
 F: device_tree.[ch]
@@ -704,6 +730,16 @@ M: qemu-devel@nongnu.org
 S: Odd Fixes
 F: gdbstub*
 F: gdb-xml/
+
+Memory API
+M: Paolo Bonzini <pbonzini@redhat.com>
+S: Supported
+F: include/exec/ioport.h
+F: ioport.c
+F: include/exec/memory.h
+F: memory.c
+F: include/exec/memory-internal.h
+F: exec.c
 
 SPICE
 M: Gerd Hoffmann <kraxel@redhat.com>
@@ -715,7 +751,8 @@ F: hw/display/qxl*
 
 Graphics
 M: Anthony Liguori <aliguori@amazon.com>
-S: Maintained
+M: Gerd Hoffmann <kraxel@redhat.com>
+S: Odd Fixes
 F: ui/
 
 Cocoa graphics
@@ -774,6 +811,17 @@ M: Markus Armbruster <armbru@redhat.com>
 S: Supported
 F: qapi-schema.json
 T: git git://repo.or.cz/qemu/qmp-unstable.git queue/qmp
+
+QOM
+M: Anthony Liguori <aliguori@amazon.com>
+M: Andreas Färber <afaerber@suse.de>
+S: Supported
+T: git git://github.com/afaerber/qemu-cpu.git qom-next
+F: include/qom/
+X: include/qom/cpu.h
+F: qom/
+X: qom/cpu.c
+F: tests/qom-test.c
 
 QMP
 M: Luiz Capitulino <lcapitulino@redhat.com>

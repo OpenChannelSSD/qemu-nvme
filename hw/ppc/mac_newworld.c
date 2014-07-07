@@ -72,6 +72,8 @@
 #define MAX_IDE_BUS 2
 #define CFG_ADDR 0xf0000510
 #define TBFREQ (100UL * 1000UL * 1000UL)
+#define CLOCKFREQ (266UL * 1000UL * 1000UL)
+#define BUSFREQ (100UL * 1000UL * 1000UL)
 
 /* debug UniNorth */
 //#define DEBUG_UNIN
@@ -140,14 +142,14 @@ static void ppc_core99_reset(void *opaque)
 }
 
 /* PowerPC Mac99 hardware initialisation */
-static void ppc_core99_init(QEMUMachineInitArgs *args)
+static void ppc_core99_init(MachineState *machine)
 {
-    ram_addr_t ram_size = args->ram_size;
-    const char *cpu_model = args->cpu_model;
-    const char *kernel_filename = args->kernel_filename;
-    const char *kernel_cmdline = args->kernel_cmdline;
-    const char *initrd_filename = args->initrd_filename;
-    const char *boot_device = args->boot_order;
+    ram_addr_t ram_size = machine->ram_size;
+    const char *cpu_model = machine->cpu_model;
+    const char *kernel_filename = machine->kernel_filename;
+    const char *kernel_cmdline = machine->kernel_cmdline;
+    const char *initrd_filename = machine->initrd_filename;
+    const char *boot_device = machine->boot_order;
     PowerPCCPU *cpu = NULL;
     CPUPPCState *env = NULL;
     char *filename;
@@ -371,17 +373,10 @@ static void ppc_core99_init(QEMUMachineInitArgs *args)
         machine_arch = ARCH_MAC99;
     }
     /* init basic PC hardware */
-    pci_vga_init(pci_bus);
-
     escc_mem = escc_init(0, pic[0x25], pic[0x24],
                          serial_hds[0], serial_hds[1], ESCC_CLOCK, 4);
     memory_region_init_alias(escc_bar, NULL, "escc-bar",
                              escc_mem, 0, memory_region_size(escc_mem));
-
-    for(i = 0; i < nb_nics; i++)
-        pci_nic_init_nofail(&nd_table[i], pci_bus, "ne2k_pci", NULL);
-
-    ide_drive_get(hd, MAX_IDE_BUS);
 
     macio = pci_create(pci_bus, -1, TYPE_NEWWORLD_MACIO);
     dev = DEVICE(macio);
@@ -393,6 +388,8 @@ static void ppc_core99_init(QEMUMachineInitArgs *args)
     macio_init(macio, pic_mem, escc_bar);
 
     /* We only emulate 2 out of 3 IDE controllers for now */
+    ide_drive_get(hd, MAX_IDE_BUS);
+
     macio_ide = MACIO_IDE(object_resolve_path_component(OBJECT(macio),
                                                         "ide[0]"));
     macio_ide_init_drives(macio_ide, hd);
@@ -418,8 +415,15 @@ static void ppc_core99_init(QEMUMachineInitArgs *args)
         }
     }
 
-    if (graphic_depth != 15 && graphic_depth != 32 && graphic_depth != 8)
+    pci_vga_init(pci_bus);
+
+    if (graphic_depth != 15 && graphic_depth != 32 && graphic_depth != 8) {
         graphic_depth = 15;
+    }
+
+    for (i = 0; i < nb_nics; i++) {
+        pci_nic_init_nofail(&nd_table[i], pci_bus, "ne2k_pci", NULL);
+    }
 
     /* The NewWorld NVRAM is not located in the MacIO device */
     dev = qdev_create(NULL, TYPE_MACIO_NVRAM);
@@ -467,7 +471,8 @@ static void ppc_core99_init(QEMUMachineInitArgs *args)
         fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_TBFREQ, TBFREQ);
     }
     /* Mac OS X requires a "known good" clock-frequency value; pass it one. */
-    fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_CLOCKFREQ, 266000000);
+    fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_CLOCKFREQ, CLOCKFREQ);
+    fw_cfg_add_i32(fw_cfg, FW_CFG_PPC_BUSFREQ, BUSFREQ);
 
     qemu_register_boot_set(fw_cfg_boot_set, fw_cfg);
 }

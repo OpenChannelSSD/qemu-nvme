@@ -44,6 +44,9 @@ struct ppc_tb_t {
 #define PPC_DECR_ZERO_TRIGGERED      (1 << 3) /* Decr interrupt triggered when
                                                * the decrementer reaches zero.
                                                */
+#define PPC_DECR_UNDERFLOW_LEVEL     (1 << 4) /* Decr interrupt active when
+                                               * the most significant bit is 1.
+                                               */
 
 uint64_t cpu_ppc_get_tb(ppc_tb_t *tb_env, uint64_t vmclk, int64_t tb_offset);
 clk_setup_cb cpu_ppc_tb_init (CPUPPCState *env, uint32_t freq);
@@ -89,6 +92,8 @@ enum {
 #define FW_CFG_PPC_IS_KVM       (FW_CFG_ARCH_LOCAL + 0x05)
 #define FW_CFG_PPC_KVM_HC       (FW_CFG_ARCH_LOCAL + 0x06)
 #define FW_CFG_PPC_KVM_PID      (FW_CFG_ARCH_LOCAL + 0x07)
+/* OpenBIOS has FW_CFG_PPC_NVRAM_ADDR as +0x08 */
+#define FW_CFG_PPC_BUSFREQ      (FW_CFG_ARCH_LOCAL + 0x09)
 
 #define PPC_SERIAL_MM_BAUDBASE 399193
 

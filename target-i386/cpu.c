@@ -24,6 +24,7 @@
 #include "cpu.h"
 #include "sysemu/kvm.h"
 #include "sysemu/cpus.h"
+#include "kvm_i386.h"
 #include "topology.h"
 
 #include "qemu/option.h"
@@ -262,48 +263,133 @@ static const char *cpuid_7_0_ebx_feature_name[] = {
     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 };
 
+static const char *cpuid_apm_edx_feature_name[] = {
+    NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL,
+    "invtsc", NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL,
+};
+
+#define I486_FEATURES (CPUID_FP87 | CPUID_VME | CPUID_PSE)
+#define PENTIUM_FEATURES (I486_FEATURES | CPUID_DE | CPUID_TSC | \
+          CPUID_MSR | CPUID_MCE | CPUID_CX8 | CPUID_MMX | CPUID_APIC)
+#define PENTIUM2_FEATURES (PENTIUM_FEATURES | CPUID_PAE | CPUID_SEP | \
+          CPUID_MTRR | CPUID_PGE | CPUID_MCA | CPUID_CMOV | CPUID_PAT | \
+          CPUID_PSE36 | CPUID_FXSR)
+#define PENTIUM3_FEATURES (PENTIUM2_FEATURES | CPUID_SSE)
+#define PPRO_FEATURES (CPUID_FP87 | CPUID_DE | CPUID_PSE | CPUID_TSC | \
+          CPUID_MSR | CPUID_MCE | CPUID_CX8 | CPUID_PGE | CPUID_CMOV | \
+          CPUID_PAT | CPUID_FXSR | CPUID_MMX | CPUID_SSE | CPUID_SSE2 | \
+          CPUID_PAE | CPUID_SEP | CPUID_APIC)
+
+#define TCG_FEATURES (CPUID_FP87 | CPUID_PSE | CPUID_TSC | CPUID_MSR | \
+          CPUID_PAE | CPUID_MCE | CPUID_CX8 | CPUID_APIC | CPUID_SEP | \
+          CPUID_MTRR | CPUID_PGE | CPUID_MCA | CPUID_CMOV | CPUID_PAT | \
+          CPUID_PSE36 | CPUID_CLFLUSH | CPUID_ACPI | CPUID_MMX | \
+          CPUID_FXSR | CPUID_SSE | CPUID_SSE2 | CPUID_SS)
+          /* partly implemented:
+          CPUID_MTRR, CPUID_MCA, CPUID_CLFLUSH (needed for Win64) */
+          /* missing:
+          CPUID_VME, CPUID_DTS, CPUID_SS, CPUID_HT, CPUID_TM, CPUID_PBE */
+#define TCG_EXT_FEATURES (CPUID_EXT_SSE3 | CPUID_EXT_PCLMULQDQ | \
+          CPUID_EXT_MONITOR | CPUID_EXT_SSSE3 | CPUID_EXT_CX16 | \
+          CPUID_EXT_SSE41 | CPUID_EXT_SSE42 | CPUID_EXT_POPCNT | \
+          CPUID_EXT_MOVBE | CPUID_EXT_AES | CPUID_EXT_HYPERVISOR)
+          /* missing:
+          CPUID_EXT_DTES64, CPUID_EXT_DSCPL, CPUID_EXT_VMX, CPUID_EXT_SMX,
+          CPUID_EXT_EST, CPUID_EXT_TM2, CPUID_EXT_CID, CPUID_EXT_FMA,
+          CPUID_EXT_XTPR, CPUID_EXT_PDCM, CPUID_EXT_PCID, CPUID_EXT_DCA,
+          CPUID_EXT_X2APIC, CPUID_EXT_TSC_DEADLINE_TIMER, CPUID_EXT_XSAVE,
+          CPUID_EXT_OSXSAVE, CPUID_EXT_AVX, CPUID_EXT_F16C,
+          CPUID_EXT_RDRAND */
+
+#ifdef TARGET_X86_64
+#define TCG_EXT2_X86_64_FEATURES (CPUID_EXT2_SYSCALL | CPUID_EXT2_LM)
+#else
+#define TCG_EXT2_X86_64_FEATURES 0
+#endif
+
+#define TCG_EXT2_FEATURES ((TCG_FEATURES & CPUID_EXT2_AMD_ALIASES) | \
+          CPUID_EXT2_NX | CPUID_EXT2_MMXEXT | CPUID_EXT2_RDTSCP | \
+          CPUID_EXT2_3DNOW | CPUID_EXT2_3DNOWEXT | CPUID_EXT2_PDPE1GB | \
+          TCG_EXT2_X86_64_FEATURES)
+#define TCG_EXT3_FEATURES (CPUID_EXT3_LAHF_LM | CPUID_EXT3_SVM | \
+          CPUID_EXT3_CR8LEG | CPUID_EXT3_ABM | CPUID_EXT3_SSE4A)
+#define TCG_EXT4_FEATURES 0
+#define TCG_SVM_FEATURES 0
+#define TCG_KVM_FEATURES 0
+#define TCG_7_0_EBX_FEATURES (CPUID_7_0_EBX_SMEP | CPUID_7_0_EBX_SMAP | \
+          CPUID_7_0_EBX_BMI1 | CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ADX)
+          /* missing:
+          CPUID_7_0_EBX_FSGSBASE, CPUID_7_0_EBX_HLE, CPUID_7_0_EBX_AVX2,
+          CPUID_7_0_EBX_ERMS, CPUID_7_0_EBX_INVPCID, CPUID_7_0_EBX_RTM,
+          CPUID_7_0_EBX_RDSEED */
+#define TCG_APM_FEATURES 0
+
+
 typedef struct FeatureWordInfo {
     const char **feat_names;
     uint32_t cpuid_eax;   /* Input EAX for CPUID */
     bool cpuid_needs_ecx; /* CPUID instruction uses ECX as input */
     uint32_t cpuid_ecx;   /* Input ECX value for CPUID */
     int cpuid_reg;        /* output register (R_* constant) */
+    uint32_t tcg_features; /* Feature flags supported by TCG */
+    uint32_t unmigratable_flags; /* Feature flags known to be unmigratable */
 } FeatureWordInfo;
 
 static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
     [FEAT_1_EDX] = {
         .feat_names = feature_name,
         .cpuid_eax = 1, .cpuid_reg = R_EDX,
+        .tcg_features = TCG_FEATURES,
     },
     [FEAT_1_ECX] = {
         .feat_names = ext_feature_name,
         .cpuid_eax = 1, .cpuid_reg = R_ECX,
+        .tcg_features = TCG_EXT_FEATURES,
     },
     [FEAT_8000_0001_EDX] = {
         .feat_names = ext2_feature_name,
         .cpuid_eax = 0x80000001, .cpuid_reg = R_EDX,
+        .tcg_features = TCG_EXT2_FEATURES,
     },
     [FEAT_8000_0001_ECX] = {
         .feat_names = ext3_feature_name,
         .cpuid_eax = 0x80000001, .cpuid_reg = R_ECX,
+        .tcg_features = TCG_EXT3_FEATURES,
     },
     [FEAT_C000_0001_EDX] = {
         .feat_names = ext4_feature_name,
         .cpuid_eax = 0xC0000001, .cpuid_reg = R_EDX,
+        .tcg_features = TCG_EXT4_FEATURES,
     },
     [FEAT_KVM] = {
         .feat_names = kvm_feature_name,
         .cpuid_eax = KVM_CPUID_FEATURES, .cpuid_reg = R_EAX,
+        .tcg_features = TCG_KVM_FEATURES,
     },
     [FEAT_SVM] = {
         .feat_names = svm_feature_name,
         .cpuid_eax = 0x8000000A, .cpuid_reg = R_EDX,
+        .tcg_features = TCG_SVM_FEATURES,
     },
     [FEAT_7_0_EBX] = {
         .feat_names = cpuid_7_0_ebx_feature_name,
         .cpuid_eax = 7,
         .cpuid_needs_ecx = true, .cpuid_ecx = 0,
         .cpuid_reg = R_EBX,
+        .tcg_features = TCG_7_0_EBX_FEATURES,
+    },
+    [FEAT_8000_0007_EDX] = {
+        .feat_names = cpuid_apm_edx_feature_name,
+        .cpuid_eax = 0x80000007,
+        .cpuid_reg = R_EDX,
+        .tcg_features = TCG_APM_FEATURES,
+        .unmigratable_flags = CPUID_APM_INVTSC,
     },
 };
 
@@ -316,7 +402,7 @@ typedef struct X86RegisterInfo32 {
 
 #define REGISTER(reg) \
     [R_##reg] = { .name = #reg, .qapi_enum = X86_CPU_REGISTER32_##reg }
-X86RegisterInfo32 x86_reg_info_32[CPU_NB_REGS32] = {
+static const X86RegisterInfo32 x86_reg_info_32[CPU_NB_REGS32] = {
     REGISTER(EAX),
     REGISTER(ECX),
     REGISTER(EDX),
@@ -358,17 +444,54 @@ typedef struct model_features_t {
     FeatureWord feat_word;
 } model_features_t;
 
-static uint32_t kvm_default_features = (1 << KVM_FEATURE_CLOCKSOURCE) |
+/* KVM-specific features that are automatically added to all CPU models
+ * when KVM is enabled.
+ */
+static uint32_t kvm_default_features[FEATURE_WORDS] = {
+    [FEAT_KVM] = (1 << KVM_FEATURE_CLOCKSOURCE) |
         (1 << KVM_FEATURE_NOP_IO_DELAY) |
         (1 << KVM_FEATURE_CLOCKSOURCE2) |
         (1 << KVM_FEATURE_ASYNC_PF) |
         (1 << KVM_FEATURE_STEAL_TIME) |
         (1 << KVM_FEATURE_PV_EOI) |
-        (1 << KVM_FEATURE_CLOCKSOURCE_STABLE_BIT);
+        (1 << KVM_FEATURE_CLOCKSOURCE_STABLE_BIT),
+    [FEAT_1_ECX] = CPUID_EXT_X2APIC,
+};
 
-void disable_kvm_pv_eoi(void)
+/* Features that are not added by default to any CPU model when KVM is enabled.
+ */
+static uint32_t kvm_default_unset_features[FEATURE_WORDS] = {
+    [FEAT_1_ECX] = CPUID_EXT_MONITOR,
+};
+
+void x86_cpu_compat_disable_kvm_features(FeatureWord w, uint32_t features)
 {
-    kvm_default_features &= ~(1UL << KVM_FEATURE_PV_EOI);
+    kvm_default_features[w] &= ~features;
+}
+
+/*
+ * Returns the set of feature flags that are supported and migratable by
+ * QEMU, for a given FeatureWord.
+ */
+static uint32_t x86_cpu_get_migratable_flags(FeatureWord w)
+{
+    FeatureWordInfo *wi = &feature_word_info[w];
+    uint32_t r = 0;
+    int i;
+
+    for (i = 0; i < 32; i++) {
+        uint32_t f = 1U << i;
+        /* If the feature name is unknown, it is not supported by QEMU yet */
+        if (!wi->feat_names[i]) {
+            continue;
+        }
+        /* Skip features known to QEMU, but explicitly marked as unmigratable */
+        if (wi->unmigratable_flags & f) {
+            continue;
+        }
+        r |= f;
+    }
+    return r;
 }
 
 void host_cpuid(uint32_t function, uint32_t count,
@@ -484,7 +607,35 @@ static void add_flagname_to_bitmaps(const char *flagname,
     }
 }
 
-typedef struct x86_def_t {
+/* CPU class name definitions: */
+
+#define X86_CPU_TYPE_SUFFIX "-" TYPE_X86_CPU
+#define X86_CPU_TYPE_NAME(name) (name X86_CPU_TYPE_SUFFIX)
+
+/* Return type name for a given CPU model name
+ * Caller is responsible for freeing the returned string.
+ */
+static char *x86_cpu_type_name(const char *model_name)
+{
+    return g_strdup_printf(X86_CPU_TYPE_NAME("%s"), model_name);
+}
+
+static ObjectClass *x86_cpu_class_by_name(const char *cpu_model)
+{
+    ObjectClass *oc;
+    char *typename;
+
+    if (cpu_model == NULL) {
+        return NULL;
+    }
+
+    typename = x86_cpu_type_name(cpu_model);
+    oc = object_class_by_name(typename);
+    g_free(typename);
+    return oc;
+}
+
+struct X86CPUDefinition {
     const char *name;
     uint32_t level;
     uint32_t xlevel;
@@ -497,59 +648,9 @@ typedef struct x86_def_t {
     FeatureWordArray features;
     char model_id[48];
     bool cache_info_passthrough;
-} x86_def_t;
+};
 
-#define I486_FEATURES (CPUID_FP87 | CPUID_VME | CPUID_PSE)
-#define PENTIUM_FEATURES (I486_FEATURES | CPUID_DE | CPUID_TSC | \
-          CPUID_MSR | CPUID_MCE | CPUID_CX8 | CPUID_MMX | CPUID_APIC)
-#define PENTIUM2_FEATURES (PENTIUM_FEATURES | CPUID_PAE | CPUID_SEP | \
-          CPUID_MTRR | CPUID_PGE | CPUID_MCA | CPUID_CMOV | CPUID_PAT | \
-          CPUID_PSE36 | CPUID_FXSR)
-#define PENTIUM3_FEATURES (PENTIUM2_FEATURES | CPUID_SSE)
-#define PPRO_FEATURES (CPUID_FP87 | CPUID_DE | CPUID_PSE | CPUID_TSC | \
-          CPUID_MSR | CPUID_MCE | CPUID_CX8 | CPUID_PGE | CPUID_CMOV | \
-          CPUID_PAT | CPUID_FXSR | CPUID_MMX | CPUID_SSE | CPUID_SSE2 | \
-          CPUID_PAE | CPUID_SEP | CPUID_APIC)
-
-#define TCG_FEATURES (CPUID_FP87 | CPUID_PSE | CPUID_TSC | CPUID_MSR | \
-          CPUID_PAE | CPUID_MCE | CPUID_CX8 | CPUID_APIC | CPUID_SEP | \
-          CPUID_MTRR | CPUID_PGE | CPUID_MCA | CPUID_CMOV | CPUID_PAT | \
-          CPUID_PSE36 | CPUID_CLFLUSH | CPUID_ACPI | CPUID_MMX | \
-          CPUID_FXSR | CPUID_SSE | CPUID_SSE2 | CPUID_SS)
-          /* partly implemented:
-          CPUID_MTRR, CPUID_MCA, CPUID_CLFLUSH (needed for Win64)
-          CPUID_PSE36 (needed for Solaris) */
-          /* missing:
-          CPUID_VME, CPUID_DTS, CPUID_SS, CPUID_HT, CPUID_TM, CPUID_PBE */
-#define TCG_EXT_FEATURES (CPUID_EXT_SSE3 | CPUID_EXT_PCLMULQDQ | \
-          CPUID_EXT_MONITOR | CPUID_EXT_SSSE3 | CPUID_EXT_CX16 | \
-          CPUID_EXT_SSE41 | CPUID_EXT_SSE42 | CPUID_EXT_POPCNT | \
-          CPUID_EXT_MOVBE | CPUID_EXT_AES | CPUID_EXT_HYPERVISOR)
-          /* missing:
-          CPUID_EXT_DTES64, CPUID_EXT_DSCPL, CPUID_EXT_VMX, CPUID_EXT_SMX,
-          CPUID_EXT_EST, CPUID_EXT_TM2, CPUID_EXT_CID, CPUID_EXT_FMA,
-          CPUID_EXT_XTPR, CPUID_EXT_PDCM, CPUID_EXT_PCID, CPUID_EXT_DCA,
-          CPUID_EXT_X2APIC, CPUID_EXT_TSC_DEADLINE_TIMER, CPUID_EXT_XSAVE,
-          CPUID_EXT_OSXSAVE, CPUID_EXT_AVX, CPUID_EXT_F16C,
-          CPUID_EXT_RDRAND */
-#define TCG_EXT2_FEATURES ((TCG_FEATURES & CPUID_EXT2_AMD_ALIASES) | \
-          CPUID_EXT2_NX | CPUID_EXT2_MMXEXT | CPUID_EXT2_RDTSCP | \
-          CPUID_EXT2_3DNOW | CPUID_EXT2_3DNOWEXT)
-          /* missing:
-          CPUID_EXT2_PDPE1GB */
-#define TCG_EXT3_FEATURES (CPUID_EXT3_LAHF_LM | CPUID_EXT3_SVM | \
-          CPUID_EXT3_CR8LEG | CPUID_EXT3_ABM | CPUID_EXT3_SSE4A)
-#define TCG_SVM_FEATURES 0
-#define TCG_7_0_EBX_FEATURES (CPUID_7_0_EBX_SMEP | CPUID_7_0_EBX_SMAP \
-          CPUID_7_0_EBX_BMI1 | CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ADX)
-          /* missing:
-          CPUID_7_0_EBX_FSGSBASE, CPUID_7_0_EBX_HLE, CPUID_7_0_EBX_AVX2,
-          CPUID_7_0_EBX_ERMS, CPUID_7_0_EBX_INVPCID, CPUID_7_0_EBX_RTM,
-          CPUID_7_0_EBX_RDSEED */
-
-/* built-in CPU model definitions
- */
-static x86_def_t builtin_x86_defs[] = {
+static X86CPUDefinition builtin_x86_defs[] = {
     {
         .name = "qemu64",
         .level = 4,
@@ -797,10 +898,10 @@ static x86_def_t builtin_x86_defs[] = {
         .stepping = 3,
         .features[FEAT_1_EDX] =
             CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
-             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
-             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
-             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
-             CPUID_DE | CPUID_FP87,
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
         .features[FEAT_1_ECX] =
             CPUID_EXT_SSSE3 | CPUID_EXT_SSE3,
         .features[FEAT_8000_0001_EDX] =
@@ -819,13 +920,13 @@ static x86_def_t builtin_x86_defs[] = {
         .stepping = 3,
         .features[FEAT_1_EDX] =
             CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
-             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
-             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
-             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
-             CPUID_DE | CPUID_FP87,
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
         .features[FEAT_1_ECX] =
             CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
-             CPUID_EXT_SSE3,
+            CPUID_EXT_SSE3,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_NX | CPUID_EXT2_SYSCALL,
         .features[FEAT_8000_0001_ECX] =
@@ -842,13 +943,13 @@ static x86_def_t builtin_x86_defs[] = {
         .stepping = 3,
         .features[FEAT_1_EDX] =
             CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
-             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
-             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
-             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
-             CPUID_DE | CPUID_FP87,
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
         .features[FEAT_1_ECX] =
             CPUID_EXT_POPCNT | CPUID_EXT_SSE42 | CPUID_EXT_SSE41 |
-             CPUID_EXT_CX16 | CPUID_EXT_SSSE3 | CPUID_EXT_SSE3,
+            CPUID_EXT_CX16 | CPUID_EXT_SSSE3 | CPUID_EXT_SSE3,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_SYSCALL | CPUID_EXT2_NX,
         .features[FEAT_8000_0001_ECX] =
@@ -865,14 +966,14 @@ static x86_def_t builtin_x86_defs[] = {
         .stepping = 1,
         .features[FEAT_1_EDX] =
             CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
-             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
-             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
-             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
-             CPUID_DE | CPUID_FP87,
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
         .features[FEAT_1_ECX] =
             CPUID_EXT_AES | CPUID_EXT_POPCNT | CPUID_EXT_SSE42 |
-             CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
-             CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3,
+            CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
+            CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_SYSCALL | CPUID_EXT2_NX,
         .features[FEAT_8000_0001_ECX] =
@@ -889,19 +990,19 @@ static x86_def_t builtin_x86_defs[] = {
         .stepping = 1,
         .features[FEAT_1_EDX] =
             CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
-             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
-             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
-             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
-             CPUID_DE | CPUID_FP87,
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
         .features[FEAT_1_ECX] =
             CPUID_EXT_AVX | CPUID_EXT_XSAVE | CPUID_EXT_AES |
-             CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_POPCNT |
-             CPUID_EXT_X2APIC | CPUID_EXT_SSE42 | CPUID_EXT_SSE41 |
-             CPUID_EXT_CX16 | CPUID_EXT_SSSE3 | CPUID_EXT_PCLMULQDQ |
-             CPUID_EXT_SSE3,
+            CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_POPCNT |
+            CPUID_EXT_X2APIC | CPUID_EXT_SSE42 | CPUID_EXT_SSE41 |
+            CPUID_EXT_CX16 | CPUID_EXT_SSSE3 | CPUID_EXT_PCLMULQDQ |
+            CPUID_EXT_SSE3,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_NX |
-             CPUID_EXT2_SYSCALL,
+            CPUID_EXT2_SYSCALL,
         .features[FEAT_8000_0001_ECX] =
             CPUID_EXT3_LAHF_LM,
         .xlevel = 0x8000000A,
@@ -916,20 +1017,20 @@ static x86_def_t builtin_x86_defs[] = {
         .stepping = 1,
         .features[FEAT_1_EDX] =
             CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
-             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
-             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
-             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
-             CPUID_DE | CPUID_FP87,
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
         .features[FEAT_1_ECX] =
             CPUID_EXT_AVX | CPUID_EXT_XSAVE | CPUID_EXT_AES |
-             CPUID_EXT_POPCNT | CPUID_EXT_X2APIC | CPUID_EXT_SSE42 |
-             CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
-             CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3 |
-             CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_FMA | CPUID_EXT_MOVBE |
-             CPUID_EXT_PCID,
+            CPUID_EXT_POPCNT | CPUID_EXT_X2APIC | CPUID_EXT_SSE42 |
+            CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
+            CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3 |
+            CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_FMA | CPUID_EXT_MOVBE |
+            CPUID_EXT_PCID,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_NX |
-             CPUID_EXT2_SYSCALL,
+            CPUID_EXT2_SYSCALL,
         .features[FEAT_8000_0001_ECX] =
             CPUID_EXT3_LAHF_LM,
         .features[FEAT_7_0_EBX] =
@@ -941,6 +1042,40 @@ static x86_def_t builtin_x86_defs[] = {
         .model_id = "Intel Core Processor (Haswell)",
     },
     {
+        .name = "Broadwell",
+        .level = 0xd,
+        .vendor = CPUID_VENDOR_INTEL,
+        .family = 6,
+        .model = 61,
+        .stepping = 2,
+        .features[FEAT_1_EDX] =
+            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
+        .features[FEAT_1_ECX] =
+            CPUID_EXT_AVX | CPUID_EXT_XSAVE | CPUID_EXT_AES |
+            CPUID_EXT_POPCNT | CPUID_EXT_X2APIC | CPUID_EXT_SSE42 |
+            CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
+            CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3 |
+            CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_FMA | CPUID_EXT_MOVBE |
+            CPUID_EXT_PCID,
+        .features[FEAT_8000_0001_EDX] =
+            CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_NX |
+            CPUID_EXT2_SYSCALL,
+        .features[FEAT_8000_0001_ECX] =
+            CPUID_EXT3_LAHF_LM | CPUID_EXT3_3DNOWPREFETCH,
+        .features[FEAT_7_0_EBX] =
+            CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_BMI1 |
+            CPUID_7_0_EBX_HLE | CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
+            CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
+            CPUID_7_0_EBX_RTM | CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
+            CPUID_7_0_EBX_SMAP,
+        .xlevel = 0x8000000A,
+        .model_id = "Intel Core Processor (Broadwell)",
+    },
+    {
         .name = "Opteron_G1",
         .level = 5,
         .vendor = CPUID_VENDOR_AMD,
@@ -949,19 +1084,19 @@ static x86_def_t builtin_x86_defs[] = {
         .stepping = 1,
         .features[FEAT_1_EDX] =
             CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
-             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
-             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
-             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
-             CPUID_DE | CPUID_FP87,
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
         .features[FEAT_1_ECX] =
             CPUID_EXT_SSE3,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_FXSR | CPUID_EXT2_MMX |
-             CPUID_EXT2_NX | CPUID_EXT2_PSE36 | CPUID_EXT2_PAT |
-             CPUID_EXT2_CMOV | CPUID_EXT2_MCA | CPUID_EXT2_PGE |
-             CPUID_EXT2_MTRR | CPUID_EXT2_SYSCALL | CPUID_EXT2_APIC |
-             CPUID_EXT2_CX8 | CPUID_EXT2_MCE | CPUID_EXT2_PAE | CPUID_EXT2_MSR |
-             CPUID_EXT2_TSC | CPUID_EXT2_PSE | CPUID_EXT2_DE | CPUID_EXT2_FPU,
+            CPUID_EXT2_NX | CPUID_EXT2_PSE36 | CPUID_EXT2_PAT |
+            CPUID_EXT2_CMOV | CPUID_EXT2_MCA | CPUID_EXT2_PGE |
+            CPUID_EXT2_MTRR | CPUID_EXT2_SYSCALL | CPUID_EXT2_APIC |
+            CPUID_EXT2_CX8 | CPUID_EXT2_MCE | CPUID_EXT2_PAE | CPUID_EXT2_MSR |
+            CPUID_EXT2_TSC | CPUID_EXT2_PSE | CPUID_EXT2_DE | CPUID_EXT2_FPU,
         .xlevel = 0x80000008,
         .model_id = "AMD Opteron 240 (Gen 1 Class Opteron)",
     },
@@ -974,20 +1109,20 @@ static x86_def_t builtin_x86_defs[] = {
         .stepping = 1,
         .features[FEAT_1_EDX] =
             CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
-             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
-             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
-             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
-             CPUID_DE | CPUID_FP87,
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
         .features[FEAT_1_ECX] =
             CPUID_EXT_CX16 | CPUID_EXT_SSE3,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_FXSR |
-             CPUID_EXT2_MMX | CPUID_EXT2_NX | CPUID_EXT2_PSE36 |
-             CPUID_EXT2_PAT | CPUID_EXT2_CMOV | CPUID_EXT2_MCA |
-             CPUID_EXT2_PGE | CPUID_EXT2_MTRR | CPUID_EXT2_SYSCALL |
-             CPUID_EXT2_APIC | CPUID_EXT2_CX8 | CPUID_EXT2_MCE |
-             CPUID_EXT2_PAE | CPUID_EXT2_MSR | CPUID_EXT2_TSC | CPUID_EXT2_PSE |
-             CPUID_EXT2_DE | CPUID_EXT2_FPU,
+            CPUID_EXT2_MMX | CPUID_EXT2_NX | CPUID_EXT2_PSE36 |
+            CPUID_EXT2_PAT | CPUID_EXT2_CMOV | CPUID_EXT2_MCA |
+            CPUID_EXT2_PGE | CPUID_EXT2_MTRR | CPUID_EXT2_SYSCALL |
+            CPUID_EXT2_APIC | CPUID_EXT2_CX8 | CPUID_EXT2_MCE |
+            CPUID_EXT2_PAE | CPUID_EXT2_MSR | CPUID_EXT2_TSC | CPUID_EXT2_PSE |
+            CPUID_EXT2_DE | CPUID_EXT2_FPU,
         .features[FEAT_8000_0001_ECX] =
             CPUID_EXT3_SVM | CPUID_EXT3_LAHF_LM,
         .xlevel = 0x80000008,
@@ -1002,24 +1137,24 @@ static x86_def_t builtin_x86_defs[] = {
         .stepping = 1,
         .features[FEAT_1_EDX] =
             CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
-             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
-             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
-             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
-             CPUID_DE | CPUID_FP87,
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
         .features[FEAT_1_ECX] =
             CPUID_EXT_POPCNT | CPUID_EXT_CX16 | CPUID_EXT_MONITOR |
-             CPUID_EXT_SSE3,
+            CPUID_EXT_SSE3,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_FXSR |
-             CPUID_EXT2_MMX | CPUID_EXT2_NX | CPUID_EXT2_PSE36 |
-             CPUID_EXT2_PAT | CPUID_EXT2_CMOV | CPUID_EXT2_MCA |
-             CPUID_EXT2_PGE | CPUID_EXT2_MTRR | CPUID_EXT2_SYSCALL |
-             CPUID_EXT2_APIC | CPUID_EXT2_CX8 | CPUID_EXT2_MCE |
-             CPUID_EXT2_PAE | CPUID_EXT2_MSR | CPUID_EXT2_TSC | CPUID_EXT2_PSE |
-             CPUID_EXT2_DE | CPUID_EXT2_FPU,
+            CPUID_EXT2_MMX | CPUID_EXT2_NX | CPUID_EXT2_PSE36 |
+            CPUID_EXT2_PAT | CPUID_EXT2_CMOV | CPUID_EXT2_MCA |
+            CPUID_EXT2_PGE | CPUID_EXT2_MTRR | CPUID_EXT2_SYSCALL |
+            CPUID_EXT2_APIC | CPUID_EXT2_CX8 | CPUID_EXT2_MCE |
+            CPUID_EXT2_PAE | CPUID_EXT2_MSR | CPUID_EXT2_TSC | CPUID_EXT2_PSE |
+            CPUID_EXT2_DE | CPUID_EXT2_FPU,
         .features[FEAT_8000_0001_ECX] =
             CPUID_EXT3_MISALIGNSSE | CPUID_EXT3_SSE4A |
-             CPUID_EXT3_ABM | CPUID_EXT3_SVM | CPUID_EXT3_LAHF_LM,
+            CPUID_EXT3_ABM | CPUID_EXT3_SVM | CPUID_EXT3_LAHF_LM,
         .xlevel = 0x80000008,
         .model_id = "AMD Opteron 23xx (Gen 3 Class Opteron)",
     },
@@ -1032,28 +1167,28 @@ static x86_def_t builtin_x86_defs[] = {
         .stepping = 2,
         .features[FEAT_1_EDX] =
             CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
-             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
-             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
-             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
-             CPUID_DE | CPUID_FP87,
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
         .features[FEAT_1_ECX] =
             CPUID_EXT_AVX | CPUID_EXT_XSAVE | CPUID_EXT_AES |
-             CPUID_EXT_POPCNT | CPUID_EXT_SSE42 | CPUID_EXT_SSE41 |
-             CPUID_EXT_CX16 | CPUID_EXT_SSSE3 | CPUID_EXT_PCLMULQDQ |
-             CPUID_EXT_SSE3,
+            CPUID_EXT_POPCNT | CPUID_EXT_SSE42 | CPUID_EXT_SSE41 |
+            CPUID_EXT_CX16 | CPUID_EXT_SSSE3 | CPUID_EXT_PCLMULQDQ |
+            CPUID_EXT_SSE3,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_RDTSCP |
-             CPUID_EXT2_PDPE1GB | CPUID_EXT2_FXSR | CPUID_EXT2_MMX |
-             CPUID_EXT2_NX | CPUID_EXT2_PSE36 | CPUID_EXT2_PAT |
-             CPUID_EXT2_CMOV | CPUID_EXT2_MCA | CPUID_EXT2_PGE |
-             CPUID_EXT2_MTRR | CPUID_EXT2_SYSCALL | CPUID_EXT2_APIC |
-             CPUID_EXT2_CX8 | CPUID_EXT2_MCE | CPUID_EXT2_PAE | CPUID_EXT2_MSR |
-             CPUID_EXT2_TSC | CPUID_EXT2_PSE | CPUID_EXT2_DE | CPUID_EXT2_FPU,
+            CPUID_EXT2_PDPE1GB | CPUID_EXT2_FXSR | CPUID_EXT2_MMX |
+            CPUID_EXT2_NX | CPUID_EXT2_PSE36 | CPUID_EXT2_PAT |
+            CPUID_EXT2_CMOV | CPUID_EXT2_MCA | CPUID_EXT2_PGE |
+            CPUID_EXT2_MTRR | CPUID_EXT2_SYSCALL | CPUID_EXT2_APIC |
+            CPUID_EXT2_CX8 | CPUID_EXT2_MCE | CPUID_EXT2_PAE | CPUID_EXT2_MSR |
+            CPUID_EXT2_TSC | CPUID_EXT2_PSE | CPUID_EXT2_DE | CPUID_EXT2_FPU,
         .features[FEAT_8000_0001_ECX] =
             CPUID_EXT3_FMA4 | CPUID_EXT3_XOP |
-             CPUID_EXT3_3DNOWPREFETCH | CPUID_EXT3_MISALIGNSSE |
-             CPUID_EXT3_SSE4A | CPUID_EXT3_ABM | CPUID_EXT3_SVM |
-             CPUID_EXT3_LAHF_LM,
+            CPUID_EXT3_3DNOWPREFETCH | CPUID_EXT3_MISALIGNSSE |
+            CPUID_EXT3_SSE4A | CPUID_EXT3_ABM | CPUID_EXT3_SVM |
+            CPUID_EXT3_LAHF_LM,
         .xlevel = 0x8000001A,
         .model_id = "AMD Opteron 62xx class CPU",
     },
@@ -1066,28 +1201,28 @@ static x86_def_t builtin_x86_defs[] = {
         .stepping = 0,
         .features[FEAT_1_EDX] =
             CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
-             CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
-             CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
-             CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
-             CPUID_DE | CPUID_FP87,
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
         .features[FEAT_1_ECX] =
             CPUID_EXT_F16C | CPUID_EXT_AVX | CPUID_EXT_XSAVE |
-             CPUID_EXT_AES | CPUID_EXT_POPCNT | CPUID_EXT_SSE42 |
-             CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_FMA |
-             CPUID_EXT_SSSE3 | CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3,
+            CPUID_EXT_AES | CPUID_EXT_POPCNT | CPUID_EXT_SSE42 |
+            CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_FMA |
+            CPUID_EXT_SSSE3 | CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_RDTSCP |
-             CPUID_EXT2_PDPE1GB | CPUID_EXT2_FXSR | CPUID_EXT2_MMX |
-             CPUID_EXT2_NX | CPUID_EXT2_PSE36 | CPUID_EXT2_PAT |
-             CPUID_EXT2_CMOV | CPUID_EXT2_MCA | CPUID_EXT2_PGE |
-             CPUID_EXT2_MTRR | CPUID_EXT2_SYSCALL | CPUID_EXT2_APIC |
-             CPUID_EXT2_CX8 | CPUID_EXT2_MCE | CPUID_EXT2_PAE | CPUID_EXT2_MSR |
-             CPUID_EXT2_TSC | CPUID_EXT2_PSE | CPUID_EXT2_DE | CPUID_EXT2_FPU,
+            CPUID_EXT2_PDPE1GB | CPUID_EXT2_FXSR | CPUID_EXT2_MMX |
+            CPUID_EXT2_NX | CPUID_EXT2_PSE36 | CPUID_EXT2_PAT |
+            CPUID_EXT2_CMOV | CPUID_EXT2_MCA | CPUID_EXT2_PGE |
+            CPUID_EXT2_MTRR | CPUID_EXT2_SYSCALL | CPUID_EXT2_APIC |
+            CPUID_EXT2_CX8 | CPUID_EXT2_MCE | CPUID_EXT2_PAE | CPUID_EXT2_MSR |
+            CPUID_EXT2_TSC | CPUID_EXT2_PSE | CPUID_EXT2_DE | CPUID_EXT2_FPU,
         .features[FEAT_8000_0001_ECX] =
             CPUID_EXT3_TBM | CPUID_EXT3_FMA4 | CPUID_EXT3_XOP |
-             CPUID_EXT3_3DNOWPREFETCH | CPUID_EXT3_MISALIGNSSE |
-             CPUID_EXT3_SSE4A | CPUID_EXT3_ABM | CPUID_EXT3_SVM |
-             CPUID_EXT3_LAHF_LM,
+            CPUID_EXT3_3DNOWPREFETCH | CPUID_EXT3_MISALIGNSSE |
+            CPUID_EXT3_SSE4A | CPUID_EXT3_ABM | CPUID_EXT3_SVM |
+            CPUID_EXT3_LAHF_LM,
         .xlevel = 0x8000001A,
         .model_id = "AMD Opteron 63xx class CPU",
     },
@@ -1108,7 +1243,7 @@ static x86_def_t builtin_x86_defs[] = {
 void x86_cpu_compat_set_features(const char *cpu_model, FeatureWord w,
                                  uint32_t feat_add, uint32_t feat_remove)
 {
-    x86_def_t *def;
+    X86CPUDefinition *def;
     int i;
     for (i = 0; i < ARRAY_SIZE(builtin_x86_defs); i++) {
         def = &builtin_x86_defs[i];
@@ -1118,6 +1253,8 @@ void x86_cpu_compat_set_features(const char *cpu_model, FeatureWord w,
         }
     }
 }
+
+#ifdef CONFIG_KVM
 
 static int cpu_x86_fill_model_id(char *str)
 {
@@ -1134,91 +1271,94 @@ static int cpu_x86_fill_model_id(char *str)
     return 0;
 }
 
-/* Fill a x86_def_t struct with information about the host CPU, and
- * the CPU features supported by the host hardware + host kernel
+static X86CPUDefinition host_cpudef;
+
+static Property host_x86_cpu_properties[] = {
+    DEFINE_PROP_BOOL("migratable", X86CPU, migratable, true),
+    DEFINE_PROP_END_OF_LIST()
+};
+
+/* class_init for the "host" CPU model
  *
- * This function may be called only if KVM is enabled.
+ * This function may be called before KVM is initialized.
  */
-static void kvm_cpu_fill_host(x86_def_t *x86_cpu_def)
+static void host_x86_cpu_class_init(ObjectClass *oc, void *data)
 {
-    KVMState *s = kvm_state;
+    DeviceClass *dc = DEVICE_CLASS(oc);
+    X86CPUClass *xcc = X86_CPU_CLASS(oc);
     uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+
+    xcc->kvm_required = true;
+
+    host_cpuid(0x0, 0, &eax, &ebx, &ecx, &edx);
+    x86_cpu_vendor_words2str(host_cpudef.vendor, ebx, edx, ecx);
+
+    host_cpuid(0x1, 0, &eax, &ebx, &ecx, &edx);
+    host_cpudef.family = ((eax >> 8) & 0x0F) + ((eax >> 20) & 0xFF);
+    host_cpudef.model = ((eax >> 4) & 0x0F) | ((eax & 0xF0000) >> 12);
+    host_cpudef.stepping = eax & 0x0F;
+
+    cpu_x86_fill_model_id(host_cpudef.model_id);
+
+    xcc->cpu_def = &host_cpudef;
+    host_cpudef.cache_info_passthrough = true;
+
+    /* level, xlevel, xlevel2, and the feature words are initialized on
+     * instance_init, because they require KVM to be initialized.
+     */
+
+    dc->props = host_x86_cpu_properties;
+}
+
+static uint32_t x86_cpu_get_supported_feature_word(FeatureWord w,
+                                                   bool migratable_only);
+
+static void host_x86_cpu_initfn(Object *obj)
+{
+    X86CPU *cpu = X86_CPU(obj);
+    CPUX86State *env = &cpu->env;
+    KVMState *s = kvm_state;
+    FeatureWord w;
 
     assert(kvm_enabled());
 
-    x86_cpu_def->name = "host";
-    x86_cpu_def->cache_info_passthrough = true;
-    host_cpuid(0x0, 0, &eax, &ebx, &ecx, &edx);
-    x86_cpu_vendor_words2str(x86_cpu_def->vendor, ebx, edx, ecx);
+    env->cpuid_level = kvm_arch_get_supported_cpuid(s, 0x0, 0, R_EAX);
+    env->cpuid_xlevel = kvm_arch_get_supported_cpuid(s, 0x80000000, 0, R_EAX);
+    env->cpuid_xlevel2 = kvm_arch_get_supported_cpuid(s, 0xC0000000, 0, R_EAX);
 
-    host_cpuid(0x1, 0, &eax, &ebx, &ecx, &edx);
-    x86_cpu_def->family = ((eax >> 8) & 0x0F) + ((eax >> 20) & 0xFF);
-    x86_cpu_def->model = ((eax >> 4) & 0x0F) | ((eax & 0xF0000) >> 12);
-    x86_cpu_def->stepping = eax & 0x0F;
-
-    x86_cpu_def->level = kvm_arch_get_supported_cpuid(s, 0x0, 0, R_EAX);
-    x86_cpu_def->xlevel = kvm_arch_get_supported_cpuid(s, 0x80000000, 0, R_EAX);
-    x86_cpu_def->xlevel2 =
-        kvm_arch_get_supported_cpuid(s, 0xC0000000, 0, R_EAX);
-
-    cpu_x86_fill_model_id(x86_cpu_def->model_id);
-
-    FeatureWord w;
     for (w = 0; w < FEATURE_WORDS; w++) {
-        FeatureWordInfo *wi = &feature_word_info[w];
-        x86_cpu_def->features[w] =
-            kvm_arch_get_supported_cpuid(s, wi->cpuid_eax, wi->cpuid_ecx,
-                                         wi->cpuid_reg);
+        env->features[w] =
+            x86_cpu_get_supported_feature_word(w, cpu->migratable);
     }
+    object_property_set_bool(OBJECT(cpu), true, "pmu", &error_abort);
 }
 
-static int unavailable_host_feature(FeatureWordInfo *f, uint32_t mask)
+static const TypeInfo host_x86_cpu_type_info = {
+    .name = X86_CPU_TYPE_NAME("host"),
+    .parent = TYPE_X86_CPU,
+    .instance_init = host_x86_cpu_initfn,
+    .class_init = host_x86_cpu_class_init,
+};
+
+#endif
+
+static void report_unavailable_features(FeatureWord w, uint32_t mask)
 {
+    FeatureWordInfo *f = &feature_word_info[w];
     int i;
 
-    for (i = 0; i < 32; ++i)
+    for (i = 0; i < 32; ++i) {
         if (1 << i & mask) {
             const char *reg = get_register_name_32(f->cpuid_reg);
             assert(reg);
-            fprintf(stderr, "warning: host doesn't support requested feature: "
+            fprintf(stderr, "warning: %s doesn't support requested feature: "
                 "CPUID.%02XH:%s%s%s [bit %d]\n",
+                kvm_enabled() ? "host" : "TCG",
                 f->cpuid_eax, reg,
                 f->feat_names[i] ? "." : "",
                 f->feat_names[i] ? f->feat_names[i] : "", i);
-            break;
-        }
-    return 0;
-}
-
-/* Check if all requested cpu flags are making their way to the guest
- *
- * Returns 0 if all flags are supported by the host, non-zero otherwise.
- *
- * This function may be called only if KVM is enabled.
- */
-static int kvm_check_features_against_host(KVMState *s, X86CPU *cpu)
-{
-    CPUX86State *env = &cpu->env;
-    int rv = 0;
-    FeatureWord w;
-
-    assert(kvm_enabled());
-
-    for (w = 0; w < FEATURE_WORDS; w++) {
-        FeatureWordInfo *wi = &feature_word_info[w];
-        uint32_t guest_feat = env->features[w];
-        uint32_t host_feat = kvm_arch_get_supported_cpuid(s, wi->cpuid_eax,
-                                                             wi->cpuid_ecx,
-                                                             wi->cpuid_reg);
-        uint32_t mask;
-        for (mask = 1; mask; mask <<= 1) {
-            if (guest_feat & mask && !(host_feat & mask)) {
-                unavailable_host_feature(wi, mask);
-                rv = 1;
-            }
         }
     }
-    return rv;
 }
 
 static void x86_cpuid_version_get_family(Object *obj, Visitor *v, void *opaque,
@@ -1242,10 +1382,12 @@ static void x86_cpuid_version_set_family(Object *obj, Visitor *v, void *opaque,
     CPUX86State *env = &cpu->env;
     const int64_t min = 0;
     const int64_t max = 0xff + 0xf;
+    Error *local_err = NULL;
     int64_t value;
 
-    visit_type_int(v, &value, name, errp);
-    if (error_is_set(errp)) {
+    visit_type_int(v, &value, name, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
         return;
     }
     if (value < min || value > max) {
@@ -1281,10 +1423,12 @@ static void x86_cpuid_version_set_model(Object *obj, Visitor *v, void *opaque,
     CPUX86State *env = &cpu->env;
     const int64_t min = 0;
     const int64_t max = 0xff;
+    Error *local_err = NULL;
     int64_t value;
 
-    visit_type_int(v, &value, name, errp);
-    if (error_is_set(errp)) {
+    visit_type_int(v, &value, name, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
         return;
     }
     if (value < min || value > max) {
@@ -1317,10 +1461,12 @@ static void x86_cpuid_version_set_stepping(Object *obj, Visitor *v,
     CPUX86State *env = &cpu->env;
     const int64_t min = 0;
     const int64_t max = 0xf;
+    Error *local_err = NULL;
     int64_t value;
 
-    visit_type_int(v, &value, name, errp);
-    if (error_is_set(errp)) {
+    visit_type_int(v, &value, name, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
         return;
     }
     if (value < min || value > max) {
@@ -1453,10 +1599,12 @@ static void x86_cpuid_set_tsc_freq(Object *obj, Visitor *v, void *opaque,
     X86CPU *cpu = X86_CPU(obj);
     const int64_t min = 0;
     const int64_t max = INT64_MAX;
+    Error *local_err = NULL;
     int64_t value;
 
-    visit_type_int(v, &value, name, errp);
-    if (error_is_set(errp)) {
+    visit_type_int(v, &value, name, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
         return;
     }
     if (value < min || value > max) {
@@ -1582,32 +1730,6 @@ static PropertyInfo qdev_prop_spinlocks = {
     .set   = x86_set_hv_spinlocks,
 };
 
-static int cpu_x86_find_by_name(X86CPU *cpu, x86_def_t *x86_cpu_def,
-                                const char *name)
-{
-    x86_def_t *def;
-    int i;
-
-    if (name == NULL) {
-        return -1;
-    }
-    if (kvm_enabled() && strcmp(name, "host") == 0) {
-        kvm_cpu_fill_host(x86_cpu_def);
-        object_property_set_bool(OBJECT(cpu), true, "pmu", &error_abort);
-        return 0;
-    }
-
-    for (i = 0; i < ARRAY_SIZE(builtin_x86_defs); i++) {
-        def = &builtin_x86_defs[i];
-        if (strcmp(name, def->name) == 0) {
-            memcpy(x86_cpu_def, def, sizeof(*def));
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
 /* Convert all '_' in a feature string option name to '-', to make feature
  * name conform to QOM property naming rule, which uses '-' instead of '_'.
  */
@@ -1620,15 +1742,19 @@ static inline void feat2prop(char *s)
 
 /* Parse "+feature,-feature,feature=foo" CPU feature string
  */
-static void cpu_x86_parse_featurestr(X86CPU *cpu, char *features, Error **errp)
+static void x86_cpu_parse_featurestr(CPUState *cs, char *features,
+                                     Error **errp)
 {
+    X86CPU *cpu = X86_CPU(cs);
     char *featurestr; /* Single 'key=value" string being parsed */
+    FeatureWord w;
     /* Features to be added */
     FeatureWordArray plus_features = { 0 };
     /* Features to be removed */
     FeatureWordArray minus_features = { 0 };
     uint32_t numvalue;
     CPUX86State *env = &cpu->env;
+    Error *local_err = NULL;
 
     featurestr = features ? strtok(features, ",") : NULL;
 
@@ -1648,15 +1774,15 @@ static void cpu_x86_parse_featurestr(X86CPU *cpu, char *features, Error **errp)
                 numvalue = strtoul(val, &err, 0);
                 if (!*val || *err) {
                     error_setg(errp, "bad numerical value %s", val);
-                    goto out;
+                    return;
                 }
                 if (numvalue < 0x80000000) {
-                    fprintf(stderr, "xlevel value shall always be >= 0x80000000"
-                            ", fixup will be removed in future versions\n");
+                    error_report("xlevel value shall always be >= 0x80000000"
+                                 ", fixup will be removed in future versions");
                     numvalue += 0x80000000;
                 }
                 snprintf(num, sizeof(num), "%" PRIu32, numvalue);
-                object_property_parse(OBJECT(cpu), num, featurestr, errp);
+                object_property_parse(OBJECT(cpu), num, featurestr, &local_err);
             } else if (!strcmp(featurestr, "tsc-freq")) {
                 int64_t tsc_freq;
                 char *err;
@@ -1666,10 +1792,11 @@ static void cpu_x86_parse_featurestr(X86CPU *cpu, char *features, Error **errp)
                                                STRTOSZ_DEFSUFFIX_B, 1000);
                 if (tsc_freq < 0 || *err) {
                     error_setg(errp, "bad numerical value %s", val);
-                    goto out;
+                    return;
                 }
                 snprintf(num, sizeof(num), "%" PRId64, tsc_freq);
-                object_property_parse(OBJECT(cpu), num, "tsc-frequency", errp);
+                object_property_parse(OBJECT(cpu), num, "tsc-frequency",
+                                      &local_err);
             } else if (!strcmp(featurestr, "hv-spinlocks")) {
                 char *err;
                 const int min = 0xFFF;
@@ -1677,47 +1804,34 @@ static void cpu_x86_parse_featurestr(X86CPU *cpu, char *features, Error **errp)
                 numvalue = strtoul(val, &err, 0);
                 if (!*val || *err) {
                     error_setg(errp, "bad numerical value %s", val);
-                    goto out;
+                    return;
                 }
                 if (numvalue < min) {
-                    fprintf(stderr, "hv-spinlocks value shall always be >= 0x%x"
-                            ", fixup will be removed in future versions\n",
+                    error_report("hv-spinlocks value shall always be >= 0x%x"
+                            ", fixup will be removed in future versions",
                             min);
                     numvalue = min;
                 }
                 snprintf(num, sizeof(num), "%" PRId32, numvalue);
-                object_property_parse(OBJECT(cpu), num, featurestr, errp);
+                object_property_parse(OBJECT(cpu), num, featurestr, &local_err);
             } else {
-                object_property_parse(OBJECT(cpu), val, featurestr, errp);
+                object_property_parse(OBJECT(cpu), val, featurestr, &local_err);
             }
         } else {
             feat2prop(featurestr);
-            object_property_parse(OBJECT(cpu), "on", featurestr, errp);
+            object_property_parse(OBJECT(cpu), "on", featurestr, &local_err);
         }
-        if (error_is_set(errp)) {
-            goto out;
+        if (local_err) {
+            error_propagate(errp, local_err);
+            return;
         }
         featurestr = strtok(NULL, ",");
     }
-    env->features[FEAT_1_EDX] |= plus_features[FEAT_1_EDX];
-    env->features[FEAT_1_ECX] |= plus_features[FEAT_1_ECX];
-    env->features[FEAT_8000_0001_EDX] |= plus_features[FEAT_8000_0001_EDX];
-    env->features[FEAT_8000_0001_ECX] |= plus_features[FEAT_8000_0001_ECX];
-    env->features[FEAT_C000_0001_EDX] |= plus_features[FEAT_C000_0001_EDX];
-    env->features[FEAT_KVM] |= plus_features[FEAT_KVM];
-    env->features[FEAT_SVM] |= plus_features[FEAT_SVM];
-    env->features[FEAT_7_0_EBX] |= plus_features[FEAT_7_0_EBX];
-    env->features[FEAT_1_EDX] &= ~minus_features[FEAT_1_EDX];
-    env->features[FEAT_1_ECX] &= ~minus_features[FEAT_1_ECX];
-    env->features[FEAT_8000_0001_EDX] &= ~minus_features[FEAT_8000_0001_EDX];
-    env->features[FEAT_8000_0001_ECX] &= ~minus_features[FEAT_8000_0001_ECX];
-    env->features[FEAT_C000_0001_EDX] &= ~minus_features[FEAT_C000_0001_EDX];
-    env->features[FEAT_KVM] &= ~minus_features[FEAT_KVM];
-    env->features[FEAT_SVM] &= ~minus_features[FEAT_SVM];
-    env->features[FEAT_7_0_EBX] &= ~minus_features[FEAT_7_0_EBX];
 
-out:
-    return;
+    for (w = 0; w < FEATURE_WORDS; w++) {
+        env->features[w] |= plus_features[w];
+        env->features[w] &= ~minus_features[w];
+    }
 }
 
 /* generate a composite string into buf of all cpuid names in featureset
@@ -1753,7 +1867,7 @@ static void listflags(char *buf, int bufsize, uint32_t fbits,
 /* generate CPU information. */
 void x86_cpu_list(FILE *f, fprintf_function cpu_fprintf)
 {
-    x86_def_t *def;
+    X86CPUDefinition *def;
     char buf[256];
     int i;
 
@@ -1780,7 +1894,7 @@ void x86_cpu_list(FILE *f, fprintf_function cpu_fprintf)
 CpuDefinitionInfoList *arch_query_cpu_definitions(Error **errp)
 {
     CpuDefinitionInfoList *cpu_list = NULL;
-    x86_def_t *def;
+    X86CPUDefinition *def;
     int i;
 
     for (i = 0; i < ARRAY_SIZE(builtin_x86_defs); i++) {
@@ -1800,57 +1914,85 @@ CpuDefinitionInfoList *arch_query_cpu_definitions(Error **errp)
     return cpu_list;
 }
 
-static void filter_features_for_kvm(X86CPU *cpu)
+static uint32_t x86_cpu_get_supported_feature_word(FeatureWord w,
+                                                   bool migratable_only)
+{
+    FeatureWordInfo *wi = &feature_word_info[w];
+    uint32_t r;
+
+    if (kvm_enabled()) {
+        r = kvm_arch_get_supported_cpuid(kvm_state, wi->cpuid_eax,
+                                                    wi->cpuid_ecx,
+                                                    wi->cpuid_reg);
+    } else if (tcg_enabled()) {
+        r = wi->tcg_features;
+    } else {
+        return ~0;
+    }
+    if (migratable_only) {
+        r &= x86_cpu_get_migratable_flags(w);
+    }
+    return r;
+}
+
+/*
+ * Filters CPU feature words based on host availability of each feature.
+ *
+ * Returns: 0 if all flags are supported by the host, non-zero otherwise.
+ */
+static int x86_cpu_filter_features(X86CPU *cpu)
 {
     CPUX86State *env = &cpu->env;
-    KVMState *s = kvm_state;
     FeatureWord w;
+    int rv = 0;
 
     for (w = 0; w < FEATURE_WORDS; w++) {
-        FeatureWordInfo *wi = &feature_word_info[w];
-        uint32_t host_feat = kvm_arch_get_supported_cpuid(s, wi->cpuid_eax,
-                                                             wi->cpuid_ecx,
-                                                             wi->cpuid_reg);
+        uint32_t host_feat =
+            x86_cpu_get_supported_feature_word(w, cpu->migratable);
         uint32_t requested_features = env->features[w];
         env->features[w] &= host_feat;
         cpu->filtered_features[w] = requested_features & ~env->features[w];
+        if (cpu->filtered_features[w]) {
+            if (cpu->check_cpuid || cpu->enforce_cpuid) {
+                report_unavailable_features(w, cpu->filtered_features[w]);
+            }
+            rv = 1;
+        }
     }
+
+    return rv;
 }
 
-static void cpu_x86_register(X86CPU *cpu, const char *name, Error **errp)
+/* Load data from X86CPUDefinition
+ */
+static void x86_cpu_load_def(X86CPU *cpu, X86CPUDefinition *def, Error **errp)
 {
     CPUX86State *env = &cpu->env;
-    x86_def_t def1, *def = &def1;
-
-    memset(def, 0, sizeof(*def));
-
-    if (cpu_x86_find_by_name(cpu, def, name) < 0) {
-        error_setg(errp, "Unable to find CPU definition: %s", name);
-        return;
-    }
+    const char *vendor;
+    char host_vendor[CPUID_VENDOR_SZ + 1];
+    FeatureWord w;
 
     object_property_set_int(OBJECT(cpu), def->level, "level", errp);
     object_property_set_int(OBJECT(cpu), def->family, "family", errp);
     object_property_set_int(OBJECT(cpu), def->model, "model", errp);
     object_property_set_int(OBJECT(cpu), def->stepping, "stepping", errp);
-    env->features[FEAT_1_EDX] = def->features[FEAT_1_EDX];
-    env->features[FEAT_1_ECX] = def->features[FEAT_1_ECX];
-    env->features[FEAT_8000_0001_EDX] = def->features[FEAT_8000_0001_EDX];
-    env->features[FEAT_8000_0001_ECX] = def->features[FEAT_8000_0001_ECX];
     object_property_set_int(OBJECT(cpu), def->xlevel, "xlevel", errp);
-    env->features[FEAT_KVM] = def->features[FEAT_KVM];
-    env->features[FEAT_SVM] = def->features[FEAT_SVM];
-    env->features[FEAT_C000_0001_EDX] = def->features[FEAT_C000_0001_EDX];
-    env->features[FEAT_7_0_EBX] = def->features[FEAT_7_0_EBX];
     env->cpuid_xlevel2 = def->xlevel2;
     cpu->cache_info_passthrough = def->cache_info_passthrough;
-
     object_property_set_str(OBJECT(cpu), def->model_id, "model-id", errp);
-
-    /* Special cases not set in the x86_def_t structs: */
-    if (kvm_enabled()) {
-        env->features[FEAT_KVM] |= kvm_default_features;
+    for (w = 0; w < FEATURE_WORDS; w++) {
+        env->features[w] = def->features[w];
     }
+
+    /* Special cases not set in the X86CPUDefinition structs: */
+    if (kvm_enabled()) {
+        FeatureWord w;
+        for (w = 0; w < FEATURE_WORDS; w++) {
+            env->features[w] |= kvm_default_features[w];
+            env->features[w] &= ~kvm_default_unset_features[w];
+        }
+    }
+
     env->features[FEAT_1_ECX] |= CPUID_EXT_HYPERVISOR;
 
     /* sysenter isn't supported in compatibility mode on AMD,
@@ -1860,8 +2002,7 @@ static void cpu_x86_register(X86CPU *cpu, const char *name, Error **errp)
      * KVM's sysenter/syscall emulation in compatibility mode and
      * when doing cross vendor migration
      */
-    const char *vendor = def->vendor;
-    char host_vendor[CPUID_VENDOR_SZ + 1];
+    vendor = def->vendor;
     if (kvm_enabled()) {
         uint32_t  ebx = 0, ecx = 0, edx = 0;
         host_cpuid(0, 0, NULL, &ebx, &ecx, &edx);
@@ -1877,9 +2018,10 @@ X86CPU *cpu_x86_create(const char *cpu_model, DeviceState *icc_bridge,
                        Error **errp)
 {
     X86CPU *cpu = NULL;
+    X86CPUClass *xcc;
+    ObjectClass *oc;
     gchar **model_pieces;
     char *name, *features;
-    char *typename;
     Error *error = NULL;
 
     model_pieces = g_strsplit(cpu_model, ",", 2);
@@ -1890,7 +2032,20 @@ X86CPU *cpu_x86_create(const char *cpu_model, DeviceState *icc_bridge,
     name = model_pieces[0];
     features = model_pieces[1];
 
-    cpu = X86_CPU(object_new(TYPE_X86_CPU));
+    oc = x86_cpu_class_by_name(name);
+    if (oc == NULL) {
+        error_setg(&error, "Unable to find CPU definition: %s", name);
+        goto out;
+    }
+    xcc = X86_CPU_CLASS(oc);
+
+    if (xcc->kvm_required && !kvm_enabled()) {
+        error_setg(&error, "CPU model '%s' requires KVM", name);
+        goto out;
+    }
+
+    cpu = X86_CPU(object_new(object_class_get_name(oc)));
+
 #ifndef CONFIG_USER_ONLY
     if (icc_bridge == NULL) {
         error_setg(&error, "Invalid icc-bridge value");
@@ -1900,20 +2055,7 @@ X86CPU *cpu_x86_create(const char *cpu_model, DeviceState *icc_bridge,
     object_unref(OBJECT(cpu));
 #endif
 
-    cpu_x86_register(cpu, name, &error);
-    if (error) {
-        goto out;
-    }
-
-    /* Emulate per-model subclasses for global properties */
-    typename = g_strdup_printf("%s-" TYPE_X86_CPU, name);
-    qdev_prop_set_globals_for_type(DEVICE(cpu), typename, &error);
-    g_free(typename);
-    if (error) {
-        goto out;
-    }
-
-    cpu_x86_parse_featurestr(cpu, features, &error);
+    x86_cpu_parse_featurestr(CPU(cpu), features, &error);
     if (error) {
         goto out;
     }
@@ -1921,8 +2063,10 @@ X86CPU *cpu_x86_create(const char *cpu_model, DeviceState *icc_bridge,
 out:
     if (error != NULL) {
         error_propagate(errp, error);
-        object_unref(OBJECT(cpu));
-        cpu = NULL;
+        if (cpu) {
+            object_unref(OBJECT(cpu));
+            cpu = NULL;
+        }
     }
     g_strfreev(model_pieces);
     return cpu;
@@ -1952,6 +2096,28 @@ out:
     return cpu;
 }
 
+static void x86_cpu_cpudef_class_init(ObjectClass *oc, void *data)
+{
+    X86CPUDefinition *cpudef = data;
+    X86CPUClass *xcc = X86_CPU_CLASS(oc);
+
+    xcc->cpu_def = cpudef;
+}
+
+static void x86_register_cpudef_type(X86CPUDefinition *def)
+{
+    char *typename = x86_cpu_type_name(def->name);
+    TypeInfo ti = {
+        .name = typename,
+        .parent = TYPE_X86_CPU,
+        .class_init = x86_cpu_cpudef_class_init,
+        .class_data = def,
+    };
+
+    type_register(&ti);
+    g_free(typename);
+}
+
 #if !defined(CONFIG_USER_ONLY)
 
 void cpu_clear_apic_feature(CPUX86State *env)
@@ -1969,7 +2135,7 @@ void x86_cpudef_setup(void)
     static const char *model_with_versions[] = { "qemu32", "qemu64", "athlon" };
 
     for (i = 0; i < ARRAY_SIZE(builtin_x86_defs); ++i) {
-        x86_def_t *def = &builtin_x86_defs[i];
+        X86CPUDefinition *def = &builtin_x86_defs[i];
 
         /* Look for specific "cpudef" models that */
         /* have the QEMU version in .model_id */
@@ -2272,6 +2438,12 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
                (AMD_ENC_ASSOC(L3_ASSOCIATIVITY) << 12) | \
                (L3_LINES_PER_TAG << 8) | (L3_LINE_SIZE);
         break;
+    case 0x80000007:
+        *eax = 0;
+        *ebx = 0;
+        *ecx = 0;
+        *edx = env->features[FEAT_8000_0007_EDX];
+        break;
     case 0x80000008:
         /* virtual & phys address size in low 2 bytes. */
 /* XXX: This value must match the one used in the MMU code. */
@@ -2348,10 +2520,9 @@ static void x86_cpu_reset(CPUState *s)
 
     xcc->parent_reset(s);
 
+    memset(env, 0, offsetof(CPUX86State, cpuid_level));
 
-    memset(env, 0, offsetof(CPUX86State, breakpoints));
-
-    tlb_flush(env, 1);
+    tlb_flush(s, 1);
 
     env->old_exception = -1;
 
@@ -2412,11 +2583,10 @@ static void x86_cpu_reset(CPUState *s)
     memset(env->dr, 0, sizeof(env->dr));
     env->dr[6] = DR6_FIXED_1;
     env->dr[7] = DR7_FIXED_1;
-    cpu_breakpoint_remove_all(env, BP_CPU);
-    cpu_watchpoint_remove_all(env, BP_CPU);
+    cpu_breakpoint_remove_all(s, BP_CPU);
+    cpu_watchpoint_remove_all(s, BP_CPU);
 
-    env->tsc_adjust = 0;
-    env->tsc = 0;
+    env->xcr0 = 1;
 
 #if !defined(CONFIG_USER_ONLY)
     /* We hard-wire the BSP to the first CPU. */
@@ -2425,6 +2595,10 @@ static void x86_cpu_reset(CPUState *s)
     }
 
     s->halted = !cpu_is_bsp(cpu);
+
+    if (kvm_enabled()) {
+        kvm_arch_reset_vcpu(cpu);
+    }
 #endif
 }
 
@@ -2527,25 +2701,13 @@ static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
            & CPUID_EXT2_AMD_ALIASES);
     }
 
-    if (!kvm_enabled()) {
-        env->features[FEAT_1_EDX] &= TCG_FEATURES;
-        env->features[FEAT_1_ECX] &= TCG_EXT_FEATURES;
-        env->features[FEAT_8000_0001_EDX] &= (TCG_EXT2_FEATURES
-#ifdef TARGET_X86_64
-            | CPUID_EXT2_SYSCALL | CPUID_EXT2_LM
-#endif
-            );
-        env->features[FEAT_8000_0001_ECX] &= TCG_EXT3_FEATURES;
-        env->features[FEAT_SVM] &= TCG_SVM_FEATURES;
-    } else {
-        KVMState *s = kvm_state;
-        if ((cpu->check_cpuid || cpu->enforce_cpuid)
-            && kvm_check_features_against_host(s, cpu) && cpu->enforce_cpuid) {
-            error_setg(&local_err,
-                       "Host's CPU doesn't support requested features");
-            goto out;
-        }
-        filter_features_for_kvm(cpu);
+
+    if (x86_cpu_filter_features(cpu) && cpu->enforce_cpuid) {
+        error_setg(&local_err,
+                   kvm_enabled() ?
+                       "Host doesn't support requested features" :
+                       "TCG doesn't support requested features");
+        goto out;
     }
 
 #ifndef CONFIG_USER_ONLY
@@ -2613,6 +2775,7 @@ static void x86_cpu_initfn(Object *obj)
 {
     CPUState *cs = CPU(obj);
     X86CPU *cpu = X86_CPU(obj);
+    X86CPUClass *xcc = X86_CPU_GET_CLASS(obj);
     CPUX86State *env = &cpu->env;
     static int inited;
 
@@ -2656,6 +2819,8 @@ static void x86_cpu_initfn(Object *obj)
     cpu->hyperv_spinlock_attempts = HYPERV_SPINLOCK_NEVER_RETRY;
     env->cpuid_apic_id = x86_cpu_apic_id_from_index(cs->cpu_index);
 
+    x86_cpu_load_def(cpu, xcc->cpu_def, &error_abort);
+
     /* init various static tables used in TCG mode */
     if (tcg_enabled() && !inited) {
         inited = 1;
@@ -2695,6 +2860,20 @@ static void x86_cpu_synchronize_from_tb(CPUState *cs, TranslationBlock *tb)
     cpu->env.eip = tb->pc - tb->cs_base;
 }
 
+static bool x86_cpu_has_work(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+
+    return ((cs->interrupt_request & (CPU_INTERRUPT_HARD |
+                                      CPU_INTERRUPT_POLL)) &&
+            (env->eflags & IF_MASK)) ||
+           (cs->interrupt_request & (CPU_INTERRUPT_NMI |
+                                     CPU_INTERRUPT_INIT |
+                                     CPU_INTERRUPT_SIPI |
+                                     CPU_INTERRUPT_MCE));
+}
+
 static Property x86_cpu_properties[] = {
     DEFINE_PROP_BOOL("pmu", X86CPU, enable_pmu, false),
     { .name  = "hv-spinlocks", .info  = &qdev_prop_spinlocks },
@@ -2703,6 +2882,7 @@ static Property x86_cpu_properties[] = {
     DEFINE_PROP_BOOL("hv-time", X86CPU, hyperv_time, false),
     DEFINE_PROP_BOOL("check", X86CPU, check_cpuid, false),
     DEFINE_PROP_BOOL("enforce", X86CPU, enforce_cpuid, false),
+    DEFINE_PROP_BOOL("kvm", X86CPU, expose_kvm, true),
     DEFINE_PROP_END_OF_LIST()
 };
 
@@ -2721,6 +2901,9 @@ static void x86_cpu_common_class_init(ObjectClass *oc, void *data)
     cc->reset = x86_cpu_reset;
     cc->reset_dump_flags = CPU_DUMP_FPU | CPU_DUMP_CCOP;
 
+    cc->class_by_name = x86_cpu_class_by_name;
+    cc->parse_features = x86_cpu_parse_featurestr;
+    cc->has_work = x86_cpu_has_work;
     cc->do_interrupt = x86_cpu_do_interrupt;
     cc->dump_state = x86_cpu_dump_state;
     cc->set_pc = x86_cpu_set_pc;
@@ -2729,7 +2912,9 @@ static void x86_cpu_common_class_init(ObjectClass *oc, void *data)
     cc->gdb_write_register = x86_cpu_gdb_write_register;
     cc->get_arch_id = x86_cpu_get_arch_id;
     cc->get_paging_enabled = x86_cpu_get_paging_enabled;
-#ifndef CONFIG_USER_ONLY
+#ifdef CONFIG_USER_ONLY
+    cc->handle_mmu_fault = x86_cpu_handle_mmu_fault;
+#else
     cc->get_memory_mapping = x86_cpu_get_memory_mapping;
     cc->get_phys_page_debug = x86_cpu_get_phys_page_debug;
     cc->write_elf64_note = x86_cpu_write_elf64_note;
@@ -2746,14 +2931,22 @@ static const TypeInfo x86_cpu_type_info = {
     .parent = TYPE_CPU,
     .instance_size = sizeof(X86CPU),
     .instance_init = x86_cpu_initfn,
-    .abstract = false,
+    .abstract = true,
     .class_size = sizeof(X86CPUClass),
     .class_init = x86_cpu_common_class_init,
 };
 
 static void x86_cpu_register_types(void)
 {
+    int i;
+
     type_register_static(&x86_cpu_type_info);
+    for (i = 0; i < ARRAY_SIZE(builtin_x86_defs); i++) {
+        x86_register_cpudef_type(&builtin_x86_defs[i]);
+    }
+#ifdef CONFIG_KVM
+    type_register_static(&host_x86_cpu_type_info);
+#endif
 }
 
 type_init(x86_cpu_register_types)

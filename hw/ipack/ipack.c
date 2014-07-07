@@ -66,7 +66,7 @@ static void ipack_device_unrealize(DeviceState *dev, Error **errp)
         return;
     }
 
-    qemu_free_irqs(idev->irq);
+    qemu_free_irqs(idev->irq, 2);
 }
 
 static Property ipack_device_props[] = {
@@ -89,8 +89,7 @@ const VMStateDescription vmstate_ipack_device = {
     .name = "ipack_device",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_INT32(slot, IPackDevice),
         VMSTATE_END_OF_LIST()
     }

@@ -24,12 +24,14 @@
 #include "sysemu/kvm.h"
 #include "exec/address-spaces.h"
 #include "qapi/visitor.h"
+#include "qapi-event.h"
 
 #if defined(__linux__)
 #include <sys/mman.h>
 #endif
 
 #include "hw/virtio/virtio-bus.h"
+#include "hw/virtio/virtio-access.h"
 
 static void balloon_page(void *addr, int deflate)
 {
@@ -108,25 +110,37 @@ static void balloon_stats_poll_cb(void *opaque)
 static void balloon_stats_get_all(Object *obj, struct Visitor *v,
                                   void *opaque, const char *name, Error **errp)
 {
+    Error *err = NULL;
     VirtIOBalloon *s = opaque;
     int i;
 
-    if (!s->stats_last_update) {
-        error_setg(errp, "guest hasn't updated any stats yet");
-        return;
+    visit_start_struct(v, NULL, "guest-stats", name, 0, &err);
+    if (err) {
+        goto out;
+    }
+    visit_type_int(v, &s->stats_last_update, "last-update", &err);
+    if (err) {
+        goto out_end;
     }
 
-    visit_start_struct(v, NULL, "guest-stats", name, 0, errp);
-    visit_type_int(v, &s->stats_last_update, "last-update", errp);
-
-    visit_start_struct(v, NULL, NULL, "stats", 0, errp);
-    for (i = 0; i < VIRTIO_BALLOON_S_NR; i++) {
+    visit_start_struct(v, NULL, NULL, "stats", 0, &err);
+    if (err) {
+        goto out_end;
+    }
+    for (i = 0; !err && i < VIRTIO_BALLOON_S_NR; i++) {
         visit_type_int64(v, (int64_t *) &s->stats[i], balloon_stat_names[i],
-                         errp);
+                         &err);
     }
-    visit_end_struct(v, errp);
+    error_propagate(errp, err);
+    err = NULL;
+    visit_end_struct(v, &err);
 
-    visit_end_struct(v, errp);
+out_end:
+    error_propagate(errp, err);
+    err = NULL;
+    visit_end_struct(v, &err);
+out:
+    error_propagate(errp, err);
 }
 
 static void balloon_stats_get_poll_interval(Object *obj, struct Visitor *v,
@@ -142,10 +156,12 @@ static void balloon_stats_set_poll_interval(Object *obj, struct Visitor *v,
                                             Error **errp)
 {
     VirtIOBalloon *s = opaque;
+    Error *local_err = NULL;
     int64_t value;
 
-    visit_type_int(v, &value, name, errp);
-    if (error_is_set(errp)) {
+    visit_type_int(v, &value, name, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
         return;
     }
 
@@ -191,8 +207,9 @@ static void virtio_balloon_handle_output(VirtIODevice *vdev, VirtQueue *vq)
         while (iov_to_buf(elem.out_sg, elem.out_num, offset, &pfn, 4) == 4) {
             ram_addr_t pa;
             ram_addr_t addr;
+            int p = virtio_ldl_p(vdev, &pfn);
 
-            pa = (ram_addr_t)ldl_p(&pfn) << VIRTIO_BALLOON_PFN_SHIFT;
+            pa = (ram_addr_t) p << VIRTIO_BALLOON_PFN_SHIFT;
             offset += 4;
 
             /* FIXME: remove get_system_memory(), but how? */
@@ -233,8 +250,8 @@ static void virtio_balloon_receive_stats(VirtIODevice *vdev, VirtQueue *vq)
 
     while (iov_to_buf(elem->out_sg, elem->out_num, offset, &stat, sizeof(stat))
            == sizeof(stat)) {
-        uint16_t tag = tswap16(stat.tag);
-        uint64_t val = tswap64(stat.val);
+        uint16_t tag = virtio_tswap16(vdev, stat.tag);
+        uint64_t val = virtio_tswap64(vdev, stat.val);
 
         offset += sizeof(stat);
         if (tag < VIRTIO_BALLOON_S_NR)
@@ -275,8 +292,9 @@ static void virtio_balloon_set_config(VirtIODevice *vdev,
     memcpy(&config, config_data, sizeof(struct virtio_balloon_config));
     dev->actual = le32_to_cpu(config.actual);
     if (dev->actual != oldactual) {
-        qemu_balloon_changed(ram_size -
-                       ((ram_addr_t) dev->actual << VIRTIO_BALLOON_PFN_SHIFT));
+        qapi_event_send_balloon_change(ram_size -
+                        ((ram_addr_t) dev->actual << VIRTIO_BALLOON_PFN_SHIFT),
+                        &error_abort);
     }
 }
 
@@ -309,10 +327,12 @@ static void virtio_balloon_to_target(void *opaque, ram_addr_t target)
 
 static void virtio_balloon_save(QEMUFile *f, void *opaque)
 {
-    VirtIOBalloon *s = VIRTIO_BALLOON(opaque);
-    VirtIODevice *vdev = VIRTIO_DEVICE(s);
+    virtio_save(VIRTIO_DEVICE(opaque), f);
+}
 
-    virtio_save(vdev, f);
+static void virtio_balloon_save_device(VirtIODevice *vdev, QEMUFile *f)
+{
+    VirtIOBalloon *s = VIRTIO_BALLOON(vdev);
 
     qemu_put_be32(f, s->num_pages);
     qemu_put_be32(f, s->actual);
@@ -320,17 +340,16 @@ static void virtio_balloon_save(QEMUFile *f, void *opaque)
 
 static int virtio_balloon_load(QEMUFile *f, void *opaque, int version_id)
 {
-    VirtIOBalloon *s = VIRTIO_BALLOON(opaque);
-    VirtIODevice *vdev = VIRTIO_DEVICE(s);
-    int ret;
-
     if (version_id != 1)
         return -EINVAL;
 
-    ret = virtio_load(vdev, f);
-    if (ret) {
-        return ret;
-    }
+    return virtio_load(VIRTIO_DEVICE(opaque), f, version_id);
+}
+
+static int virtio_balloon_load_device(VirtIODevice *vdev, QEMUFile *f,
+                                      int version_id)
+{
+    VirtIOBalloon *s = VIRTIO_BALLOON(vdev);
 
     s->num_pages = qemu_get_be32(f);
     s->actual = qemu_get_be32(f);
@@ -358,6 +377,8 @@ static void virtio_balloon_device_realize(DeviceState *dev, Error **errp)
     s->ivq = virtio_add_queue(vdev, 128, virtio_balloon_handle_output);
     s->dvq = virtio_add_queue(vdev, 128, virtio_balloon_handle_output);
     s->svq = virtio_add_queue(vdev, 128, virtio_balloon_receive_stats);
+
+    reset_stats(s);
 
     register_savevm(dev, "virtio-balloon", -1, 1,
                     virtio_balloon_save, virtio_balloon_load, s);
@@ -398,6 +419,8 @@ static void virtio_balloon_class_init(ObjectClass *klass, void *data)
     vdc->get_config = virtio_balloon_get_config;
     vdc->set_config = virtio_balloon_set_config;
     vdc->get_features = virtio_balloon_get_features;
+    vdc->save = virtio_balloon_save_device;
+    vdc->load = virtio_balloon_load_device;
 }
 
 static const TypeInfo virtio_balloon_info = {

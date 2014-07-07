@@ -105,7 +105,7 @@ typedef struct BDRVRBDState {
 static int qemu_rbd_next_tok(char *dst, int dst_len,
                              char *src, char delim,
                              const char *name,
-                             char **p)
+                             char **p, Error **errp)
 {
     int l;
     char *end;
@@ -128,10 +128,10 @@ static int qemu_rbd_next_tok(char *dst, int dst_len,
     }
     l = strlen(src);
     if (l >= dst_len) {
-        error_report("%s too long", name);
+        error_setg(errp, "%s too long", name);
         return -EINVAL;
     } else if (l == 0) {
-        error_report("%s too short", name);
+        error_setg(errp, "%s too short", name);
         return -EINVAL;
     }
 
@@ -157,13 +157,15 @@ static int qemu_rbd_parsename(const char *filename,
                               char *pool, int pool_len,
                               char *snap, int snap_len,
                               char *name, int name_len,
-                              char *conf, int conf_len)
+                              char *conf, int conf_len,
+                              Error **errp)
 {
     const char *start;
     char *p, *buf;
     int ret;
 
     if (!strstart(filename, "rbd:", &start)) {
+        error_setg(errp, "File name must start with 'rbd:'");
         return -EINVAL;
     }
 
@@ -172,7 +174,8 @@ static int qemu_rbd_parsename(const char *filename,
     *snap = '\0';
     *conf = '\0';
 
-    ret = qemu_rbd_next_tok(pool, pool_len, p, '/', "pool name", &p);
+    ret = qemu_rbd_next_tok(pool, pool_len, p,
+                            '/', "pool name", &p, errp);
     if (ret < 0 || !p) {
         ret = -EINVAL;
         goto done;
@@ -180,21 +183,25 @@ static int qemu_rbd_parsename(const char *filename,
     qemu_rbd_unescape(pool);
 
     if (strchr(p, '@')) {
-        ret = qemu_rbd_next_tok(name, name_len, p, '@', "object name", &p);
+        ret = qemu_rbd_next_tok(name, name_len, p,
+                                '@', "object name", &p, errp);
         if (ret < 0) {
             goto done;
         }
-        ret = qemu_rbd_next_tok(snap, snap_len, p, ':', "snap name", &p);
+        ret = qemu_rbd_next_tok(snap, snap_len, p,
+                                ':', "snap name", &p, errp);
         qemu_rbd_unescape(snap);
     } else {
-        ret = qemu_rbd_next_tok(name, name_len, p, ':', "object name", &p);
+        ret = qemu_rbd_next_tok(name, name_len, p,
+                                ':', "object name", &p, errp);
     }
     qemu_rbd_unescape(name);
     if (ret < 0 || !p) {
         goto done;
     }
 
-    ret = qemu_rbd_next_tok(conf, conf_len, p, '\0', "configuration", &p);
+    ret = qemu_rbd_next_tok(conf, conf_len, p,
+                            '\0', "configuration", &p, errp);
 
 done:
     g_free(buf);
@@ -229,7 +236,7 @@ static char *qemu_rbd_parse_clientname(const char *conf, char *clientname)
     return NULL;
 }
 
-static int qemu_rbd_set_conf(rados_t cluster, const char *conf)
+static int qemu_rbd_set_conf(rados_t cluster, const char *conf, Error **errp)
 {
     char *p, *buf;
     char name[RBD_MAX_CONF_NAME_SIZE];
@@ -241,20 +248,20 @@ static int qemu_rbd_set_conf(rados_t cluster, const char *conf)
 
     while (p) {
         ret = qemu_rbd_next_tok(name, sizeof(name), p,
-                                '=', "conf option name", &p);
+                                '=', "conf option name", &p, errp);
         if (ret < 0) {
             break;
         }
         qemu_rbd_unescape(name);
 
         if (!p) {
-            error_report("conf option %s has no value", name);
+            error_setg(errp, "conf option %s has no value", name);
             ret = -EINVAL;
             break;
         }
 
         ret = qemu_rbd_next_tok(value, sizeof(value), p,
-                                ':', "conf option value", &p);
+                                ':', "conf option value", &p, errp);
         if (ret < 0) {
             break;
         }
@@ -263,7 +270,7 @@ static int qemu_rbd_set_conf(rados_t cluster, const char *conf)
         if (strcmp(name, "conf") == 0) {
             ret = rados_conf_read_file(cluster, value);
             if (ret < 0) {
-                error_report("error reading conf file %s", value);
+                error_setg(errp, "error reading conf file %s", value);
                 break;
             }
         } else if (strcmp(name, "id") == 0) {
@@ -271,7 +278,7 @@ static int qemu_rbd_set_conf(rados_t cluster, const char *conf)
         } else {
             ret = rados_conf_set(cluster, name, value);
             if (ret < 0) {
-                error_report("invalid conf option %s", name);
+                error_setg(errp, "invalid conf option %s", name);
                 ret = -EINVAL;
                 break;
             }
@@ -282,9 +289,9 @@ static int qemu_rbd_set_conf(rados_t cluster, const char *conf)
     return ret;
 }
 
-static int qemu_rbd_create(const char *filename, QEMUOptionParameter *options,
-                           Error **errp)
+static int qemu_rbd_create(const char *filename, QemuOpts *opts, Error **errp)
 {
+    Error *local_err = NULL;
     int64_t bytes = 0;
     int64_t objsize;
     int obj_order = 0;
@@ -301,34 +308,29 @@ static int qemu_rbd_create(const char *filename, QEMUOptionParameter *options,
     if (qemu_rbd_parsename(filename, pool, sizeof(pool),
                            snap_buf, sizeof(snap_buf),
                            name, sizeof(name),
-                           conf, sizeof(conf)) < 0) {
+                           conf, sizeof(conf), &local_err) < 0) {
+        error_propagate(errp, local_err);
         return -EINVAL;
     }
 
     /* Read out options */
-    while (options && options->name) {
-        if (!strcmp(options->name, BLOCK_OPT_SIZE)) {
-            bytes = options->value.n;
-        } else if (!strcmp(options->name, BLOCK_OPT_CLUSTER_SIZE)) {
-            if (options->value.n) {
-                objsize = options->value.n;
-                if ((objsize - 1) & objsize) {    /* not a power of 2? */
-                    error_report("obj size needs to be power of 2");
-                    return -EINVAL;
-                }
-                if (objsize < 4096) {
-                    error_report("obj size too small");
-                    return -EINVAL;
-                }
-                obj_order = ffs(objsize) - 1;
-            }
+    bytes = qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0);
+    objsize = qemu_opt_get_size_del(opts, BLOCK_OPT_CLUSTER_SIZE, 0);
+    if (objsize) {
+        if ((objsize - 1) & objsize) {    /* not a power of 2? */
+            error_setg(errp, "obj size needs to be power of 2");
+            return -EINVAL;
         }
-        options++;
+        if (objsize < 4096) {
+            error_setg(errp, "obj size too small");
+            return -EINVAL;
+        }
+        obj_order = ffs(objsize) - 1;
     }
 
     clientname = qemu_rbd_parse_clientname(conf, clientname_buf);
     if (rados_create(&cluster, clientname) < 0) {
-        error_report("error initializing");
+        error_setg(errp, "error initializing");
         return -EIO;
     }
 
@@ -338,20 +340,20 @@ static int qemu_rbd_create(const char *filename, QEMUOptionParameter *options,
     }
 
     if (conf[0] != '\0' &&
-        qemu_rbd_set_conf(cluster, conf) < 0) {
-        error_report("error setting config options");
+        qemu_rbd_set_conf(cluster, conf, &local_err) < 0) {
         rados_shutdown(cluster);
+        error_propagate(errp, local_err);
         return -EIO;
     }
 
     if (rados_connect(cluster) < 0) {
-        error_report("error connecting");
+        error_setg(errp, "error connecting");
         rados_shutdown(cluster);
         return -EIO;
     }
 
     if (rados_ioctx_create(cluster, pool, &io_ctx) < 0) {
-        error_report("error opening pool %s", pool);
+        error_setg(errp, "error opening pool %s", pool);
         rados_shutdown(cluster);
         return -EIO;
     }
@@ -441,8 +443,7 @@ static int qemu_rbd_open(BlockDriverState *bs, QDict *options, int flags,
     opts = qemu_opts_create(&runtime_opts, NULL, 0, &error_abort);
     qemu_opts_absorb_qdict(opts, options, &local_err);
     if (local_err) {
-        qerror_report_err(local_err);
-        error_free(local_err);
+        error_propagate(errp, local_err);
         qemu_opts_del(opts);
         return -EINVAL;
     }
@@ -452,7 +453,7 @@ static int qemu_rbd_open(BlockDriverState *bs, QDict *options, int flags,
     if (qemu_rbd_parsename(filename, pool, sizeof(pool),
                            snap_buf, sizeof(snap_buf),
                            s->name, sizeof(s->name),
-                           conf, sizeof(conf)) < 0) {
+                           conf, sizeof(conf), errp) < 0) {
         r = -EINVAL;
         goto failed_opts;
     }
@@ -460,7 +461,7 @@ static int qemu_rbd_open(BlockDriverState *bs, QDict *options, int flags,
     clientname = qemu_rbd_parse_clientname(conf, clientname_buf);
     r = rados_create(&s->cluster, clientname);
     if (r < 0) {
-        error_report("error initializing");
+        error_setg(&local_err, "error initializing");
         goto failed_opts;
     }
 
@@ -488,28 +489,27 @@ static int qemu_rbd_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     if (conf[0] != '\0') {
-        r = qemu_rbd_set_conf(s->cluster, conf);
+        r = qemu_rbd_set_conf(s->cluster, conf, errp);
         if (r < 0) {
-            error_report("error setting config options");
             goto failed_shutdown;
         }
     }
 
     r = rados_connect(s->cluster);
     if (r < 0) {
-        error_report("error connecting");
+        error_setg(&local_err, "error connecting");
         goto failed_shutdown;
     }
 
     r = rados_ioctx_create(s->cluster, pool, &s->io_ctx);
     if (r < 0) {
-        error_report("error opening pool %s", pool);
+        error_setg(&local_err, "error opening pool %s", pool);
         goto failed_shutdown;
     }
 
     r = rbd_open(s->io_ctx, s->name, &s->image, s->snap);
     if (r < 0) {
-        error_report("error reading header from %s", s->name);
+        error_setg(&local_err, "error reading header from %s", s->name);
         goto failed_open;
     }
 
@@ -548,7 +548,7 @@ static void qemu_rbd_aio_cancel(BlockDriverAIOCB *blockacb)
     acb->cancelled = 1;
 
     while (acb->status == -EINPROGRESS) {
-        qemu_aio_wait();
+        aio_poll(bdrv_get_aio_context(acb->common.bs), true);
     }
 
     qemu_aio_release(acb);
@@ -581,7 +581,8 @@ static void rbd_finish_aiocb(rbd_completion_t c, RADOSCB *rcb)
     rcb->ret = rbd_aio_get_return_value(c);
     rbd_aio_release(c);
 
-    acb->bh = qemu_bh_new(rbd_finish_bh, rcb);
+    acb->bh = aio_bh_new(bdrv_get_aio_context(acb->common.bs),
+                         rbd_finish_bh, rcb);
     qemu_bh_schedule(acb->bh);
 }
 
@@ -677,13 +678,16 @@ static BlockDriverAIOCB *rbd_start_aio(BlockDriverState *bs,
     }
 
     if (r < 0) {
-        goto failed;
+        goto failed_completion;
     }
 
     return &acb->common;
 
+failed_completion:
+    rbd_aio_release(c);
 failed:
     g_free(rcb);
+    qemu_vfree(acb->bounce);
     qemu_aio_release(acb);
     return NULL;
 }
@@ -900,18 +904,22 @@ static BlockDriverAIOCB* qemu_rbd_aio_discard(BlockDriverState *bs,
 }
 #endif
 
-static QEMUOptionParameter qemu_rbd_create_options[] = {
-    {
-     .name = BLOCK_OPT_SIZE,
-     .type = OPT_SIZE,
-     .help = "Virtual disk size"
-    },
-    {
-     .name = BLOCK_OPT_CLUSTER_SIZE,
-     .type = OPT_SIZE,
-     .help = "RBD object size"
-    },
-    {NULL}
+static QemuOptsList qemu_rbd_create_opts = {
+    .name = "rbd-create-opts",
+    .head = QTAILQ_HEAD_INITIALIZER(qemu_rbd_create_opts.head),
+    .desc = {
+        {
+            .name = BLOCK_OPT_SIZE,
+            .type = QEMU_OPT_SIZE,
+            .help = "Virtual disk size"
+        },
+        {
+            .name = BLOCK_OPT_CLUSTER_SIZE,
+            .type = QEMU_OPT_SIZE,
+            .help = "RBD object size"
+        },
+        { /* end of list */ }
+    }
 };
 
 static BlockDriver bdrv_rbd = {
@@ -923,7 +931,7 @@ static BlockDriver bdrv_rbd = {
     .bdrv_create        = qemu_rbd_create,
     .bdrv_has_zero_init = bdrv_has_zero_init_1,
     .bdrv_get_info      = qemu_rbd_getinfo,
-    .create_options     = qemu_rbd_create_options,
+    .create_opts        = &qemu_rbd_create_opts,
     .bdrv_getlength     = qemu_rbd_getlength,
     .bdrv_truncate      = qemu_rbd_truncate,
     .protocol_name      = "rbd",

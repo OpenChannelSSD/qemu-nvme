@@ -25,8 +25,8 @@
 #ifndef TCG_TARGET_ARM 
 #define TCG_TARGET_ARM 1
 
-#undef TCG_TARGET_WORDS_BIGENDIAN
 #undef TCG_TARGET_STACK_GROWSUP
+#define TCG_TARGET_INSN_UNIT_SIZE 4
 
 typedef enum {
     TCG_REG_R0 = 0,
@@ -79,13 +79,12 @@ extern bool use_idiv_instructions;
 #define TCG_TARGET_HAS_nor_i32          0
 #define TCG_TARGET_HAS_deposit_i32      1
 #define TCG_TARGET_HAS_movcond_i32      1
+#define TCG_TARGET_HAS_mulu2_i32        1
 #define TCG_TARGET_HAS_muls2_i32        1
 #define TCG_TARGET_HAS_muluh_i32        0
 #define TCG_TARGET_HAS_mulsh_i32        0
 #define TCG_TARGET_HAS_div_i32          use_idiv_instructions
 #define TCG_TARGET_HAS_rem_i32          0
-
-#define TCG_TARGET_HAS_new_ldst         1
 
 extern bool tcg_target_deposit_valid(int ofs, int len);
 #define TCG_TARGET_deposit_i32_valid  tcg_target_deposit_valid

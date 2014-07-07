@@ -100,6 +100,8 @@ enum VMStateFlags {
     VMS_MULTIPLY         = 0x200,  /* multiply "size" field by field_size */
     VMS_VARRAY_UINT8     = 0x400,  /* Array with size in uint8_t field*/
     VMS_VARRAY_UINT32    = 0x800,  /* Array with size in uint32_t field*/
+    VMS_MUST_EXIST       = 0x1000, /* Field must exist in input */
+    VMS_ALLOC            = 0x2000, /* Alloc a buffer on the destination */
 };
 
 typedef struct {
@@ -201,6 +203,14 @@ extern const VMStateInfo vmstate_info_bitmap;
     .info         = &(_info),                                        \
     .flags        = VMS_SINGLE,                                      \
     .offset       = vmstate_offset_value(_state, _field, _type),     \
+}
+
+/* Validate state using a boolean predicate. */
+#define VMSTATE_VALIDATE(_name, _test) { \
+    .name         = (_name),                                         \
+    .field_exists = (_test),                                         \
+    .flags        = VMS_ARRAY | VMS_MUST_EXIST,                      \
+    .num          = 0, /* 0 elements: no data, only run _test */     \
 }
 
 #define VMSTATE_POINTER(_field, _state, _version, _info, _type) {    \
@@ -420,6 +430,16 @@ extern const VMStateInfo vmstate_info_bitmap;
     .offset     = offsetof(_state, _field),                          \
 }
 
+#define VMSTATE_STRUCT_VARRAY_ALLOC(_field, _state, _field_num, _version, _vmsd, _type) {\
+    .name       = (stringify(_field)),                               \
+    .version_id = (_version),                                        \
+    .vmsd       = &(_vmsd),                                          \
+    .num_offset = vmstate_offset_value(_state, _field_num, int32_t), \
+    .size       = sizeof(_type),                                     \
+    .flags      = VMS_STRUCT|VMS_VARRAY_INT32|VMS_ALLOC|VMS_POINTER, \
+    .offset     = vmstate_offset_pointer(_state, _field, _type),     \
+}
+
 #define VMSTATE_STATIC_BUFFER(_field, _state, _version, _test, _start, _size) { \
     .name         = (stringify(_field)),                             \
     .version_id   = (_version),                                      \
@@ -592,7 +612,7 @@ extern const VMStateInfo vmstate_info_bitmap;
 #define VMSTATE_UINT64_EQUAL(_f, _s)                                  \
     VMSTATE_UINT64_EQUAL_V(_f, _s, 0)
 
-#define VMSTATE_INT32_LE(_f, _s)                                   \
+#define VMSTATE_INT32_POSITIVE_LE(_f, _s)                             \
     VMSTATE_SINGLE(_f, _s, 0, vmstate_info_int32_le, int32_t)
 
 #define VMSTATE_UINT8_TEST(_f, _s, _t)                               \
@@ -649,6 +669,9 @@ extern const VMStateInfo vmstate_info_bitmap;
 
 #define VMSTATE_UINT8_ARRAY(_f, _s, _n)                               \
     VMSTATE_UINT8_ARRAY_V(_f, _s, _n, 0)
+
+#define VMSTATE_UINT8_SUB_ARRAY(_f, _s, _start, _num)                \
+    VMSTATE_SUB_ARRAY(_f, _s, _start, _num, 0, vmstate_info_uint8, uint8_t)
 
 #define VMSTATE_UINT8_2DARRAY(_f, _s, _n1, _n2)                       \
     VMSTATE_UINT8_2DARRAY_V(_f, _s, _n1, _n2, 0)
@@ -740,6 +763,8 @@ extern const VMStateInfo vmstate_info_bitmap;
 #define VMSTATE_END_OF_LIST()                                         \
     {}
 
+#define SELF_ANNOUNCE_ROUNDS 5
+
 int vmstate_load_state(QEMUFile *f, const VMStateDescription *vmsd,
                        void *opaque, int version_id);
 void vmstate_save_state(QEMUFile *f, const VMStateDescription *vmsd,
@@ -765,5 +790,15 @@ struct MemoryRegion;
 void vmstate_register_ram(struct MemoryRegion *memory, DeviceState *dev);
 void vmstate_unregister_ram(struct MemoryRegion *memory, DeviceState *dev);
 void vmstate_register_ram_global(struct MemoryRegion *memory);
+
+static inline
+int64_t self_announce_delay(int round)
+{
+    assert(round < SELF_ANNOUNCE_ROUNDS && round > 0);
+    /* delay 50ms, 150ms, 250ms, ... */
+    return 50 + (SELF_ANNOUNCE_ROUNDS - round - 1) * 100;
+}
+
+void dump_vmstate_json_to_file(FILE *out_fp);
 
 #endif

@@ -26,10 +26,10 @@
 #include "qemu/log.h"
 #include "config.h"
 #include "qemu/bitops.h"
+#include "exec/cpu_ldst.h"
 
-#include "helper.h"
-#define GEN_HELPER 1
-#include "helper.h"
+#include "exec/helper-proto.h"
+#include "exec/helper-gen.h"
 
 #define OPENRISC_DISAS
 
@@ -531,14 +531,14 @@ static void dec_calc(DisasContext *dc, uint32_t insn)
                 TCGv_i64 high = tcg_temp_new_i64();
                 TCGv_i32 sr_ove = tcg_temp_local_new_i32();
                 int lab = gen_new_label();
-                /* Calculate the each result.  */
+                /* Calculate each result. */
                 tcg_gen_extu_i32_i64(tra, cpu_R[ra]);
                 tcg_gen_extu_i32_i64(trb, cpu_R[rb]);
                 tcg_gen_mul_i64(result, tra, trb);
                 tcg_temp_free_i64(tra);
                 tcg_temp_free_i64(trb);
                 tcg_gen_shri_i64(high, result, TARGET_LONG_BITS);
-                /* Overflow or not.  */
+                /* Overflow or not. */
                 tcg_gen_brcondi_i64(TCG_COND_EQ, high, 0x00000000, lab);
                 tcg_gen_ori_tl(cpu_sr, cpu_sr, (SR_OV | SR_CY));
                 tcg_gen_andi_tl(sr_ove, cpu_sr, SR_OVE);
@@ -1619,10 +1619,11 @@ static void disas_openrisc_insn(DisasContext *dc, OpenRISCCPU *cpu)
 
 static void check_breakpoint(OpenRISCCPU *cpu, DisasContext *dc)
 {
+    CPUState *cs = CPU(cpu);
     CPUBreakpoint *bp;
 
-    if (unlikely(!QTAILQ_EMPTY(&cpu->env.breakpoints))) {
-        QTAILQ_FOREACH(bp, &cpu->env.breakpoints, entry) {
+    if (unlikely(!QTAILQ_EMPTY(&cs->breakpoints))) {
+        QTAILQ_FOREACH(bp, &cs->breakpoints, entry) {
             if (bp->pc == dc->pc) {
                 tcg_gen_movi_tl(cpu_pc, dc->pc);
                 gen_exception(dc, EXCP_DEBUG);

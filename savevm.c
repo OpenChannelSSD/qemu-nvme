@@ -24,6 +24,7 @@
 
 #include "config-host.h"
 #include "qemu-common.h"
+#include "hw/boards.h"
 #include "hw/hw.h"
 #include "hw/qdev.h"
 #include "net/net.h"
@@ -42,7 +43,6 @@
 #include "block/snapshot.h"
 #include "block/qapi.h"
 
-#define SELF_ANNOUNCE_ROUNDS 5
 
 #ifndef ETH_P_RARP
 #define ETH_P_RARP 0x8035
@@ -81,6 +81,7 @@ static void qemu_announce_self_iter(NICState *nic, void *opaque)
     uint8_t buf[60];
     int len;
 
+    trace_qemu_announce_self_iter(qemu_ether_ntoa(&nic->conf->macaddr));
     len = announce_self_create(buf, nic->conf->macaddr.a);
 
     qemu_send_packet_raw(qemu_get_queue(nic), buf, len);
@@ -97,7 +98,7 @@ static void qemu_announce_self_once(void *opaque)
     if (--count) {
         /* delay 50ms, 150ms, 250ms, ... */
         timer_mod(timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
-                       50 + (SELF_ANNOUNCE_ROUNDS - count - 1) * 100);
+                  self_announce_delay(count));
     } else {
             timer_del(timer);
             timer_free(timer);
@@ -231,7 +232,6 @@ typedef struct SaveStateEntry {
     const VMStateDescription *vmsd;
     void *opaque;
     CompatEntry *compat;
-    int no_migrate;
     int is_ram;
 } SaveStateEntry;
 
@@ -239,6 +239,144 @@ typedef struct SaveStateEntry {
 static QTAILQ_HEAD(savevm_handlers, SaveStateEntry) savevm_handlers =
     QTAILQ_HEAD_INITIALIZER(savevm_handlers);
 static int global_section_id;
+
+static void dump_vmstate_vmsd(FILE *out_file,
+                              const VMStateDescription *vmsd, int indent,
+                              bool is_subsection);
+
+static void dump_vmstate_vmsf(FILE *out_file, const VMStateField *field,
+                              int indent)
+{
+    fprintf(out_file, "%*s{\n", indent, "");
+    indent += 2;
+    fprintf(out_file, "%*s\"field\": \"%s\",\n", indent, "", field->name);
+    fprintf(out_file, "%*s\"version_id\": %d,\n", indent, "",
+            field->version_id);
+    fprintf(out_file, "%*s\"field_exists\": %s,\n", indent, "",
+            field->field_exists ? "true" : "false");
+    fprintf(out_file, "%*s\"size\": %zu", indent, "", field->size);
+    if (field->vmsd != NULL) {
+        fprintf(out_file, ",\n");
+        dump_vmstate_vmsd(out_file, field->vmsd, indent, false);
+    }
+    fprintf(out_file, "\n%*s}", indent - 2, "");
+}
+
+static void dump_vmstate_vmss(FILE *out_file,
+                              const VMStateSubsection *subsection,
+                              int indent)
+{
+    if (subsection->vmsd != NULL) {
+        dump_vmstate_vmsd(out_file, subsection->vmsd, indent, true);
+    }
+}
+
+static void dump_vmstate_vmsd(FILE *out_file,
+                              const VMStateDescription *vmsd, int indent,
+                              bool is_subsection)
+{
+    if (is_subsection) {
+        fprintf(out_file, "%*s{\n", indent, "");
+    } else {
+        fprintf(out_file, "%*s\"%s\": {\n", indent, "", "Description");
+    }
+    indent += 2;
+    fprintf(out_file, "%*s\"name\": \"%s\",\n", indent, "", vmsd->name);
+    fprintf(out_file, "%*s\"version_id\": %d,\n", indent, "",
+            vmsd->version_id);
+    fprintf(out_file, "%*s\"minimum_version_id\": %d", indent, "",
+            vmsd->minimum_version_id);
+    if (vmsd->fields != NULL) {
+        const VMStateField *field = vmsd->fields;
+        bool first;
+
+        fprintf(out_file, ",\n%*s\"Fields\": [\n", indent, "");
+        first = true;
+        while (field->name != NULL) {
+            if (field->flags & VMS_MUST_EXIST) {
+                /* Ignore VMSTATE_VALIDATE bits; these don't get migrated */
+                field++;
+                continue;
+            }
+            if (!first) {
+                fprintf(out_file, ",\n");
+            }
+            dump_vmstate_vmsf(out_file, field, indent + 2);
+            field++;
+            first = false;
+        }
+        fprintf(out_file, "\n%*s]", indent, "");
+    }
+    if (vmsd->subsections != NULL) {
+        const VMStateSubsection *subsection = vmsd->subsections;
+        bool first;
+
+        fprintf(out_file, ",\n%*s\"Subsections\": [\n", indent, "");
+        first = true;
+        while (subsection->vmsd != NULL) {
+            if (!first) {
+                fprintf(out_file, ",\n");
+            }
+            dump_vmstate_vmss(out_file, subsection, indent + 2);
+            subsection++;
+            first = false;
+        }
+        fprintf(out_file, "\n%*s]", indent, "");
+    }
+    fprintf(out_file, "\n%*s}", indent - 2, "");
+}
+
+static void dump_machine_type(FILE *out_file)
+{
+    MachineClass *mc;
+
+    mc = MACHINE_GET_CLASS(current_machine);
+
+    fprintf(out_file, "  \"vmschkmachine\": {\n");
+    fprintf(out_file, "    \"Name\": \"%s\"\n", mc->name);
+    fprintf(out_file, "  },\n");
+}
+
+void dump_vmstate_json_to_file(FILE *out_file)
+{
+    GSList *list, *elt;
+    bool first;
+
+    fprintf(out_file, "{\n");
+    dump_machine_type(out_file);
+
+    first = true;
+    list = object_class_get_list(TYPE_DEVICE, true);
+    for (elt = list; elt; elt = elt->next) {
+        DeviceClass *dc = OBJECT_CLASS_CHECK(DeviceClass, elt->data,
+                                             TYPE_DEVICE);
+        const char *name;
+        int indent = 2;
+
+        if (!dc->vmsd) {
+            continue;
+        }
+
+        if (!first) {
+            fprintf(out_file, ",\n");
+        }
+        name = object_class_get_name(OBJECT_CLASS(dc));
+        fprintf(out_file, "%*s\"%s\": {\n", indent, "", name);
+        indent += 2;
+        fprintf(out_file, "%*s\"Name\": \"%s\",\n", indent, "", name);
+        fprintf(out_file, "%*s\"version_id\": %d,\n", indent, "",
+                dc->vmsd->version_id);
+        fprintf(out_file, "%*s\"minimum_version_id\": %d,\n", indent, "",
+                dc->vmsd->minimum_version_id);
+
+        dump_vmstate_vmsd(out_file, dc->vmsd, indent, false);
+
+        fprintf(out_file, "\n%*s}", indent - 2, "");
+        first = false;
+    }
+    fprintf(out_file, "\n}\n");
+    fclose(out_file);
+}
 
 static int calculate_new_instance_id(const char *idstr)
 {
@@ -291,7 +429,6 @@ int register_savevm_live(DeviceState *dev,
     se->ops = ops;
     se->opaque = opaque;
     se->vmsd = NULL;
-    se->no_migrate = 0;
     /* if this is a live_savem then set is_ram */
     if (ops->save_live_setup != NULL) {
         se->is_ram = 1;
@@ -382,7 +519,6 @@ int vmstate_register_with_alias_id(DeviceState *dev, int instance_id,
     se->opaque = opaque;
     se->vmsd = vmsd;
     se->alias_id = alias_id;
-    se->no_migrate = vmsd->unmigratable;
 
     if (dev) {
         char *id = qdev_get_dev_path(dev);
@@ -429,6 +565,7 @@ void vmstate_unregister(DeviceState *dev, const VMStateDescription *vmsd,
 
 static int vmstate_load(QEMUFile *f, SaveStateEntry *se, int version_id)
 {
+    trace_vmstate_load(se->idstr, se->vmsd ? se->vmsd->name : "(old)");
     if (!se->vmsd) {         /* Old style */
         return se->ops->load_state(f, se->opaque, version_id);
     }
@@ -437,6 +574,7 @@ static int vmstate_load(QEMUFile *f, SaveStateEntry *se, int version_id)
 
 static void vmstate_save(QEMUFile *f, SaveStateEntry *se)
 {
+    trace_vmstate_save(se->idstr, se->vmsd ? se->vmsd->name : "(old)");
     if (!se->vmsd) {         /* Old style */
         se->ops->save_state(f, se->opaque);
         return;
@@ -449,8 +587,9 @@ bool qemu_savevm_state_blocked(Error **errp)
     SaveStateEntry *se;
 
     QTAILQ_FOREACH(se, &savevm_handlers, entry) {
-        if (se->no_migrate) {
-            error_set(errp, QERR_MIGRATION_NOT_SUPPORTED, se->idstr);
+        if (se->vmsd && se->vmsd->unmigratable) {
+            error_setg(errp, "State blocked by non-migratable device '%s'",
+                       se->idstr);
             return true;
         }
     }
@@ -463,6 +602,7 @@ void qemu_savevm_state_begin(QEMUFile *f,
     SaveStateEntry *se;
     int ret;
 
+    trace_savevm_state_begin();
     QTAILQ_FOREACH(se, &savevm_handlers, entry) {
         if (!se->ops || !se->ops->set_params) {
             continue;
@@ -515,6 +655,7 @@ int qemu_savevm_state_iterate(QEMUFile *f)
     SaveStateEntry *se;
     int ret = 1;
 
+    trace_savevm_state_iterate();
     QTAILQ_FOREACH(se, &savevm_handlers, entry) {
         if (!se->ops || !se->ops->save_live_iterate) {
             continue;
@@ -553,6 +694,8 @@ void qemu_savevm_state_complete(QEMUFile *f)
 {
     SaveStateEntry *se;
     int ret;
+
+    trace_savevm_state_complete();
 
     cpu_synchronize_all_states();
 
@@ -628,6 +771,7 @@ void qemu_savevm_state_cancel(void)
 {
     SaveStateEntry *se;
 
+    trace_savevm_state_cancel();
     QTAILQ_FOREACH(se, &savevm_handlers, entry) {
         if (se->ops && se->ops->cancel) {
             se->ops->cancel(se->opaque);
@@ -1200,7 +1344,7 @@ void vmstate_register_ram(MemoryRegion *mr, DeviceState *dev)
 
 void vmstate_unregister_ram(MemoryRegion *mr, DeviceState *dev)
 {
-    /* Nothing do to while the implementation is in RAMBlock */
+    qemu_ram_unset_idstr(memory_region_get_ram_addr(mr) & TARGET_PAGE_MASK);
 }
 
 void vmstate_register_ram_global(MemoryRegion *mr)

@@ -177,6 +177,7 @@ void qdev_prop_set_ptr(DeviceState *dev, const char *name, void *value);
 
 void qdev_prop_register_global(GlobalProperty *prop);
 void qdev_prop_register_global_list(GlobalProperty *props);
+int qdev_prop_check_global(void);
 void qdev_prop_set_globals(DeviceState *dev, Error **errp);
 void qdev_prop_set_globals_for_type(DeviceState *dev, const char *typename,
                                     Error **errp);
@@ -188,6 +189,8 @@ void error_set_from_qdev_prop_error(Error **errp, int ret, DeviceState *dev,
  * field in a struct.
  */
 void qdev_property_add_static(DeviceState *dev, Property *prop, Error **errp);
+
+void qdev_alias_all_properties(DeviceState *target, Object *source);
 
 /**
  * @qdev_prop_set_after_realize:
@@ -201,4 +204,15 @@ void qdev_property_add_static(DeviceState *dev, Property *prop, Error **errp);
  */
 void qdev_prop_set_after_realize(DeviceState *dev, const char *name,
                                  Error **errp);
+
+/**
+ * qdev_prop_allow_set_link_before_realize:
+ *
+ * Set the #Error object if an attempt is made to set the link after realize.
+ * This function should be used as the check() argument to
+ * object_property_add_link().
+ */
+void qdev_prop_allow_set_link_before_realize(Object *obj, const char *name,
+                                             Object *val, Error **errp);
+
 #endif

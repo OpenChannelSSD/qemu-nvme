@@ -377,8 +377,7 @@ static const VMStateDescription vmstate_fw_cfg = {
     .name = "fw_cfg",
     .version_id = 2,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT16(cur_entry, FWCfgState),
         VMSTATE_UINT16_HACK(cur_offset, FWCfgState, is_version_1),
         VMSTATE_UINT32_V(cur_offset, FWCfgState, 2),
@@ -504,7 +503,7 @@ static void fw_cfg_machine_ready(struct Notifier *n, void *data)
 {
     size_t len;
     FWCfgState *s = container_of(n, FWCfgState, machine_ready);
-    char *bootindex = get_boot_devices_list(&len);
+    char *bootindex = get_boot_devices_list(&len, false);
 
     fw_cfg_add_file(s, "bootorder", (uint8_t*)bootindex, len);
 }

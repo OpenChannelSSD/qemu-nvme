@@ -566,13 +566,15 @@ CharDriverState *chr_baum_init(void)
     BaumDriverState *baum;
     CharDriverState *chr;
     brlapi_handle_t *handle;
-#if defined(CONFIG_SDL) && SDL_COMPILEDVERSION < SDL_VERSIONNUM(2, 0, 0)
+#if defined(CONFIG_SDL)
+#if SDL_COMPILEDVERSION < SDL_VERSIONNUM(2, 0, 0)
     SDL_SysWMinfo info;
+#endif
 #endif
     int tty;
 
     baum = g_malloc0(sizeof(BaumDriverState));
-    baum->chr = chr = g_malloc0(sizeof(CharDriverState));
+    baum->chr = chr = qemu_chr_alloc();
 
     chr->opaque = baum;
     chr->chr_write = baum_write;
@@ -595,12 +597,14 @@ CharDriverState *chr_baum_init(void)
         goto fail;
     }
 
-#if defined(CONFIG_SDL) && SDL_COMPILEDVERSION < SDL_VERSIONNUM(2, 0, 0)
+#if defined(CONFIG_SDL)
+#if SDL_COMPILEDVERSION < SDL_VERSIONNUM(2, 0, 0)
     memset(&info, 0, sizeof(info));
     SDL_VERSION(&info.version);
     if (SDL_GetWMInfo(&info))
         tty = info.info.x11.wmwindow;
     else
+#endif
 #endif
         tty = BRLAPI_TTY_DEFAULT;
 

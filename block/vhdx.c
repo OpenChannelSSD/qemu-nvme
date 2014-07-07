@@ -473,7 +473,14 @@ static void vhdx_parse_header(BlockDriverState *bs, BDRVVHDXState *s,
         } else if (h2_seq > h1_seq) {
             s->curr_header = 1;
         } else {
-            goto fail;
+            /* The Microsoft Disk2VHD tool will create 2 identical
+             * headers, with identical sequence numbers.  If the headers are
+             * identical, don't consider the file corrupt */
+            if (!memcmp(header1, header2, sizeof(VHDXHeader))) {
+                s->curr_header = 0;
+            } else {
+                goto fail;
+            }
         }
     }
 
@@ -780,12 +787,20 @@ static int vhdx_parse_metadata(BlockDriverState *bs, BDRVVHDXState *s)
     le32_to_cpus(&s->logical_sector_size);
     le32_to_cpus(&s->physical_sector_size);
 
-    if (s->logical_sector_size == 0 || s->params.block_size == 0) {
+    if (s->params.block_size < VHDX_BLOCK_SIZE_MIN ||
+        s->params.block_size > VHDX_BLOCK_SIZE_MAX) {
         ret = -EINVAL;
         goto exit;
     }
 
-    /* both block_size and sector_size are guaranteed powers of 2 */
+    /* only 2 supported sector sizes */
+    if (s->logical_sector_size != 512 && s->logical_sector_size != 4096) {
+        ret = -EINVAL;
+        goto exit;
+    }
+
+    /* Both block_size and sector_size are guaranteed powers of 2, below.
+       Due to range checks above, s->sectors_per_block can never be < 256 */
     s->sectors_per_block = s->params.block_size / s->logical_sector_size;
     s->chunk_ratio = (VHDX_MAX_SECTORS_PER_BLOCK) *
                      (uint64_t)s->logical_sector_size /
@@ -1708,8 +1723,7 @@ exit:
  *    .---- ~ ----------- ~ ------------ ~ ---------------- ~ -----------.
  *   1MB
  */
-static int vhdx_create(const char *filename, QEMUOptionParameter *options,
-                       Error **errp)
+static int vhdx_create(const char *filename, QemuOpts *opts, Error **errp)
 {
     int ret = 0;
     uint64_t image_size = (uint64_t) 2 * GiB;
@@ -1722,24 +1736,15 @@ static int vhdx_create(const char *filename, QEMUOptionParameter *options,
     gunichar2 *creator = NULL;
     glong creator_items;
     BlockDriverState *bs;
-    const char *type = NULL;
+    char *type = NULL;
     VHDXImageType image_type;
     Error *local_err = NULL;
 
-    while (options && options->name) {
-        if (!strcmp(options->name, BLOCK_OPT_SIZE)) {
-            image_size = options->value.n;
-        } else if (!strcmp(options->name, VHDX_BLOCK_OPT_LOG_SIZE)) {
-            log_size = options->value.n;
-        } else if (!strcmp(options->name, VHDX_BLOCK_OPT_BLOCK_SIZE)) {
-            block_size = options->value.n;
-        } else if (!strcmp(options->name, BLOCK_OPT_SUBFMT)) {
-            type = options->value.s;
-        } else if (!strcmp(options->name, VHDX_BLOCK_OPT_ZERO)) {
-            use_zero_blocks = options->value.n != 0;
-        }
-        options++;
-    }
+    image_size = qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0);
+    log_size = qemu_opt_get_size_del(opts, VHDX_BLOCK_OPT_LOG_SIZE, 0);
+    block_size = qemu_opt_get_size_del(opts, VHDX_BLOCK_OPT_BLOCK_SIZE, 0);
+    type = qemu_opt_get_del(opts, BLOCK_OPT_SUBFMT);
+    use_zero_blocks = qemu_opt_get_bool_del(opts, VHDX_BLOCK_OPT_ZERO, false);
 
     if (image_size > VHDX_MAX_IMAGE_SIZE) {
         error_setg_errno(errp, EINVAL, "Image size too large; max of 64TB");
@@ -1748,7 +1753,7 @@ static int vhdx_create(const char *filename, QEMUOptionParameter *options,
     }
 
     if (type == NULL) {
-        type = "dynamic";
+        type = g_strdup("dynamic");
     }
 
     if (!strcmp(type, "dynamic")) {
@@ -1788,7 +1793,7 @@ static int vhdx_create(const char *filename, QEMUOptionParameter *options,
     block_size = block_size > VHDX_BLOCK_SIZE_MAX ? VHDX_BLOCK_SIZE_MAX :
                                                     block_size;
 
-    ret = bdrv_create_file(filename, options, &local_err);
+    ret = bdrv_create_file(filename, opts, &local_err);
     if (ret < 0) {
         error_propagate(errp, local_err);
         goto exit;
@@ -1848,6 +1853,7 @@ static int vhdx_create(const char *filename, QEMUOptionParameter *options,
 delete_and_exit:
     bdrv_unref(bs);
 exit:
+    g_free(type);
     g_free(creator);
     return ret;
 }
@@ -1870,37 +1876,41 @@ static int vhdx_check(BlockDriverState *bs, BdrvCheckResult *result,
     return 0;
 }
 
-static QEMUOptionParameter vhdx_create_options[] = {
-    {
-        .name = BLOCK_OPT_SIZE,
-        .type = OPT_SIZE,
-        .help = "Virtual disk size; max of 64TB."
-    },
-    {
-        .name = VHDX_BLOCK_OPT_LOG_SIZE,
-        .type = OPT_SIZE,
-        .value.n = 1 * MiB,
-        .help = "Log size; min 1MB."
-    },
-    {
-        .name = VHDX_BLOCK_OPT_BLOCK_SIZE,
-        .type = OPT_SIZE,
-        .value.n = 0,
-        .help = "Block Size; min 1MB, max 256MB. " \
-                "0 means auto-calculate based on image size."
-    },
-    {
-        .name = BLOCK_OPT_SUBFMT,
-        .type = OPT_STRING,
-        .help = "VHDX format type, can be either 'dynamic' or 'fixed'. "\
-                "Default is 'dynamic'."
-    },
-    {
-        .name = VHDX_BLOCK_OPT_ZERO,
-        .type = OPT_FLAG,
-        .help = "Force use of payload blocks of type 'ZERO'.  Non-standard."
-    },
-    { NULL }
+static QemuOptsList vhdx_create_opts = {
+    .name = "vhdx-create-opts",
+    .head = QTAILQ_HEAD_INITIALIZER(vhdx_create_opts.head),
+    .desc = {
+        {
+           .name = BLOCK_OPT_SIZE,
+           .type = QEMU_OPT_SIZE,
+           .help = "Virtual disk size; max of 64TB."
+       },
+       {
+           .name = VHDX_BLOCK_OPT_LOG_SIZE,
+           .type = QEMU_OPT_SIZE,
+           .def_value_str = stringify(DEFAULT_LOG_SIZE),
+           .help = "Log size; min 1MB."
+       },
+       {
+           .name = VHDX_BLOCK_OPT_BLOCK_SIZE,
+           .type = QEMU_OPT_SIZE,
+           .def_value_str = stringify(0),
+           .help = "Block Size; min 1MB, max 256MB. " \
+                   "0 means auto-calculate based on image size."
+       },
+       {
+           .name = BLOCK_OPT_SUBFMT,
+           .type = QEMU_OPT_STRING,
+           .help = "VHDX format type, can be either 'dynamic' or 'fixed'. "\
+                   "Default is 'dynamic'."
+       },
+       {
+           .name = VHDX_BLOCK_OPT_ZERO,
+           .type = QEMU_OPT_BOOL,
+           .help = "Force use of payload blocks of type 'ZERO'.  Non-standard."
+       },
+       { NULL }
+    }
 };
 
 static BlockDriver bdrv_vhdx = {
@@ -1916,7 +1926,7 @@ static BlockDriver bdrv_vhdx = {
     .bdrv_get_info          = vhdx_get_info,
     .bdrv_check             = vhdx_check,
 
-    .create_options         = vhdx_create_options,
+    .create_opts            = &vhdx_create_opts,
 };
 
 static void bdrv_vhdx_init(void)

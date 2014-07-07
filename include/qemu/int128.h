@@ -38,6 +38,11 @@ static inline Int128 int128_2_64(void)
     return (Int128) { 0, 1 };
 }
 
+static inline Int128 int128_exts64(int64_t a)
+{
+    return (Int128) { .lo = a, .hi = (a < 0) ? -1 : 0 };
+}
+
 static inline Int128 int128_and(Int128 a, Int128 b)
 {
     return (Int128) { a.lo & b.lo, a.hi & b.hi };
@@ -53,7 +58,7 @@ static inline Int128 int128_rshift(Int128 a, int n)
     if (n >= 64) {
         return (Int128) { h, h >> 63 };
     } else {
-        return (Int128) { (a.lo >> n) | (a.hi << (64 - n)), h };
+        return (Int128) { (a.lo >> n) | ((uint64_t)a.hi << (64 - n)), h };
     }
 }
 
@@ -78,7 +83,7 @@ static inline Int128 int128_neg(Int128 a)
 
 static inline Int128 int128_sub(Int128 a, Int128 b)
 {
-    return (Int128){ a.lo - b.lo, a.hi - b.hi - (a.lo < b.lo) };
+    return (Int128){ a.lo - b.lo, (uint64_t)a.hi - b.hi - (a.lo < b.lo) };
 }
 
 static inline bool int128_nonneg(Int128 a)

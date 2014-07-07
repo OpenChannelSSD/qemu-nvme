@@ -1,5 +1,3 @@
-#include "exec/def-helper.h"
-
 DEF_HELPER_FLAGS_1(clz, TCG_CALL_NO_RWG_SE, i32, i32)
 DEF_HELPER_FLAGS_1(sxtb16, TCG_CALL_NO_RWG_SE, i32, i32)
 DEF_HELPER_FLAGS_1(uxtb16, TCG_CALL_NO_RWG_SE, i32, i32)
@@ -48,7 +46,8 @@ DEF_HELPER_FLAGS_2(usad8, TCG_CALL_NO_RWG_SE, i32, i32, i32)
 
 DEF_HELPER_FLAGS_3(sel_flags, TCG_CALL_NO_RWG_SE,
                    i32, i32, i32, i32)
-DEF_HELPER_2(exception, void, env, i32)
+DEF_HELPER_2(exception_internal, void, env, i32)
+DEF_HELPER_3(exception_with_syndrome, void, env, i32, i32)
 DEF_HELPER_1(wfi, void, env)
 DEF_HELPER_1(wfe, void, env)
 
@@ -58,13 +57,14 @@ DEF_HELPER_1(cpsr_read, i32, env)
 DEF_HELPER_3(v7m_msr, void, env, i32, i32)
 DEF_HELPER_2(v7m_mrs, i32, env, i32)
 
-DEF_HELPER_2(access_check_cp_reg, void, env, ptr)
+DEF_HELPER_3(access_check_cp_reg, void, env, ptr, i32)
 DEF_HELPER_3(set_cp_reg, void, env, ptr, i32)
 DEF_HELPER_2(get_cp_reg, i32, env, ptr)
 DEF_HELPER_3(set_cp_reg64, void, env, ptr, i64)
 DEF_HELPER_2(get_cp_reg64, i64, env, ptr)
 
 DEF_HELPER_3(msr_i_pstate, void, env, i32, i32)
+DEF_HELPER_1(exception_return, void, env)
 
 DEF_HELPER_2(get_r13_banked, i32, env, i32)
 DEF_HELPER_3(set_r13_banked, void, env, i32, i32)
@@ -167,10 +167,12 @@ DEF_HELPER_4(vfp_muladds, f32, f32, f32, f32, ptr)
 
 DEF_HELPER_3(recps_f32, f32, f32, f32, env)
 DEF_HELPER_3(rsqrts_f32, f32, f32, f32, env)
-DEF_HELPER_2(recpe_f32, f32, f32, env)
-DEF_HELPER_2(rsqrte_f32, f32, f32, env)
-DEF_HELPER_2(recpe_u32, i32, i32, env)
-DEF_HELPER_2(rsqrte_u32, i32, i32, env)
+DEF_HELPER_FLAGS_2(recpe_f32, TCG_CALL_NO_RWG, f32, f32, ptr)
+DEF_HELPER_FLAGS_2(recpe_f64, TCG_CALL_NO_RWG, f64, f64, ptr)
+DEF_HELPER_FLAGS_2(rsqrte_f32, TCG_CALL_NO_RWG, f32, f32, ptr)
+DEF_HELPER_FLAGS_2(rsqrte_f64, TCG_CALL_NO_RWG, f64, f64, ptr)
+DEF_HELPER_2(recpe_u32, i32, i32, ptr)
+DEF_HELPER_FLAGS_2(rsqrte_u32, TCG_CALL_NO_RWG, i32, i32, ptr)
 DEF_HELPER_5(neon_tbl, i32, env, i32, i32, i32, i32)
 
 DEF_HELPER_3(shl_cc, i32, env, i32, i32)
@@ -184,12 +186,20 @@ DEF_HELPER_FLAGS_2(rints, TCG_CALL_NO_RWG, f32, f32, ptr)
 DEF_HELPER_FLAGS_2(rintd, TCG_CALL_NO_RWG, f64, f64, ptr)
 
 /* neon_helper.c */
-DEF_HELPER_3(neon_qadd_u8, i32, env, i32, i32)
-DEF_HELPER_3(neon_qadd_s8, i32, env, i32, i32)
-DEF_HELPER_3(neon_qadd_u16, i32, env, i32, i32)
-DEF_HELPER_3(neon_qadd_s16, i32, env, i32, i32)
-DEF_HELPER_3(neon_qadd_u32, i32, env, i32, i32)
-DEF_HELPER_3(neon_qadd_s32, i32, env, i32, i32)
+DEF_HELPER_FLAGS_3(neon_qadd_u8, TCG_CALL_NO_RWG, i32, env, i32, i32)
+DEF_HELPER_FLAGS_3(neon_qadd_s8, TCG_CALL_NO_RWG, i32, env, i32, i32)
+DEF_HELPER_FLAGS_3(neon_qadd_u16, TCG_CALL_NO_RWG, i32, env, i32, i32)
+DEF_HELPER_FLAGS_3(neon_qadd_s16, TCG_CALL_NO_RWG, i32, env, i32, i32)
+DEF_HELPER_FLAGS_3(neon_qadd_u32, TCG_CALL_NO_RWG, i32, env, i32, i32)
+DEF_HELPER_FLAGS_3(neon_qadd_s32, TCG_CALL_NO_RWG, i32, env, i32, i32)
+DEF_HELPER_FLAGS_3(neon_uqadd_s8, TCG_CALL_NO_RWG, i32, env, i32, i32)
+DEF_HELPER_FLAGS_3(neon_uqadd_s16, TCG_CALL_NO_RWG, i32, env, i32, i32)
+DEF_HELPER_FLAGS_3(neon_uqadd_s32, TCG_CALL_NO_RWG, i32, env, i32, i32)
+DEF_HELPER_FLAGS_3(neon_uqadd_s64, TCG_CALL_NO_RWG, i64, env, i64, i64)
+DEF_HELPER_FLAGS_3(neon_sqadd_u8, TCG_CALL_NO_RWG, i32, env, i32, i32)
+DEF_HELPER_FLAGS_3(neon_sqadd_u16, TCG_CALL_NO_RWG, i32, env, i32, i32)
+DEF_HELPER_FLAGS_3(neon_sqadd_u32, TCG_CALL_NO_RWG, i32, env, i32, i32)
+DEF_HELPER_FLAGS_3(neon_sqadd_u64, TCG_CALL_NO_RWG, i64, env, i64, i64)
 DEF_HELPER_3(neon_qsub_u8, i32, env, i32, i32)
 DEF_HELPER_3(neon_qsub_s8, i32, env, i32, i32)
 DEF_HELPER_3(neon_qsub_u16, i32, env, i32, i32)
@@ -373,12 +383,14 @@ DEF_HELPER_2(neon_mull_s16, i64, i32, i32)
 DEF_HELPER_1(neon_negl_u16, i64, i64)
 DEF_HELPER_1(neon_negl_u32, i64, i64)
 
-DEF_HELPER_2(neon_qabs_s8, i32, env, i32)
-DEF_HELPER_2(neon_qabs_s16, i32, env, i32)
-DEF_HELPER_2(neon_qabs_s32, i32, env, i32)
-DEF_HELPER_2(neon_qneg_s8, i32, env, i32)
-DEF_HELPER_2(neon_qneg_s16, i32, env, i32)
-DEF_HELPER_2(neon_qneg_s32, i32, env, i32)
+DEF_HELPER_FLAGS_2(neon_qabs_s8, TCG_CALL_NO_RWG, i32, env, i32)
+DEF_HELPER_FLAGS_2(neon_qabs_s16, TCG_CALL_NO_RWG, i32, env, i32)
+DEF_HELPER_FLAGS_2(neon_qabs_s32, TCG_CALL_NO_RWG, i32, env, i32)
+DEF_HELPER_FLAGS_2(neon_qabs_s64, TCG_CALL_NO_RWG, i64, env, i64)
+DEF_HELPER_FLAGS_2(neon_qneg_s8, TCG_CALL_NO_RWG, i32, env, i32)
+DEF_HELPER_FLAGS_2(neon_qneg_s16, TCG_CALL_NO_RWG, i32, env, i32)
+DEF_HELPER_FLAGS_2(neon_qneg_s32, TCG_CALL_NO_RWG, i32, env, i32)
+DEF_HELPER_FLAGS_2(neon_qneg_s64, TCG_CALL_NO_RWG, i64, env, i64)
 
 DEF_HELPER_3(neon_abd_f32, i32, i32, i32, ptr)
 DEF_HELPER_3(neon_ceq_f32, i32, i32, i32, ptr)
@@ -444,8 +456,6 @@ DEF_HELPER_3(iwmmxt_avgb1, i64, env, i64, i64)
 DEF_HELPER_3(iwmmxt_avgw0, i64, env, i64, i64)
 DEF_HELPER_3(iwmmxt_avgw1, i64, env, i64, i64)
 
-DEF_HELPER_2(iwmmxt_msadb, i64, i64, i64)
-
 DEF_HELPER_3(iwmmxt_align, i64, i64, i64, i32)
 DEF_HELPER_4(iwmmxt_insr, i64, i64, i32, i32, i32)
 
@@ -500,11 +510,22 @@ DEF_HELPER_3(neon_qzip32, void, env, i32, i32)
 DEF_HELPER_4(crypto_aese, void, env, i32, i32, i32)
 DEF_HELPER_4(crypto_aesmc, void, env, i32, i32, i32)
 
+DEF_HELPER_5(crypto_sha1_3reg, void, env, i32, i32, i32, i32)
+DEF_HELPER_3(crypto_sha1h, void, env, i32, i32)
+DEF_HELPER_3(crypto_sha1su1, void, env, i32, i32)
+
+DEF_HELPER_4(crypto_sha256h, void, env, i32, i32, i32)
+DEF_HELPER_4(crypto_sha256h2, void, env, i32, i32, i32)
+DEF_HELPER_3(crypto_sha256su0, void, env, i32, i32)
+DEF_HELPER_4(crypto_sha256su1, void, env, i32, i32, i32)
+
 DEF_HELPER_FLAGS_3(crc32, TCG_CALL_NO_RWG_SE, i32, i32, i32, i32)
 DEF_HELPER_FLAGS_3(crc32c, TCG_CALL_NO_RWG_SE, i32, i32, i32, i32)
+DEF_HELPER_2(dc_zva, void, env, i64)
+
+DEF_HELPER_FLAGS_2(neon_pmull_64_lo, TCG_CALL_NO_RWG_SE, i64, i64, i64)
+DEF_HELPER_FLAGS_2(neon_pmull_64_hi, TCG_CALL_NO_RWG_SE, i64, i64, i64)
 
 #ifdef TARGET_AARCH64
 #include "helper-a64.h"
 #endif
-
-#include "exec/def-helper.h"

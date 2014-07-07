@@ -37,6 +37,7 @@ qemu_args = os.environ.get('QEMU', 'qemu').strip().split(' ')
 imgfmt = os.environ.get('IMGFMT', 'raw')
 imgproto = os.environ.get('IMGPROTO', 'file')
 test_dir = os.environ.get('TEST_DIR', '/var/tmp')
+output_dir = os.environ.get('OUTPUT_DIR', '.')
 cachemode = os.environ.get('CACHEMODE')
 
 socket_scm_helper = os.environ.get('SOCKET_SCM_HELPER', 'socket_scm_helper')
@@ -257,7 +258,7 @@ class QMPTestCase(unittest.TestCase):
         self.assert_no_active_block_jobs()
         return result
 
-    def wait_until_completed(self, drive='drive0'):
+    def wait_until_completed(self, drive='drive0', check_offset=True):
         '''Wait for a block job to finish, returning the event'''
         completed = False
         while not completed:
@@ -265,7 +266,8 @@ class QMPTestCase(unittest.TestCase):
                 if event['event'] == 'BLOCK_JOB_COMPLETED':
                     self.assert_qmp(event, 'data/device', drive)
                     self.assert_qmp_absent(event, 'data/error')
-                    self.assert_qmp(event, 'data/offset', self.image_len)
+                    if check_offset:
+                        self.assert_qmp(event, 'data/offset', self.image_len)
                     self.assert_qmp(event, 'data/len', self.image_len)
                     completed = True
 
@@ -277,7 +279,7 @@ def notrun(reason):
     # Each test in qemu-iotests has a number ("seq")
     seq = os.path.basename(sys.argv[0])
 
-    open('%s.notrun' % seq, 'wb').write(reason + '\n')
+    open('%s/%s.notrun' % (output_dir, seq), 'wb').write(reason + '\n')
     print '%s not run: %s' % (seq, reason)
     sys.exit(0)
 

@@ -19,12 +19,8 @@
 #include <stdlib.h>
 #include "cpu.h"
 #include "qemu/host-utils.h"
-
-#include "helper.h"
-
-#if !defined(CONFIG_USER_ONLY)
-#include "exec/softmmu_exec.h"
-#endif /* !defined(CONFIG_USER_ONLY) */
+#include "exec/helper-proto.h"
+#include "exec/cpu_ldst.h"
 
 #ifndef CONFIG_USER_ONLY
 static inline void cpu_mips_tlb_flush (CPUMIPSState *env, int flush_global);
@@ -38,18 +34,20 @@ static inline void QEMU_NORETURN do_raise_exception_err(CPUMIPSState *env,
                                                         int error_code,
                                                         uintptr_t pc)
 {
+    CPUState *cs = CPU(mips_env_get_cpu(env));
+
     if (exception < EXCP_SC) {
         qemu_log("%s: %d %d\n", __func__, exception, error_code);
     }
-    env->exception_index = exception;
+    cs->exception_index = exception;
     env->error_code = error_code;
 
     if (pc) {
         /* now we have a real cpu fault */
-        cpu_restore_state(env, pc);
+        cpu_restore_state(cs, pc);
     }
 
-    cpu_loop_exit(env);
+    cpu_loop_exit(cs);
 }
 
 static inline void QEMU_NORETURN do_raise_exception(CPUMIPSState *env,
@@ -278,7 +276,7 @@ static inline hwaddr do_translate_address(CPUMIPSState *env,
     lladdr = cpu_mips_translate_address(env, address, rw);
 
     if (lladdr == -1LL) {
-        cpu_loop_exit(env);
+        cpu_loop_exit(CPU(mips_env_get_cpu(env)));
     } else {
         return lladdr;
     }
@@ -646,7 +644,7 @@ static void sync_c0_tcstatus(CPUMIPSState *cpu, int tc,
 {
     uint32_t status;
     uint32_t tcu, tmx, tasid, tksu;
-    uint32_t mask = ((1 << CP0St_CU3)
+    uint32_t mask = ((1U << CP0St_CU3)
                        | (1 << CP0St_CU2)
                        | (1 << CP0St_CU1)
                        | (1 << CP0St_CU0)
@@ -1299,7 +1297,19 @@ void helper_mtc0_srsconf4(CPUMIPSState *env, target_ulong arg1)
 
 void helper_mtc0_hwrena(CPUMIPSState *env, target_ulong arg1)
 {
-    env->CP0_HWREna = arg1 & 0x0000000F;
+    uint32_t mask = 0x0000000F;
+
+    if (env->CP0_Config3 & (1 << CP0C3_ULRI)) {
+        mask |= (1 << 29);
+
+        if (arg1 & (1 << 29)) {
+            env->hflags |= MIPS_HFLAG_HWRENA_ULR;
+        } else {
+            env->hflags &= ~MIPS_HFLAG_HWRENA_ULR;
+        }
+    }
+
+    env->CP0_HWREna = arg1 & mask;
 }
 
 void helper_mtc0_count(CPUMIPSState *env, target_ulong arg1)
@@ -1342,6 +1352,7 @@ void helper_mtc0_compare(CPUMIPSState *env, target_ulong arg1)
 
 void helper_mtc0_status(CPUMIPSState *env, target_ulong arg1)
 {
+    MIPSCPU *cpu = mips_env_get_cpu(env);
     uint32_t val, old;
     uint32_t mask = env->CP0_Status_rw_bitmask;
 
@@ -1363,7 +1374,9 @@ void helper_mtc0_status(CPUMIPSState *env, target_ulong arg1)
         case MIPS_HFLAG_UM: qemu_log(", UM\n"); break;
         case MIPS_HFLAG_SM: qemu_log(", SM\n"); break;
         case MIPS_HFLAG_KM: qemu_log("\n"); break;
-        default: cpu_abort(env, "Invalid MMU mode!\n"); break;
+        default:
+            cpu_abort(CPU(cpu), "Invalid MMU mode!\n");
+            break;
         }
     }
 }
@@ -1782,8 +1795,10 @@ target_ulong helper_yield(CPUMIPSState *env, target_ulong arg)
 /* TLB management */
 static void cpu_mips_tlb_flush (CPUMIPSState *env, int flush_global)
 {
+    MIPSCPU *cpu = mips_env_get_cpu(env);
+
     /* Flush qemu's TLB and discard all shadowed entries.  */
-    tlb_flush (env, flush_global);
+    tlb_flush(CPU(cpu), flush_global);
     env->tlb->tlb_in_use = env->tlb->nb_tlb;
 }
 
@@ -1983,6 +1998,8 @@ static void debug_pre_eret(CPUMIPSState *env)
 
 static void debug_post_eret(CPUMIPSState *env)
 {
+    MIPSCPU *cpu = mips_env_get_cpu(env);
+
     if (qemu_loglevel_mask(CPU_LOG_EXEC)) {
         qemu_log("  =>  PC " TARGET_FMT_lx " EPC " TARGET_FMT_lx,
                 env->active_tc.PC, env->CP0_EPC);
@@ -1994,7 +2011,9 @@ static void debug_post_eret(CPUMIPSState *env)
         case MIPS_HFLAG_UM: qemu_log(", UM\n"); break;
         case MIPS_HFLAG_SM: qemu_log(", SM\n"); break;
         case MIPS_HFLAG_KM: qemu_log("\n"); break;
-        default: cpu_abort(env, "Invalid MMU mode!\n"); break;
+        default:
+            cpu_abort(CPU(cpu), "Invalid MMU mode!\n");
+            break;
         }
     }
 }
@@ -2117,40 +2136,27 @@ void helper_wait(CPUMIPSState *env)
 
 #if !defined(CONFIG_USER_ONLY)
 
-static void QEMU_NORETURN do_unaligned_access(CPUMIPSState *env,
-                                              target_ulong addr, int is_write,
-                                              int is_user, uintptr_t retaddr);
-
-#define MMUSUFFIX _mmu
-#define ALIGNED_ONLY
-
-#define SHIFT 0
-#include "exec/softmmu_template.h"
-
-#define SHIFT 1
-#include "exec/softmmu_template.h"
-
-#define SHIFT 2
-#include "exec/softmmu_template.h"
-
-#define SHIFT 3
-#include "exec/softmmu_template.h"
-
-static void do_unaligned_access(CPUMIPSState *env, target_ulong addr,
-                                int is_write, int is_user, uintptr_t retaddr)
+void mips_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
+                                  int is_write, int is_user, uintptr_t retaddr)
 {
+    MIPSCPU *cpu = MIPS_CPU(cs);
+    CPUMIPSState *env = &cpu->env;
+
     env->CP0_BadVAddr = addr;
     do_raise_exception(env, (is_write == 1) ? EXCP_AdES : EXCP_AdEL, retaddr);
 }
 
-void tlb_fill(CPUMIPSState *env, target_ulong addr, int is_write, int mmu_idx,
+void tlb_fill(CPUState *cs, target_ulong addr, int is_write, int mmu_idx,
               uintptr_t retaddr)
 {
     int ret;
 
-    ret = cpu_mips_handle_mmu_fault(env, addr, is_write, mmu_idx);
+    ret = mips_cpu_handle_mmu_fault(cs, addr, is_write, mmu_idx);
     if (ret) {
-        do_raise_exception_err(env, env->exception_index,
+        MIPSCPU *cpu = MIPS_CPU(cs);
+        CPUMIPSState *env = &cpu->env;
+
+        do_raise_exception_err(env, cs->exception_index,
                                env->error_code, retaddr);
     }
 }

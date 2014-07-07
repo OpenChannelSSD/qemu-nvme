@@ -42,7 +42,7 @@ typedef struct sPAPRNVRAM {
 
 #define MIN_NVRAM_SIZE 8192
 #define DEFAULT_NVRAM_SIZE 65536
-#define MAX_NVRAM_SIZE (UINT16_MAX * 16)
+#define MAX_NVRAM_SIZE 1048576
 
 static void rtas_nvram_fetch(PowerPCCPU *cpu, sPAPREnvironment *spapr,
                              uint32_t token, uint32_t nargs,
@@ -153,8 +153,8 @@ static int spapr_nvram_init(VIOsPAPRDevice *dev)
         return -1;
     }
 
-    spapr_rtas_register("nvram-fetch", rtas_nvram_fetch);
-    spapr_rtas_register("nvram-store", rtas_nvram_store);
+    spapr_rtas_register(RTAS_NVRAM_FETCH, "nvram-fetch", rtas_nvram_fetch);
+    spapr_rtas_register(RTAS_NVRAM_STORE, "nvram-store", rtas_nvram_store);
 
     return 0;
 }
