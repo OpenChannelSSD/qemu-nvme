@@ -1410,6 +1410,7 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     switch (dw10) {
     case NVME_ARBITRATION:
         req->cqe.result = cpu_to_le32(n->features.arbitration);
+        n->features.arbitration = dw11;
         break;
     case NVME_POWER_MANAGEMENT:
         n->features.power_mgmt = dw11;
