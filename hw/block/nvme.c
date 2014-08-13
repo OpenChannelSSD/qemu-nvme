@@ -322,12 +322,12 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
         addr = nvme_discontig(cq->prp_list, cq->tail, n->page_size,
             n->cqe_size);
     }
-    nvme_inc_cq_tail(cq);
 
     cqe->status = cpu_to_le16((req->status << 1) | phase);
     cqe->sq_id = cpu_to_le16(sq->sqid);
     cqe->sq_head = cpu_to_le16(sq->head);
     pci_dma_write(&n->parent_obj, addr, (void *)cqe, sizeof(*cqe));
+    nvme_inc_cq_tail(cq);
 
     QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
 }
