@@ -210,8 +210,8 @@ void set_numa_nodes(void)
             numa_total += numa_info[i].node_mem;
         }
         if (numa_total != ram_size) {
-            error_report("total memory for NUMA nodes (%" PRIu64 ")"
-                         " should equal RAM size (" RAM_ADDR_FMT ")",
+            error_report("total memory for NUMA nodes (0x%" PRIx64 ")"
+                         " should equal RAM size (0x" RAM_ADDR_FMT ")",
                          numa_total, ram_size);
             exit(1);
         }
@@ -298,6 +298,14 @@ void memory_region_allocate_system_memory(MemoryRegion *mr, Object *owner,
         MemoryRegion *seg = host_memory_backend_get_memory(backend, &local_err);
         if (local_err) {
             qerror_report_err(local_err);
+            exit(1);
+        }
+
+        if (memory_region_is_mapped(seg)) {
+            char *path = object_get_canonical_path_component(OBJECT(backend));
+            error_report("memory backend %s is used multiple times. Each "
+                         "-numa option must use a different memdev value.",
+                         path);
             exit(1);
         }
 

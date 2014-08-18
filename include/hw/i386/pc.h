@@ -85,7 +85,6 @@ typedef struct PcPciInfo {
 #define ACPI_PM_PROP_GPE0_BLK_LEN "gpe0_blk_len"
 
 struct PcGuestInfo {
-    bool has_pci_info;
     bool isapc_ram_fw;
     hwaddr ram_size, ram_size_below_4g;
     unsigned apic_id_limit;
@@ -94,6 +93,7 @@ struct PcGuestInfo {
     uint64_t *node_mem;
     uint64_t *node_cpu;
     FWCfgState *fw_cfg;
+    int legacy_acpi_table_size;
     bool has_acpi_build;
     bool has_reserved_memory;
 };
@@ -187,6 +187,11 @@ PcGuestInfo *pc_guest_info_init(ram_addr_t below_4g_mem_size,
 void pc_pci_as_mapping_init(Object *owner, MemoryRegion *system_memory,
                             MemoryRegion *pci_address_space);
 
+FWCfgState *xen_load_linux(const char *kernel_filename,
+                           const char *kernel_cmdline,
+                           const char *initrd_filename,
+                           ram_addr_t below_4g_mem_size,
+                           PcGuestInfo *guest_info);
 FWCfgState *pc_memory_init(MachineState *machine,
                            MemoryRegion *system_memory,
                            ram_addr_t below_4g_mem_size,
@@ -294,7 +299,15 @@ int e820_add_entry(uint64_t, uint64_t, uint32_t);
 int e820_get_num_entries(void);
 bool e820_get_entry(int, uint32_t, uint64_t *, uint64_t *);
 
+#define PC_COMPAT_2_1 \
+        {\
+            .driver   = "intel-hda",\
+            .property = "old_msi_addr",\
+            .value    = "on",\
+        }
+
 #define PC_COMPAT_2_0 \
+        PC_COMPAT_2_1, \
         {\
             .driver   = "virtio-scsi-pci",\
             .property = "any_layout",\

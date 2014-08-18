@@ -677,7 +677,7 @@ void qemu_spice_init(void)
 
     if (tls_port) {
         x509_dir = qemu_opt_get(opts, "x509-dir");
-        if (NULL == x509_dir) {
+        if (!x509_dir) {
             x509_dir = ".";
         }
 
@@ -741,6 +741,7 @@ void qemu_spice_init(void)
             error_report("spice: failed to enable sasl");
             exit(1);
         }
+        auth = "sasl";
     }
     if (qemu_opt_get_bool(opts, "disable-ticketing", 0)) {
         auth = "none";
@@ -802,7 +803,7 @@ void qemu_spice_init(void)
 
     seamless_migration = qemu_opt_get_bool(opts, "seamless-migration", 0);
     spice_server_set_seamless_migration(spice_server, seamless_migration);
-    if (0 != spice_server_init(spice_server, &core_interface)) {
+    if (spice_server_init(spice_server, &core_interface) != 0) {
         error_report("failed to initialize spice server");
         exit(1);
     };
@@ -894,6 +895,10 @@ static int qemu_spice_set_ticket(bool fail_if_conn, bool disconnect_if_conn)
 int qemu_spice_set_passwd(const char *passwd,
                           bool fail_if_conn, bool disconnect_if_conn)
 {
+    if (strcmp(auth, "spice") != 0) {
+        return -1;
+    }
+
     g_free(auth_passwd);
     auth_passwd = g_strdup(passwd);
     return qemu_spice_set_ticket(fail_if_conn, disconnect_if_conn);

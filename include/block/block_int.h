@@ -240,7 +240,7 @@ struct BlockDriver {
     int (*bdrv_debug_resume)(BlockDriverState *bs, const char *tag);
     bool (*bdrv_debug_is_suspended)(BlockDriverState *bs, const char *tag);
 
-    int (*bdrv_refresh_limits)(BlockDriverState *bs);
+    void (*bdrv_refresh_limits)(BlockDriverState *bs, Error **errp);
 
     /*
      * Returns 1 if newly created images are guaranteed to contain only
@@ -260,6 +260,11 @@ struct BlockDriver {
      */
     void (*bdrv_attach_aio_context)(BlockDriverState *bs,
                                     AioContext *new_context);
+
+    /* io queue for linux-aio */
+    void (*bdrv_io_plug)(BlockDriverState *bs);
+    void (*bdrv_io_unplug)(BlockDriverState *bs);
+    void (*bdrv_flush_io_queue)(BlockDriverState *bs);
 
     QLIST_ENTRY(BlockDriver) list;
 };

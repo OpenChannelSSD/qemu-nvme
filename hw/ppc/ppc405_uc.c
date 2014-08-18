@@ -23,6 +23,7 @@
  */
 #include "hw/hw.h"
 #include "hw/ppc/ppc.h"
+#include "hw/boards.h"
 #include "ppc405.h"
 #include "hw/char/serial.h"
 #include "qemu/timer.h"

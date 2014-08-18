@@ -84,7 +84,6 @@ struct CharDriverState {
     int avail_connections;
     int is_mux;
     guint fd_in_tag;
-    guint fd_hup_tag;
     QemuOpts *opts;
     QTAILQ_ENTRY(CharDriverState) next;
 };
@@ -358,6 +357,9 @@ CharDriverState *qemu_char_get_next_serial(void);
 
 /* msmouse */
 CharDriverState *qemu_chr_open_msmouse(void);
+
+/* testdev.c */
+CharDriverState *chr_testdev_init(void);
 
 /* baum.c */
 CharDriverState *chr_baum_init(void);

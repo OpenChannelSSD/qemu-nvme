@@ -324,7 +324,11 @@ static int check_shm_size(IVShmemState *s, int fd) {
 
     struct stat buf;
 
-    fstat(fd, &buf);
+    if (fstat(fd, &buf) < 0) {
+        fprintf(stderr, "ivshmem: exiting: fstat on fd %d failed: %s\n",
+                fd, strerror(errno));
+        return -1;
+    }
 
     if (s->ivshmem_size > buf.st_size) {
         fprintf(stderr,
@@ -479,8 +483,8 @@ static void ivshmem_read(void *opaque, const uint8_t * buf, int flags)
                                    "ivshmem.bar2", s->ivshmem_size, map_ptr);
         vmstate_register_ram(&s->ivshmem, DEVICE(s));
 
-        IVSHMEM_DPRINTF("guest h/w addr = %" PRIu64 ", size = %" PRIu64 "\n",
-                         s->ivshmem_offset, s->ivshmem_size);
+        IVSHMEM_DPRINTF("guest h/w addr = %p, size = %" PRIu64 "\n",
+                         map_ptr, s->ivshmem_size);
 
         memory_region_add_subregion(&s->bar, 0, &s->ivshmem);
 

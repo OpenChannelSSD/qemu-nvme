@@ -563,6 +563,7 @@ Devices
 -------
 IDE
 M: Kevin Wolf <kwolf@redhat.com>
+M: Stefan Hajnoczi <stefanha@redhat.com>
 S: Odd Fixes
 F: include/hw/ide.h
 F: hw/ide/
@@ -853,7 +854,7 @@ S: Odd Fixes
 F: scripts/checkpatch.pl
 
 Seccomp
-M: Eduardo Otubo <otubo@linux.vnet.ibm.com>
+M: Eduardo Otubo <eduardo.otubo@profitbricks.com>
 S: Supported
 F: qemu-seccomp.c
 F: include/sysemu/seccomp.h
@@ -999,3 +1000,9 @@ SSH
 M: Richard W.M. Jones <rjones@redhat.com>
 S: Supported
 F: block/ssh.c
+
+ARCHIPELAGO
+M: Chrysostomos Nanakos <cnanakos@grnet.gr>
+M: Chrysostomos Nanakos <chris@include.gr>
+S: Maintained
+F: block/archipelago.c

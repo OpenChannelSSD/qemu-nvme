@@ -144,7 +144,7 @@ typedef struct MultiReqBuffer {
 
 typedef struct VirtIOBlockReq {
     VirtIOBlock *dev;
-    VirtQueueElement *elem;
+    VirtQueueElement elem;
     struct virtio_blk_inhdr *in;
     struct virtio_blk_outhdr out;
     QEMUIOVector qiov;
@@ -152,8 +152,9 @@ typedef struct VirtIOBlockReq {
     BlockAcctCookie acct;
 } VirtIOBlockReq;
 
-#define DEFINE_VIRTIO_BLK_FEATURES(_state, _field) \
-        DEFINE_VIRTIO_COMMON_FEATURES(_state, _field)
+VirtIOBlockReq *virtio_blk_alloc_request(VirtIOBlock *s);
+
+void virtio_blk_free_request(VirtIOBlockReq *req);
 
 int virtio_blk_handle_scsi_req(VirtIOBlock *blk,
                                VirtQueueElement *elem);

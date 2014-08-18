@@ -1066,35 +1066,6 @@ typedef struct PcRomPciInfo {
     uint64_t w64_max;
 } PcRomPciInfo;
 
-static void pc_fw_cfg_guest_info(PcGuestInfo *guest_info)
-{
-    PcRomPciInfo *info;
-    Object *pci_info;
-    bool ambiguous = false;
-
-    if (!guest_info->has_pci_info || !guest_info->fw_cfg) {
-        return;
-    }
-    pci_info = object_resolve_path_type("", TYPE_PCI_HOST_BRIDGE, &ambiguous);
-    g_assert(!ambiguous);
-    if (!pci_info) {
-        return;
-    }
-
-    info = g_malloc(sizeof *info);
-    info->w32_min = cpu_to_le64(object_property_get_int(pci_info,
-                                PCI_HOST_PROP_PCI_HOLE_START, NULL));
-    info->w32_max = cpu_to_le64(object_property_get_int(pci_info,
-                                PCI_HOST_PROP_PCI_HOLE_END, NULL));
-    info->w64_min = cpu_to_le64(object_property_get_int(pci_info,
-                                PCI_HOST_PROP_PCI_HOLE64_START, NULL));
-    info->w64_max = cpu_to_le64(object_property_get_int(pci_info,
-                                PCI_HOST_PROP_PCI_HOLE64_END, NULL));
-    /* Pass PCI hole info to guest via a side channel.
-     * Required so guest PCI enumeration does the right thing. */
-    fw_cfg_add_file(guest_info->fw_cfg, "etc/pci-info", info, sizeof *info);
-}
-
 typedef struct PcGuestInfoState {
     PcGuestInfo info;
     Notifier machine_done;
@@ -1106,7 +1077,6 @@ void pc_guest_info_machine_done(Notifier *notifier, void *data)
     PcGuestInfoState *guest_info_state = container_of(notifier,
                                                       PcGuestInfoState,
                                                       machine_done);
-    pc_fw_cfg_guest_info(&guest_info_state->info);
     acpi_setup(&guest_info_state->info);
 }
 
@@ -1188,6 +1158,31 @@ void pc_acpi_init(const char *default_dsdt)
         g_free(arg);
         g_free(filename);
     }
+}
+
+FWCfgState *xen_load_linux(const char *kernel_filename,
+                           const char *kernel_cmdline,
+                           const char *initrd_filename,
+                           ram_addr_t below_4g_mem_size,
+                           PcGuestInfo *guest_info)
+{
+    int i;
+    FWCfgState *fw_cfg;
+
+    assert(kernel_filename != NULL);
+
+    fw_cfg = fw_cfg_init(BIOS_CFG_IOPORT, BIOS_CFG_IOPORT + 1, 0, 0);
+    rom_set_fw(fw_cfg);
+
+    load_linux(fw_cfg, kernel_filename, initrd_filename,
+               kernel_cmdline, below_4g_mem_size);
+    for (i = 0; i < nb_option_roms; i++) {
+        assert(!strcmp(option_rom[i].name, "linuxboot.bin") ||
+               !strcmp(option_rom[i].name, "multiboot.bin"));
+        rom_add_option(option_rom[i].name, option_rom[i].bootindex);
+    }
+    guest_info->fw_cfg = fw_cfg;
+    return fw_cfg;
 }
 
 FWCfgState *pc_memory_init(MachineState *machine,

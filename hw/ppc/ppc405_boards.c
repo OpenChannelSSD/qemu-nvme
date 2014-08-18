@@ -199,8 +199,8 @@ static void ref405ep_init(MachineState *machine)
     MemoryRegion *sysmem = get_system_memory();
 
     /* XXX: fix this */
-    memory_region_init_ram(&ram_memories[0], NULL, "ef405ep.ram", 0x08000000);
-    vmstate_register_ram_global(&ram_memories[0]);
+    memory_region_allocate_system_memory(&ram_memories[0], NULL, "ef405ep.ram",
+                                         0x08000000);
     ram_bases[0] = 0;
     ram_sizes[0] = 0x08000000;
     memory_region_init(&ram_memories[1], NULL, "ef405ep.ram1", 0);
@@ -248,6 +248,7 @@ static void ref405ep_init(MachineState *machine)
         bios = g_new(MemoryRegion, 1);
         memory_region_init_ram(bios, NULL, "ef405ep.bios", BIOS_SIZE);
         vmstate_register_ram_global(bios);
+
         if (bios_name == NULL)
             bios_name = BIOS_FILENAME;
         filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, bios_name);
@@ -509,6 +510,7 @@ static void taihu_405ep_init(MachineState *machine)
     MemoryRegion *sysmem = get_system_memory();
     MemoryRegion *bios;
     MemoryRegion *ram_memories = g_malloc(2 * sizeof(*ram_memories));
+    MemoryRegion *ram = g_malloc0(sizeof(*ram));
     hwaddr ram_bases[2], ram_sizes[2];
     long bios_size;
     target_ulong kernel_base, initrd_base;
@@ -518,17 +520,20 @@ static void taihu_405ep_init(MachineState *machine)
     DriveInfo *dinfo;
 
     /* RAM is soldered to the board so the size cannot be changed */
-    memory_region_init_ram(&ram_memories[0], NULL,
-                           "taihu_405ep.ram-0", 0x04000000);
-    vmstate_register_ram_global(&ram_memories[0]);
+    ram_size = 0x08000000;
+    memory_region_allocate_system_memory(ram, NULL, "taihu_405ep.ram",
+                                         ram_size);
+
     ram_bases[0] = 0;
     ram_sizes[0] = 0x04000000;
-    memory_region_init_ram(&ram_memories[1], NULL,
-                           "taihu_405ep.ram-1", 0x04000000);
-    vmstate_register_ram_global(&ram_memories[1]);
+    memory_region_init_alias(&ram_memories[0], NULL,
+                             "taihu_405ep.ram-0", ram, ram_bases[0],
+                             ram_sizes[0]);
     ram_bases[1] = 0x04000000;
     ram_sizes[1] = 0x04000000;
-    ram_size = 0x08000000;
+    memory_region_init_alias(&ram_memories[1], NULL,
+                             "taihu_405ep.ram-1", ram, ram_bases[1],
+                             ram_sizes[1]);
 #ifdef DEBUG_BOARD_INIT
     printf("%s: register cpu\n", __func__);
 #endif

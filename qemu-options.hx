@@ -427,7 +427,7 @@ DEF("drive", HAS_ARG, QEMU_OPTION_drive,
     "       [,serial=s][,addr=A][,rerror=ignore|stop|report]\n"
     "       [,werror=ignore|stop|report|enospc][,id=name][,aio=threads|native]\n"
     "       [,readonly=on|off][,copy-on-read=on|off]\n"
-    "       [,detect-zeroes=on|off|unmap]\n"
+    "       [,discard=ignore|unmap][,detect-zeroes=on|off|unmap]\n"
     "       [[,bps=b]|[[,bps_rd=r][,bps_wr=w]]]\n"
     "       [[,iops=i]|[[,iops_rd=r][,iops_wr=w]]]\n"
     "       [[,bps_max=bm]|[[,bps_rd_max=rm][,bps_wr_max=wm]]]\n"
@@ -1437,14 +1437,14 @@ DEF("net", HAS_ARG, QEMU_OPTION_net,
     "-net l2tpv3[,vlan=n][,name=str],src=srcaddr,dst=dstaddr[,srcport=srcport][,dstport=dstport],txsession=txsession[,rxsession=rxsession][,ipv6=on/off][,udp=on/off][,cookie64=on/off][,counter][,pincounter][,txcookie=txcookie][,rxcookie=rxcookie][,offset=offset]\n"
     "                connect the VLAN to an Ethernet over L2TPv3 pseudowire\n"
     "                Linux kernel 3.3+ as well as most routers can talk\n"
-    "                L2TPv3. This transport allows to connect a VM to a VM,\n"
+    "                L2TPv3. This transport allows connecting a VM to a VM,\n"
     "                VM to a router and even VM to Host. It is a nearly-universal\n"
     "                standard (RFC3391). Note - this implementation uses static\n"
     "                pre-configured tunnels (same as the Linux kernel).\n"
     "                use 'src=' to specify source address\n"
     "                use 'dst=' to specify destination address\n"
     "                use 'udp=on' to specify udp encapsulation\n"
-    "                use 'dstport=' to specify destination udp port\n"
+    "                use 'srcport=' to specify source udp port\n"
     "                use 'dstport=' to specify destination udp port\n"
     "                use 'ipv6=on' to force v6\n"
     "                L2TPv3 uses cookies to prevent misconfiguration as\n"
@@ -1926,7 +1926,7 @@ ETEXI
 
 DEF("chardev", HAS_ARG, QEMU_OPTION_chardev,
     "-chardev null,id=id[,mux=on|off]\n"
-    "-chardev socket,id=id[,host=host],port=host[,to=to][,ipv4][,ipv6][,nodelay]\n"
+    "-chardev socket,id=id[,host=host],port=port[,to=to][,ipv4][,ipv6][,nodelay]\n"
     "         [,server][,nowait][,telnet][,mux=on|off] (tcp)\n"
     "-chardev socket,id=id,path=path[,server][,nowait][,telnet],[mux=on|off] (unix)\n"
     "-chardev udp,id=id[,host=host],port=port[,localaddr=localaddr]\n"
@@ -3011,11 +3011,11 @@ re-inject them.
 ETEXI
 
 DEF("icount", HAS_ARG, QEMU_OPTION_icount, \
-    "-icount [N|auto]\n" \
+    "-icount [shift=N|auto][,align=on|off]\n" \
     "                enable virtual instruction counter with 2^N clock ticks per\n" \
-    "                instruction\n", QEMU_ARCH_ALL)
+    "                instruction and enable aligning the host and virtual clocks\n", QEMU_ARCH_ALL)
 STEXI
-@item -icount [@var{N}|auto]
+@item -icount [shift=@var{N}|auto]
 @findex -icount
 Enable virtual instruction counter.  The virtual cpu will execute one
 instruction every 2^@var{N} ns of virtual time.  If @code{auto} is specified
@@ -3026,6 +3026,17 @@ Note that while this option can give deterministic behavior, it does not
 provide cycle accurate emulation.  Modern CPUs contain superscalar out of
 order cores with complex cache hierarchies.  The number of instructions
 executed often has little or no correlation with actual performance.
+
+@option{align=on} will activate the delay algorithm which will try to
+to synchronise the host clock and the virtual clock. The goal is to
+have a guest running at the real frequency imposed by the shift option.
+Whenever the guest clock is behind the host clock and if
+@option{align=on} is specified then we print a messsage to the user
+to inform about the delay.
+Currently this option does not work when @option{shift} is @code{auto}.
+Note: The sync algorithm will work for those shift values for which
+the guest clock runs ahead of the host clock. Typically this happens
+when the shift value is high (how high depends on the host machine).
 ETEXI
 
 DEF("watchdog", HAS_ARG, QEMU_OPTION_watchdog, \

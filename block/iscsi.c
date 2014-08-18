@@ -893,7 +893,10 @@ coroutine_fn iscsi_co_write_zeroes(BlockDriverState *bs, int64_t sector_num,
     nb_blocks = sector_qemu2lun(nb_sectors, iscsilun);
 
     if (iscsilun->zeroblock == NULL) {
-        iscsilun->zeroblock = g_malloc0(iscsilun->block_size);
+        iscsilun->zeroblock = g_try_malloc0(iscsilun->block_size);
+        if (iscsilun->zeroblock == NULL) {
+            return -ENOMEM;
+        }
     }
 
     iscsi_co_init_iscsitask(iscsilun, &iTask);
@@ -1450,7 +1453,7 @@ static void iscsi_close(BlockDriverState *bs)
     memset(iscsilun, 0, sizeof(IscsiLun));
 }
 
-static int iscsi_refresh_limits(BlockDriverState *bs)
+static void iscsi_refresh_limits(BlockDriverState *bs, Error **errp)
 {
     IscsiLun *iscsilun = bs->opaque;
 
@@ -1475,7 +1478,6 @@ static int iscsi_refresh_limits(BlockDriverState *bs)
     }
     bs->bl.opt_transfer_length = sector_lun2qemu(iscsilun->bl.opt_xfer_len,
                                                  iscsilun);
-    return 0;
 }
 
 /* Since iscsi_open() ignores bdrv_flags, there is nothing to do here in

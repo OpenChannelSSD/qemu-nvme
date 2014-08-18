@@ -210,20 +210,31 @@ static void GCC_FMT_ATTR(3, 4) report_unsupported(BlockDriverState *bs,
 static void report_unsupported_feature(BlockDriverState *bs,
     Error **errp, Qcow2Feature *table, uint64_t mask)
 {
+    char *features = g_strdup("");
+    char *old;
+
     while (table && table->name[0] != '\0') {
         if (table->type == QCOW2_FEAT_TYPE_INCOMPATIBLE) {
-            if (mask & (1 << table->bit)) {
-                report_unsupported(bs, errp, "%.46s", table->name);
-                mask &= ~(1 << table->bit);
+            if (mask & (1ULL << table->bit)) {
+                old = features;
+                features = g_strdup_printf("%s%s%.46s", old, *old ? ", " : "",
+                                           table->name);
+                g_free(old);
+                mask &= ~(1ULL << table->bit);
             }
         }
         table++;
     }
 
     if (mask) {
-        report_unsupported(bs, errp, "Unknown incompatible feature: %" PRIx64,
-                           mask);
+        old = features;
+        features = g_strdup_printf("%s%sUnknown incompatible feature: %" PRIx64,
+                                   old, *old ? ", " : "", mask);
+        g_free(old);
     }
+
+    report_unsupported(bs, errp, "%s", features);
+    g_free(features);
 }
 
 /*
@@ -677,8 +688,13 @@ static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
 
 
     if (s->l1_size > 0) {
-        s->l1_table = g_malloc0(
+        s->l1_table = qemu_try_blockalign(bs->file,
             align_offset(s->l1_size * sizeof(uint64_t), 512));
+        if (s->l1_table == NULL) {
+            error_setg(errp, "Could not allocate L1 table");
+            ret = -ENOMEM;
+            goto fail;
+        }
         ret = bdrv_pread(bs->file, s->l1_table_offset, s->l1_table,
                          s->l1_size * sizeof(uint64_t));
         if (ret < 0) {
@@ -693,11 +709,22 @@ static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
     /* alloc L2 table/refcount block cache */
     s->l2_table_cache = qcow2_cache_create(bs, L2_CACHE_SIZE);
     s->refcount_block_cache = qcow2_cache_create(bs, REFCOUNT_CACHE_SIZE);
+    if (s->l2_table_cache == NULL || s->refcount_block_cache == NULL) {
+        error_setg(errp, "Could not allocate metadata caches");
+        ret = -ENOMEM;
+        goto fail;
+    }
 
     s->cluster_cache = g_malloc(s->cluster_size);
     /* one more sector for decompressed data alignment */
-    s->cluster_data = qemu_blockalign(bs, QCOW_MAX_CRYPT_CLUSTERS * s->cluster_size
-                                  + 512);
+    s->cluster_data = qemu_try_blockalign(bs->file, QCOW_MAX_CRYPT_CLUSTERS
+                                                    * s->cluster_size + 512);
+    if (s->cluster_data == NULL) {
+        error_setg(errp, "Could not allocate temporary cluster buffer");
+        ret = -ENOMEM;
+        goto fail;
+    }
+
     s->cluster_cache_offset = -1;
     s->flags = flags;
 
@@ -841,7 +868,7 @@ static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
     cleanup_unknown_header_ext(bs);
     qcow2_free_snapshots(bs);
     qcow2_refcount_close(bs);
-    g_free(s->l1_table);
+    qemu_vfree(s->l1_table);
     /* else pre-write overlap checks in cache_destroy may crash */
     s->l1_table = NULL;
     if (s->l2_table_cache) {
@@ -855,13 +882,11 @@ static int qcow2_open(BlockDriverState *bs, QDict *options, int flags,
     return ret;
 }
 
-static int qcow2_refresh_limits(BlockDriverState *bs)
+static void qcow2_refresh_limits(BlockDriverState *bs, Error **errp)
 {
     BDRVQcowState *s = bs->opaque;
 
     bs->bl.write_zeroes_alignment = s->cluster_sectors;
-
-    return 0;
 }
 
 static int qcow2_set_key(BlockDriverState *bs, const char *key)
@@ -1020,11 +1045,20 @@ static coroutine_fn int qcow2_co_readv(BlockDriverState *bs, int64_t sector_num,
                 n1 = qcow2_backing_read1(bs->backing_hd, &hd_qiov,
                     sector_num, cur_nr_sectors);
                 if (n1 > 0) {
+                    QEMUIOVector local_qiov;
+
+                    qemu_iovec_init(&local_qiov, hd_qiov.niov);
+                    qemu_iovec_concat(&local_qiov, &hd_qiov, 0,
+                                      n1 * BDRV_SECTOR_SIZE);
+
                     BLKDBG_EVENT(bs->file, BLKDBG_READ_BACKING_AIO);
                     qemu_co_mutex_unlock(&s->lock);
                     ret = bdrv_co_readv(bs->backing_hd, sector_num,
-                                        n1, &hd_qiov);
+                                        n1, &local_qiov);
                     qemu_co_mutex_lock(&s->lock);
+
+                    qemu_iovec_destroy(&local_qiov);
+
                     if (ret < 0) {
                         goto fail;
                     }
@@ -1064,7 +1098,12 @@ static coroutine_fn int qcow2_co_readv(BlockDriverState *bs, int64_t sector_num,
                  */
                 if (!cluster_data) {
                     cluster_data =
-                        qemu_blockalign(bs, QCOW_MAX_CRYPT_CLUSTERS * s->cluster_size);
+                        qemu_try_blockalign(bs->file, QCOW_MAX_CRYPT_CLUSTERS
+                                                      * s->cluster_size);
+                    if (cluster_data == NULL) {
+                        ret = -ENOMEM;
+                        goto fail;
+                    }
                 }
 
                 assert(cur_nr_sectors <=
@@ -1164,8 +1203,13 @@ static coroutine_fn int qcow2_co_writev(BlockDriverState *bs,
 
         if (s->crypt_method) {
             if (!cluster_data) {
-                cluster_data = qemu_blockalign(bs, QCOW_MAX_CRYPT_CLUSTERS *
-                                                 s->cluster_size);
+                cluster_data = qemu_try_blockalign(bs->file,
+                                                   QCOW_MAX_CRYPT_CLUSTERS
+                                                   * s->cluster_size);
+                if (cluster_data == NULL) {
+                    ret = -ENOMEM;
+                    goto fail;
+                }
             }
 
             assert(hd_qiov.size <=
@@ -1252,7 +1296,7 @@ fail:
 static void qcow2_close(BlockDriverState *bs)
 {
     BDRVQcowState *s = bs->opaque;
-    g_free(s->l1_table);
+    qemu_vfree(s->l1_table);
     /* else pre-write overlap checks in cache_destroy may crash */
     s->l1_table = NULL;
 
@@ -1539,7 +1583,7 @@ static int preallocate(BlockDriverState *bs)
     int ret;
     QCowL2Meta *meta;
 
-    nb_sectors = bdrv_getlength(bs) >> BDRV_SECTOR_BITS;
+    nb_sectors = bdrv_nb_sectors(bs);
     offset = 0;
 
     while (nb_sectors) {
@@ -1929,7 +1973,6 @@ static int qcow2_write_compressed(BlockDriverState *bs, int64_t sector_num,
         /* align end of file to a sector boundary to ease reading with
            sector based I/Os */
         cluster_offset = bdrv_getlength(bs->file);
-        cluster_offset = (cluster_offset + 511) & ~511;
         bdrv_truncate(bs->file, cluster_offset);
         return 0;
     }
