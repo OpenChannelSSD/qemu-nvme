@@ -91,6 +91,7 @@
  * interface.
  */
 
+#include <block/block_int.h>
 #include <block/qapi.h>
 #include <hw/block/block.h>
 #include <hw/hw.h>
@@ -1501,16 +1502,14 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     uint32_t trans_len;
     time_t current_seconds;
     NvmeSmartLog smart;
-    //BlockStats *s = bdrv_query_stats(n->conf.bs);
 
     trans_len = MIN(sizeof(smart), buf_len);
     memset(&smart, 0x0, sizeof(smart));
-    //smart.data_units_read[0] = cpu_to_le64(s->stats->rd_bytes);
-    //smart.data_units_written[0] = cpu_to_le64(s->stats->wr_bytes);
-    //smart.host_read_commands[0] = cpu_to_le64(s->stats->rd_operations);
-    //smart.host_write_commands[0] = cpu_to_le64(s->stats->wr_operations);
+    smart.data_units_read[0] = cpu_to_le64(n->conf.bs->nr_bytes[BDRV_ACCT_READ]);
+    smart.data_units_written[0] = cpu_to_le64(n->conf.bs->nr_bytes[BDRV_ACCT_WRITE]);
+    smart.host_read_commands[0] = cpu_to_le64(n->conf.bs->nr_ops[BDRV_ACCT_READ]);
+    smart.host_write_commands[0] = cpu_to_le64(n->conf.bs->nr_ops[BDRV_ACCT_WRITE]);
 
-    //g_free(s);
     smart.number_of_error_log_entries[0] = cpu_to_le64(n->num_errors);
     smart.temperature[0] = n->temperature & 0xff;
     smart.temperature[1] = (n->temperature >> 8) & 0xff;
