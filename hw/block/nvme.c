@@ -93,6 +93,7 @@
 
 #include <block/block_int.h>
 #include <block/qapi.h>
+#include <exec/memory.h>
 #include <hw/block/block.h>
 #include <hw/hw.h>
 #include <hw/pci/msix.h>
@@ -333,12 +334,21 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
 }
 
+static void nvme_update_cq_head(NvmeCQueue *cq)
+{
+    if (cq->db_addr) {
+        pci_dma_read(&cq->ctrl->parent_obj, cq->db_addr,
+                     &cq->head, sizeof(cq->head));
+    }
+}
+
 static void nvme_post_cqes(void *opaque)
 {
     NvmeCQueue *cq = opaque;
     NvmeRequest *req, *next;
 
     QTAILQ_FOREACH_SAFE(req, &cq->req_list, entry, next) {
+        nvme_update_cq_head(cq);
         if (nvme_cq_full(cq)) {
             break;
         }
@@ -1171,6 +1181,8 @@ static uint16_t nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
         break;
     }
     sq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_process_sq, sq);
+    sq->db_addr = 0;
+    sq->eventidx_addr = 0;
 
     assert(n->cq[cqid]);
     cq = n->cq[cqid];
@@ -1274,6 +1286,8 @@ static uint16_t nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
 
     QTAILQ_INIT(&cq->req_list);
     QTAILQ_INIT(&cq->sq_list);
+    cq->db_addr = 0;
+    cq->eventidx_addr = 0;
     msix_vector_use(&n->parent_obj, cq->vector);
     n->cq[cqid] = cq;
     cq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_isr_notify, cq);
@@ -1706,6 +1720,40 @@ static uint16_t nvme_format(NvmeCtrl *n, NvmeCmd *cmd)
         sec_erase);
 }
 
+static uint16_t nvme_set_db_memory(NvmeCtrl *n, const NvmeCmd *cmd)
+{
+    uint64_t db_addr = le64_to_cpu(cmd->prp1);
+    uint64_t eventidx_addr = le64_to_cpu(cmd->prp2);
+    int i;
+
+    /* Addresses should not be NULL and should be page aligned. */
+    if (db_addr == 0 || db_addr & (n->page_size - 1) ||
+        eventidx_addr == 0 || eventidx_addr & (n->page_size - 1)) {
+        return NVME_INVALID_MEMORY_ADDRESS | NVME_DNR;
+    }
+
+    /* This assumes all I/O queues are created before this command is handled.
+     * We skip the admin queues. */
+    for (i = 1; i < n->num_queues; i++) {
+        NvmeSQueue *sq = n->sq[i];
+        NvmeCQueue *cq = n->cq[i];
+
+        if (sq != NULL) {
+            /* Submission queue tail pointer location, 2 * QID * stride. */
+            sq->db_addr = db_addr + 2 * i * 4;
+            sq->eventidx_addr = eventidx_addr + 2 * i * 4;
+        }
+
+        if (cq != NULL) {
+            /* Completion queue head pointer location, (2 * QID + 1) * stride.
+             */
+            cq->db_addr = db_addr + (2 * i + 1) * 4;
+            cq->eventidx_addr = eventidx_addr + (2 * i + 1) * 4;
+        }
+    }
+    return NVME_SUCCESS;
+}
+
 static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     switch (cmd->opcode) {
@@ -1734,12 +1782,30 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             return nvme_format(n, cmd);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
+    case NVME_ADM_CMD_SET_DB_MEMORY:
+        return nvme_set_db_memory(n, cmd);
     case NVME_ADM_CMD_ACTIVATE_FW:
     case NVME_ADM_CMD_DOWNLOAD_FW:
     case NVME_ADM_CMD_SECURITY_SEND:
     case NVME_ADM_CMD_SECURITY_RECV:
     default:
         return NVME_INVALID_OPCODE | NVME_DNR;
+    }
+}
+
+static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
+{
+    if (sq->eventidx_addr) {
+        pci_dma_write(&sq->ctrl->parent_obj, sq->eventidx_addr,
+                      &sq->tail, sizeof(sq->tail));
+    }
+}
+
+static void nvme_update_sq_tail(NvmeSQueue *sq)
+{
+    if (sq->db_addr) {
+        pci_dma_read(&sq->ctrl->parent_obj, sq->db_addr,
+                     &sq->tail, sizeof(sq->tail));
     }
 }
 
@@ -1755,6 +1821,7 @@ static void nvme_process_sq(void *opaque)
     NvmeRequest *req;
     int processed = 0;
 
+    nvme_update_sq_tail(sq);
     while (!(nvme_sq_empty(sq) || QTAILQ_EMPTY(&sq->req_list)) &&
             processed++ < sq->arb_burst) {
         if (sq->phys_contig) {
@@ -1784,6 +1851,8 @@ static void nvme_process_sq(void *opaque)
             nvme_enqueue_req_completion(cq, req);
         }
     }
+    nvme_update_sq_eventidx(sq);
+    nvme_update_sq_tail(sq);
 
     sq->completed += processed;
     if (!nvme_sq_empty(sq)) {
@@ -1954,7 +2023,12 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
         }
 
         start_sqs = nvme_cq_full(cq) ? true : false;
-        cq->head = new_val;
+
+        /* When the mapped pointer memory area is setup, we don't rely on
+         * the MMIO written values to update the head pointer. */
+        if (!cq->db_addr) {
+            cq->head = new_val;
+        }
         if (start_sqs) {
             QTAILQ_FOREACH(sq, &cq->sq_list, entry) {
                 if (!timer_pending(sq->timer)) {
@@ -1981,7 +2055,11 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
             return;
         }
 
-        sq->tail = new_val;
+        /* When the mapped pointer memory area is setup, we don't rely on
+         * the MMIO written values to update the tail pointer. */
+        if (!sq->db_addr) {
+            sq->tail = new_val;
+        }
         if (!timer_pending(sq->timer)) {
             timer_mod(sq->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 500);
         }
@@ -2157,6 +2235,8 @@ static void nvme_init_pci(NvmeCtrl *n)
 
     pci_conf[PCI_INTERRUPT_PIN] = 1;
     pci_config_set_prog_interface(pci_conf, 0x2);
+    pci_config_set_vendor_id(pci_conf, n->vid);
+    pci_config_set_device_id(pci_conf, n->did);
     pci_config_set_class(pci_conf, PCI_CLASS_STORAGE_EXPRESS);
     pcie_endpoint_cap_init(&n->parent_obj, 0x80);
 
@@ -2247,6 +2327,8 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("meta", NvmeCtrl, meta, 0),
     DEFINE_PROP_UINT16("oacs", NvmeCtrl, oacs, NVME_OACS_FORMAT),
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),
+    DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, PCI_VENDOR_ID_INTEL),
+    DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x5845),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -2264,8 +2346,6 @@ static void nvme_class_init(ObjectClass *oc, void *data)
     pc->exit = nvme_exit;
     pc->class_id = PCI_CLASS_STORAGE_EXPRESS;
     pc->vendor_id = PCI_VENDOR_ID_INTEL;
-    pc->device_id = 0x5845;
-    pc->revision = 1;
     pc->is_express = 1;
 
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);

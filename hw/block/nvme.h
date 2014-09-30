@@ -170,6 +170,7 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_FORMAT_NVM     = 0x80,
     NVME_ADM_CMD_SECURITY_SEND  = 0x81,
     NVME_ADM_CMD_SECURITY_RECV  = 0x82,
+    NVME_ADM_CMD_SET_DB_MEMORY  = 0xC0,  /* Vendor specific. */
 };
 
 enum NvmeIoCommands {
@@ -382,6 +383,7 @@ enum NvmeStatusCodes {
     NVME_CONFLICTING_ATTRS      = 0x0180,
     NVME_INVALID_PROT_INFO      = 0x0181,
     NVME_WRITE_TO_RO            = 0x0182,
+    NVME_INVALID_MEMORY_ADDRESS = 0x01C0,  /* Vendor extension. */
     NVME_WRITE_FAULT            = 0x0280,
     NVME_UNRECOVERED_READ       = 0x0281,
     NVME_E2E_GUARD_ERROR        = 0x0282,
@@ -670,6 +672,13 @@ typedef struct NvmeSQueue {
     QTAILQ_HEAD(sq_req_list, NvmeRequest) req_list;
     QTAILQ_HEAD(out_req_list, NvmeRequest) out_req_list;
     QTAILQ_ENTRY(NvmeSQueue) entry;
+    /* Mapped memory location where the tail pointer is stored by the guest
+     * without triggering MMIO exits. */
+    uint64_t    db_addr;
+    /* virtio-like eventidx pointer, guest updates to the tail pointer that
+     * do not go over this value will not result in MMIO writes (but will
+     * still write the tail pointer to the "db_addr" location above). */
+    uint64_t    eventidx_addr;
 } NvmeSQueue;
 
 typedef struct NvmeCQueue {
@@ -687,6 +696,13 @@ typedef struct NvmeCQueue {
     QEMUTimer   *timer;
     QTAILQ_HEAD(sq_list, NvmeSQueue) sq_list;
     QTAILQ_HEAD(cq_req_list, NvmeRequest) req_list;
+    /* Mapped memory location where the head pointer is stored by the guest
+     * without triggering MMIO exits. */
+    uint64_t    db_addr;
+    /* virtio-like eventidx pointer, guest updates to the head pointer that
+     * do not go over this value will not result in MMIO writes (but will
+     * still write the head pointer to the "db_addr" location above). */
+    uint64_t    eventidx_addr;
 } NvmeCQueue;
 
 typedef struct NvmeNamespace {
@@ -751,6 +767,8 @@ typedef struct NvmeCtrl {
     uint8_t     temp_warn_issued;
     uint8_t     num_errors;
     uint8_t     cqes_pending;
+    uint16_t    vid;
+    uint16_t    did;
 
     char            *serial;
     NvmeErrorLog    *elpes;
