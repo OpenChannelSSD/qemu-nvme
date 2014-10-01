@@ -148,8 +148,17 @@ static void nvme_inc_sq_head(NvmeSQueue *sq)
     sq->head = (sq->head + 1) % sq->size;
 }
 
+static void nvme_update_cq_head(NvmeCQueue *cq)
+{
+    if (cq->db_addr) {
+        pci_dma_read(&cq->ctrl->parent_obj, cq->db_addr, &cq->head,
+            sizeof(cq->head));
+    }
+}
+
 static uint8_t nvme_cq_full(NvmeCQueue *cq)
 {
+    nvme_update_cq_head(cq);
     return (cq->tail + 1) % cq->size == cq->head;
 }
 
@@ -334,21 +343,12 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
 }
 
-static void nvme_update_cq_head(NvmeCQueue *cq)
-{
-    if (cq->db_addr) {
-        pci_dma_read(&cq->ctrl->parent_obj, cq->db_addr,
-                     &cq->head, sizeof(cq->head));
-    }
-}
-
 static void nvme_post_cqes(void *opaque)
 {
     NvmeCQueue *cq = opaque;
     NvmeRequest *req, *next;
 
     QTAILQ_FOREACH_SAFE(req, &cq->req_list, entry, next) {
-        nvme_update_cq_head(cq);
         if (nvme_cq_full(cq)) {
             break;
         }
@@ -1738,17 +1738,17 @@ static uint16_t nvme_set_db_memory(NvmeCtrl *n, const NvmeCmd *cmd)
         NvmeSQueue *sq = n->sq[i];
         NvmeCQueue *cq = n->cq[i];
 
-        if (sq != NULL) {
+        if (sq) {
             /* Submission queue tail pointer location, 2 * QID * stride. */
-            sq->db_addr = db_addr + 2 * i * 4;
-            sq->eventidx_addr = eventidx_addr + 2 * i * 4;
+            sq->db_addr = db_addr + 2 * i * (1 << (2  + n->db_stride));
+            sq->eventidx_addr = eventidx_addr + 2 * i *
+						(1 << (2 + n->db_stride));
         }
-
-        if (cq != NULL) {
-            /* Completion queue head pointer location, (2 * QID + 1) * stride.
-             */
-            cq->db_addr = db_addr + (2 * i + 1) * 4;
-            cq->eventidx_addr = eventidx_addr + (2 * i + 1) * 4;
+        if (cq) {
+            /* Completion queue head pointer location, (2 * QID + 1) * stride. */
+            cq->db_addr = db_addr + (2 * i + 1) * (1 << (2 + n->db_stride));
+            cq->eventidx_addr = eventidx_addr + (2 * i + 1) *
+						(1 << (2 + n->db_stride));
         }
     }
     return NVME_SUCCESS;
