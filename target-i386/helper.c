@@ -615,8 +615,8 @@ int x86_cpu_handle_mmu_fault(CPUState *cs, vaddr addr,
             if (!(pdpe & PG_PRESENT_MASK)) {
                 goto do_fault;
             }
-            rsvd_mask |= PG_HI_USER_MASK | PG_NX_MASK;
-            if (pdpe & rsvd_mask) {
+            rsvd_mask |= PG_HI_USER_MASK;
+            if (pdpe & (rsvd_mask | PG_NX_MASK)) {
                 goto do_fault_rsvd;
             }
             ptep = PG_NX_MASK | PG_USER_MASK | PG_RW_MASK;
@@ -1011,9 +1011,10 @@ bool check_hw_breakpoints(CPUX86State *env, bool force_dr6_update)
     return hit_enabled;
 }
 
-void breakpoint_handler(CPUX86State *env)
+void breakpoint_handler(CPUState *cs)
 {
-    CPUState *cs = CPU(x86_env_get_cpu(env));
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
     CPUBreakpoint *bp;
 
     if (cs->watchpoint_hit) {
@@ -1261,3 +1262,24 @@ void do_cpu_sipi(X86CPU *cpu)
 {
 }
 #endif
+
+/* Frob eflags into and out of the CPU temporary format.  */
+
+void x86_cpu_exec_enter(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+
+    CC_SRC = env->eflags & (CC_O | CC_S | CC_Z | CC_A | CC_P | CC_C);
+    env->df = 1 - (2 * ((env->eflags >> 10) & 1));
+    CC_OP = CC_OP_EFLAGS;
+    env->eflags &= ~(DF_MASK | CC_O | CC_S | CC_Z | CC_A | CC_P | CC_C);
+}
+
+void x86_cpu_exec_exit(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+
+    env->eflags = cpu_compute_eflags(env);
+}

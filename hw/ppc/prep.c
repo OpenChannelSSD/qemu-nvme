@@ -38,7 +38,7 @@
 #include "hw/loader.h"
 #include "hw/timer/mc146818rtc.h"
 #include "hw/isa/pc87312.h"
-#include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "sysemu/arch_init.h"
 #include "sysemu/qtest.h"
 #include "exec/address-spaces.h"
@@ -519,7 +519,7 @@ static void ppc_prep_init(MachineState *machine)
         }
     }
 
-    ide_drive_get(hd, MAX_IDE_BUS);
+    ide_drive_get(hd, ARRAY_SIZE(hd));
     for(i = 0; i < MAX_IDE_BUS; i++) {
         isa_ide_init(isa_bus, ide_iobase[i], ide_iobase2[i], ide_irq[i],
                      hd[2 * i],

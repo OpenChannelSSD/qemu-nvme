@@ -33,6 +33,7 @@ do { printf("scsi-disk: " fmt , ## __VA_ARGS__); } while (0)
 #include "hw/scsi/scsi.h"
 #include "block/scsi.h"
 #include "sysemu/sysemu.h"
+#include "sysemu/block-backend.h"
 #include "sysemu/blockdev.h"
 #include "hw/block/block.h"
 #include "sysemu/dma.h"
@@ -105,30 +106,13 @@ static void scsi_check_condition(SCSIDiskReq *r, SCSISense sense)
     scsi_req_complete(&r->req, CHECK_CONDITION);
 }
 
-/* Cancel a pending data transfer.  */
-static void scsi_cancel_io(SCSIRequest *req)
-{
-    SCSIDiskReq *r = DO_UPCAST(SCSIDiskReq, req, req);
-
-    DPRINTF("Cancel tag=0x%x\n", req->tag);
-    if (r->req.aiocb) {
-        bdrv_aio_cancel(r->req.aiocb);
-
-        /* This reference was left in by scsi_*_data.  We take ownership of
-         * it the moment scsi_req_cancel is called, independent of whether
-         * bdrv_aio_cancel completes the request or not.  */
-        scsi_req_unref(&r->req);
-    }
-    r->req.aiocb = NULL;
-}
-
 static uint32_t scsi_init_iovec(SCSIDiskReq *r, size_t size)
 {
     SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, r->req.dev);
 
     if (!r->iov.iov_base) {
         r->buflen = size;
-        r->iov.iov_base = qemu_blockalign(s->qdev.conf.bs, r->buflen);
+        r->iov.iov_base = blk_blockalign(s->qdev.conf.blk, r->buflen);
     }
     r->iov.iov_len = MIN(r->sector_count * 512, r->buflen);
     qemu_iovec_init_external(&r->qiov, &r->iov, 1);
@@ -183,8 +167,9 @@ static void scsi_aio_complete(void *opaque, int ret)
 
     assert(r->req.aiocb != NULL);
     r->req.aiocb = NULL;
-    bdrv_acct_done(s->qdev.conf.bs, &r->acct);
+    block_acct_done(blk_get_stats(s->qdev.conf.blk), &r->acct);
     if (r->req.io_canceled) {
+        scsi_req_cancel_complete(&r->req);
         goto done;
     }
 
@@ -197,9 +182,7 @@ static void scsi_aio_complete(void *opaque, int ret)
     scsi_req_complete(&r->req, GOOD);
 
 done:
-    if (!r->req.io_canceled) {
-        scsi_req_unref(&r->req);
-    }
+    scsi_req_unref(&r->req);
 }
 
 static bool scsi_is_cmd_fua(SCSICommand *cmd)
@@ -233,21 +216,21 @@ static void scsi_write_do_fua(SCSIDiskReq *r)
     SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, r->req.dev);
 
     if (r->req.io_canceled) {
+        scsi_req_cancel_complete(&r->req);
         goto done;
     }
 
     if (scsi_is_cmd_fua(&r->req.cmd)) {
-        bdrv_acct_start(s->qdev.conf.bs, &r->acct, 0, BDRV_ACCT_FLUSH);
-        r->req.aiocb = bdrv_aio_flush(s->qdev.conf.bs, scsi_aio_complete, r);
+        block_acct_start(blk_get_stats(s->qdev.conf.blk), &r->acct, 0,
+                         BLOCK_ACCT_FLUSH);
+        r->req.aiocb = blk_aio_flush(s->qdev.conf.blk, scsi_aio_complete, r);
         return;
     }
 
     scsi_req_complete(&r->req, GOOD);
 
 done:
-    if (!r->req.io_canceled) {
-        scsi_req_unref(&r->req);
-    }
+    scsi_req_unref(&r->req);
 }
 
 static void scsi_dma_complete_noio(void *opaque, int ret)
@@ -257,9 +240,10 @@ static void scsi_dma_complete_noio(void *opaque, int ret)
 
     if (r->req.aiocb != NULL) {
         r->req.aiocb = NULL;
-        bdrv_acct_done(s->qdev.conf.bs, &r->acct);
+        block_acct_done(blk_get_stats(s->qdev.conf.blk), &r->acct);
     }
     if (r->req.io_canceled) {
+        scsi_req_cancel_complete(&r->req);
         goto done;
     }
 
@@ -279,9 +263,7 @@ static void scsi_dma_complete_noio(void *opaque, int ret)
     }
 
 done:
-    if (!r->req.io_canceled) {
-        scsi_req_unref(&r->req);
-    }
+    scsi_req_unref(&r->req);
 }
 
 static void scsi_dma_complete(void *opaque, int ret)
@@ -300,8 +282,9 @@ static void scsi_read_complete(void * opaque, int ret)
 
     assert(r->req.aiocb != NULL);
     r->req.aiocb = NULL;
-    bdrv_acct_done(s->qdev.conf.bs, &r->acct);
+    block_acct_done(blk_get_stats(s->qdev.conf.blk), &r->acct);
     if (r->req.io_canceled) {
+        scsi_req_cancel_complete(&r->req);
         goto done;
     }
 
@@ -319,9 +302,7 @@ static void scsi_read_complete(void * opaque, int ret)
     scsi_req_data(&r->req, r->qiov.size);
 
 done:
-    if (!r->req.io_canceled) {
-        scsi_req_unref(&r->req);
-    }
+    scsi_req_unref(&r->req);
 }
 
 /* Actually issue a read to the block device.  */
@@ -333,9 +314,10 @@ static void scsi_do_read(void *opaque, int ret)
 
     if (r->req.aiocb != NULL) {
         r->req.aiocb = NULL;
-        bdrv_acct_done(s->qdev.conf.bs, &r->acct);
+        block_acct_done(blk_get_stats(s->qdev.conf.blk), &r->acct);
     }
     if (r->req.io_canceled) {
+        scsi_req_cancel_complete(&r->req);
         goto done;
     }
 
@@ -349,21 +331,20 @@ static void scsi_do_read(void *opaque, int ret)
     scsi_req_ref(&r->req);
 
     if (r->req.sg) {
-        dma_acct_start(s->qdev.conf.bs, &r->acct, r->req.sg, BDRV_ACCT_READ);
+        dma_acct_start(s->qdev.conf.blk, &r->acct, r->req.sg, BLOCK_ACCT_READ);
         r->req.resid -= r->req.sg->size;
-        r->req.aiocb = dma_bdrv_read(s->qdev.conf.bs, r->req.sg, r->sector,
-                                     scsi_dma_complete, r);
+        r->req.aiocb = dma_blk_read(s->qdev.conf.blk, r->req.sg, r->sector,
+                                    scsi_dma_complete, r);
     } else {
         n = scsi_init_iovec(r, SCSI_DMA_BUF_SIZE);
-        bdrv_acct_start(s->qdev.conf.bs, &r->acct, n * BDRV_SECTOR_SIZE, BDRV_ACCT_READ);
-        r->req.aiocb = bdrv_aio_readv(s->qdev.conf.bs, r->sector, &r->qiov, n,
-                                      scsi_read_complete, r);
+        block_acct_start(blk_get_stats(s->qdev.conf.blk), &r->acct,
+                         n * BDRV_SECTOR_SIZE, BLOCK_ACCT_READ);
+        r->req.aiocb = blk_aio_readv(s->qdev.conf.blk, r->sector, &r->qiov, n,
+                                     scsi_read_complete, r);
     }
 
 done:
-    if (!r->req.io_canceled) {
-        scsi_req_unref(&r->req);
-    }
+    scsi_req_unref(&r->req);
 }
 
 /* Read more data from scsi device into buffer.  */
@@ -399,8 +380,9 @@ static void scsi_read_data(SCSIRequest *req)
     first = !r->started;
     r->started = true;
     if (first && scsi_is_cmd_fua(&r->req.cmd)) {
-        bdrv_acct_start(s->qdev.conf.bs, &r->acct, 0, BDRV_ACCT_FLUSH);
-        r->req.aiocb = bdrv_aio_flush(s->qdev.conf.bs, scsi_do_read, r);
+        block_acct_start(blk_get_stats(s->qdev.conf.blk), &r->acct, 0,
+                         BLOCK_ACCT_FLUSH);
+        r->req.aiocb = blk_aio_flush(s->qdev.conf.blk, scsi_do_read, r);
     } else {
         scsi_do_read(r, 0);
     }
@@ -417,7 +399,8 @@ static int scsi_handle_rw_error(SCSIDiskReq *r, int error)
 {
     bool is_read = (r->req.cmd.xfer == SCSI_XFER_FROM_DEV);
     SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, r->req.dev);
-    BlockErrorAction action = bdrv_get_error_action(s->qdev.conf.bs, is_read, error);
+    BlockErrorAction action = blk_get_error_action(s->qdev.conf.blk,
+                                                   is_read, error);
 
     if (action == BLOCK_ERROR_ACTION_REPORT) {
         switch (error) {
@@ -438,7 +421,7 @@ static int scsi_handle_rw_error(SCSIDiskReq *r, int error)
             break;
         }
     }
-    bdrv_error_action(s->qdev.conf.bs, action, is_read, error);
+    blk_error_action(s->qdev.conf.blk, action, is_read, error);
     if (action == BLOCK_ERROR_ACTION_STOP) {
         scsi_req_retry(&r->req);
     }
@@ -453,9 +436,10 @@ static void scsi_write_complete(void * opaque, int ret)
 
     if (r->req.aiocb != NULL) {
         r->req.aiocb = NULL;
-        bdrv_acct_done(s->qdev.conf.bs, &r->acct);
+        block_acct_done(blk_get_stats(s->qdev.conf.blk), &r->acct);
     }
     if (r->req.io_canceled) {
+        scsi_req_cancel_complete(&r->req);
         goto done;
     }
 
@@ -478,9 +462,7 @@ static void scsi_write_complete(void * opaque, int ret)
     }
 
 done:
-    if (!r->req.io_canceled) {
-        scsi_req_unref(&r->req);
-    }
+    scsi_req_unref(&r->req);
 }
 
 static void scsi_write_data(SCSIRequest *req)
@@ -522,15 +504,16 @@ static void scsi_write_data(SCSIRequest *req)
     }
 
     if (r->req.sg) {
-        dma_acct_start(s->qdev.conf.bs, &r->acct, r->req.sg, BDRV_ACCT_WRITE);
+        dma_acct_start(s->qdev.conf.blk, &r->acct, r->req.sg, BLOCK_ACCT_WRITE);
         r->req.resid -= r->req.sg->size;
-        r->req.aiocb = dma_bdrv_write(s->qdev.conf.bs, r->req.sg, r->sector,
-                                      scsi_dma_complete, r);
+        r->req.aiocb = dma_blk_write(s->qdev.conf.blk, r->req.sg, r->sector,
+                                     scsi_dma_complete, r);
     } else {
         n = r->qiov.size / 512;
-        bdrv_acct_start(s->qdev.conf.bs, &r->acct, n * BDRV_SECTOR_SIZE, BDRV_ACCT_WRITE);
-        r->req.aiocb = bdrv_aio_writev(s->qdev.conf.bs, r->sector, &r->qiov, n,
-                                       scsi_write_complete, r);
+        block_acct_start(blk_get_stats(s->qdev.conf.blk), &r->acct,
+                         n * BDRV_SECTOR_SIZE, BLOCK_ACCT_WRITE);
+        r->req.aiocb = blk_aio_writev(s->qdev.conf.blk, r->sector, &r->qiov, n,
+                                      scsi_write_complete, r);
     }
 }
 
@@ -597,7 +580,7 @@ static int scsi_disk_emulate_inquiry(SCSIRequest *req, uint8_t *outbuf)
 
         case 0x83: /* Device identification page, mandatory */
         {
-            const char *str = s->serial ?: bdrv_get_device_name(s->qdev.conf.bs);
+            const char *str = s->serial ?: blk_name(s->qdev.conf.blk);
             int max_len = s->serial ? 20 : 255 - 8;
             int id_len = strlen(str);
 
@@ -758,10 +741,10 @@ static inline bool media_is_dvd(SCSIDiskState *s)
     if (s->qdev.type != TYPE_ROM) {
         return false;
     }
-    if (!bdrv_is_inserted(s->qdev.conf.bs)) {
+    if (!blk_is_inserted(s->qdev.conf.blk)) {
         return false;
     }
-    bdrv_get_geometry(s->qdev.conf.bs, &nb_sectors);
+    blk_get_geometry(s->qdev.conf.blk, &nb_sectors);
     return nb_sectors > CD_MAX_SECTORS;
 }
 
@@ -771,10 +754,10 @@ static inline bool media_is_cd(SCSIDiskState *s)
     if (s->qdev.type != TYPE_ROM) {
         return false;
     }
-    if (!bdrv_is_inserted(s->qdev.conf.bs)) {
+    if (!blk_is_inserted(s->qdev.conf.blk)) {
         return false;
     }
-    bdrv_get_geometry(s->qdev.conf.bs, &nb_sectors);
+    blk_get_geometry(s->qdev.conf.blk, &nb_sectors);
     return nb_sectors <= CD_MAX_SECTORS;
 }
 
@@ -835,7 +818,7 @@ static int scsi_read_dvd_structure(SCSIDiskState *s, SCSIDiskReq *r,
     }
 
     if (format != 0xff) {
-        if (s->tray_open || !bdrv_is_inserted(s->qdev.conf.bs)) {
+        if (s->tray_open || !blk_is_inserted(s->qdev.conf.blk)) {
             scsi_check_condition(r, SENSE_CODE(NO_MEDIUM));
             return -1;
         }
@@ -857,7 +840,7 @@ static int scsi_read_dvd_structure(SCSIDiskState *s, SCSIDiskReq *r,
         if (layer != 0) {
             goto fail;
         }
-        bdrv_get_geometry(s->qdev.conf.bs, &nb_sectors);
+        blk_get_geometry(s->qdev.conf.blk, &nb_sectors);
 
         outbuf[4] = 1;   /* DVD-ROM, part version 1 */
         outbuf[5] = 0xf; /* 120mm disc, minimum rate unspecified */
@@ -912,7 +895,7 @@ static int scsi_event_status_media(SCSIDiskState *s, uint8_t *outbuf)
     media_status = 0;
     if (s->tray_open) {
         media_status = MS_TRAY_OPEN;
-    } else if (bdrv_is_inserted(s->qdev.conf.bs)) {
+    } else if (blk_is_inserted(s->qdev.conf.blk)) {
         media_status = MS_MEDIA_PRESENT;
     }
 
@@ -1110,7 +1093,7 @@ static int mode_sense_page(SCSIDiskState *s, int page, uint8_t **p_outbuf,
     case MODE_PAGE_CACHING:
         length = 0x12;
         if (page_control == 1 || /* Changeable Values */
-            bdrv_enable_write_cache(s->qdev.conf.bs)) {
+            blk_enable_write_cache(s->qdev.conf.blk)) {
             p[0] = 4; /* WCE */
         }
         break;
@@ -1191,7 +1174,7 @@ static int scsi_disk_emulate_mode_sense(SCSIDiskReq *r, uint8_t *outbuf)
 
     if (s->qdev.type == TYPE_DISK) {
         dev_specific_param = s->features & (1 << SCSI_DISK_F_DPOFUA) ? 0x10 : 0;
-        if (bdrv_is_read_only(s->qdev.conf.bs)) {
+        if (blk_is_read_only(s->qdev.conf.blk)) {
             dev_specific_param |= 0x80; /* Readonly.  */
         }
     } else {
@@ -1213,7 +1196,7 @@ static int scsi_disk_emulate_mode_sense(SCSIDiskReq *r, uint8_t *outbuf)
         p += 8;
     }
 
-    bdrv_get_geometry(s->qdev.conf.bs, &nb_sectors);
+    blk_get_geometry(s->qdev.conf.blk, &nb_sectors);
     if (!dbd && nb_sectors) {
         if (r->req.cmd.buf[0] == MODE_SENSE) {
             outbuf[3] = 8; /* Block descriptor length  */
@@ -1276,7 +1259,7 @@ static int scsi_disk_emulate_read_toc(SCSIRequest *req, uint8_t *outbuf)
     msf = req->cmd.buf[1] & 2;
     format = req->cmd.buf[2] & 0xf;
     start_track = req->cmd.buf[6];
-    bdrv_get_geometry(s->qdev.conf.bs, &nb_sectors);
+    blk_get_geometry(s->qdev.conf.blk, &nb_sectors);
     DPRINTF("Read TOC (track %d format %d msf %d)\n", start_track, format, msf >> 1);
     nb_sectors /= s->qdev.blocksize / 512;
     switch (format) {
@@ -1316,14 +1299,14 @@ static int scsi_disk_emulate_start_stop(SCSIDiskReq *r)
     if ((s->features & (1 << SCSI_DISK_F_REMOVABLE)) && loej) {
         if (!start && !s->tray_open && s->tray_locked) {
             scsi_check_condition(r,
-                                 bdrv_is_inserted(s->qdev.conf.bs)
+                                 blk_is_inserted(s->qdev.conf.blk)
                                  ? SENSE_CODE(ILLEGAL_REQ_REMOVAL_PREVENTED)
                                  : SENSE_CODE(NOT_READY_REMOVAL_PREVENTED));
             return -1;
         }
 
         if (s->tray_open != !start) {
-            bdrv_eject(s->qdev.conf.bs, !start);
+            blk_eject(s->qdev.conf.blk, !start);
             s->tray_open = !start;
         }
     }
@@ -1390,7 +1373,7 @@ static void scsi_disk_apply_mode_select(SCSIDiskState *s, int page, uint8_t *p)
 {
     switch (page) {
     case MODE_PAGE_CACHING:
-        bdrv_set_enable_write_cache(s->qdev.conf.bs, (p[0] & 4) != 0);
+        blk_set_enable_write_cache(s->qdev.conf.blk, (p[0] & 4) != 0);
         break;
 
     default:
@@ -1493,11 +1476,12 @@ static void scsi_disk_emulate_mode_select(SCSIDiskReq *r, uint8_t *inbuf)
             return;
         }
     }
-    if (!bdrv_enable_write_cache(s->qdev.conf.bs)) {
+    if (!blk_enable_write_cache(s->qdev.conf.blk)) {
         /* The request is used as the AIO opaque value, so add a ref.  */
         scsi_req_ref(&r->req);
-        bdrv_acct_start(s->qdev.conf.bs, &r->acct, 0, BDRV_ACCT_FLUSH);
-        r->req.aiocb = bdrv_aio_flush(s->qdev.conf.bs, scsi_aio_complete, r);
+        block_acct_start(blk_get_stats(s->qdev.conf.blk), &r->acct, 0,
+                         BLOCK_ACCT_FLUSH);
+        r->req.aiocb = blk_aio_flush(s->qdev.conf.blk, scsi_aio_complete, r);
         return;
     }
 
@@ -1548,6 +1532,7 @@ static void scsi_unmap_complete(void *opaque, int ret)
 
     r->req.aiocb = NULL;
     if (r->req.io_canceled) {
+        scsi_req_cancel_complete(&r->req);
         goto done;
     }
 
@@ -1565,10 +1550,10 @@ static void scsi_unmap_complete(void *opaque, int ret)
             goto done;
         }
 
-        r->req.aiocb = bdrv_aio_discard(s->qdev.conf.bs,
-                                        sector_num * (s->qdev.blocksize / 512),
-                                        nb_sectors * (s->qdev.blocksize / 512),
-                                        scsi_unmap_complete, data);
+        r->req.aiocb = blk_aio_discard(s->qdev.conf.blk,
+                                       sector_num * (s->qdev.blocksize / 512),
+                                       nb_sectors * (s->qdev.blocksize / 512),
+                                       scsi_unmap_complete, data);
         data->count--;
         data->inbuf += 16;
         return;
@@ -1577,9 +1562,7 @@ static void scsi_unmap_complete(void *opaque, int ret)
     scsi_req_complete(&r->req, GOOD);
 
 done:
-    if (!r->req.io_canceled) {
-        scsi_req_unref(&r->req);
-    }
+    scsi_req_unref(&r->req);
     g_free(data);
 }
 
@@ -1608,7 +1591,7 @@ static void scsi_disk_emulate_unmap(SCSIDiskReq *r, uint8_t *inbuf)
         goto invalid_param_len;
     }
 
-    if (bdrv_is_read_only(s->qdev.conf.bs)) {
+    if (blk_is_read_only(s->qdev.conf.blk)) {
         scsi_check_condition(r, SENSE_CODE(WRITE_PROTECTED));
         return;
     }
@@ -1647,8 +1630,9 @@ static void scsi_write_same_complete(void *opaque, int ret)
 
     assert(r->req.aiocb != NULL);
     r->req.aiocb = NULL;
-    bdrv_acct_done(s->qdev.conf.bs, &r->acct);
+    block_acct_done(blk_get_stats(s->qdev.conf.blk), &r->acct);
     if (r->req.io_canceled) {
+        scsi_req_cancel_complete(&r->req);
         goto done;
     }
 
@@ -1662,19 +1646,18 @@ static void scsi_write_same_complete(void *opaque, int ret)
     data->sector += data->iov.iov_len / 512;
     data->iov.iov_len = MIN(data->nb_sectors * 512, data->iov.iov_len);
     if (data->iov.iov_len) {
-        bdrv_acct_start(s->qdev.conf.bs, &r->acct, data->iov.iov_len, BDRV_ACCT_WRITE);
-        r->req.aiocb = bdrv_aio_writev(s->qdev.conf.bs, data->sector,
-                                       &data->qiov, data->iov.iov_len / 512,
-                                       scsi_write_same_complete, data);
+        block_acct_start(blk_get_stats(s->qdev.conf.blk), &r->acct,
+                         data->iov.iov_len, BLOCK_ACCT_WRITE);
+        r->req.aiocb = blk_aio_writev(s->qdev.conf.blk, data->sector,
+                                      &data->qiov, data->iov.iov_len / 512,
+                                      scsi_write_same_complete, data);
         return;
     }
 
     scsi_req_complete(&r->req, GOOD);
 
 done:
-    if (!r->req.io_canceled) {
-        scsi_req_unref(&r->req);
-    }
+    scsi_req_unref(&r->req);
     qemu_vfree(data->iov.iov_base);
     g_free(data);
 }
@@ -1694,7 +1677,7 @@ static void scsi_disk_emulate_write_same(SCSIDiskReq *r, uint8_t *inbuf)
         return;
     }
 
-    if (bdrv_is_read_only(s->qdev.conf.bs)) {
+    if (blk_is_read_only(s->qdev.conf.blk)) {
         scsi_check_condition(r, SENSE_CODE(WRITE_PROTECTED));
         return;
     }
@@ -1708,12 +1691,13 @@ static void scsi_disk_emulate_write_same(SCSIDiskReq *r, uint8_t *inbuf)
 
         /* The request is used as the AIO opaque value, so add a ref.  */
         scsi_req_ref(&r->req);
-        bdrv_acct_start(s->qdev.conf.bs, &r->acct, nb_sectors * s->qdev.blocksize,
-                        BDRV_ACCT_WRITE);
-        r->req.aiocb = bdrv_aio_write_zeroes(s->qdev.conf.bs,
-                                             r->req.cmd.lba * (s->qdev.blocksize / 512),
-                                             nb_sectors * (s->qdev.blocksize / 512),
-                                             flags, scsi_aio_complete, r);
+        block_acct_start(blk_get_stats(s->qdev.conf.blk), &r->acct,
+                         nb_sectors * s->qdev.blocksize,
+                        BLOCK_ACCT_WRITE);
+        r->req.aiocb = blk_aio_write_zeroes(s->qdev.conf.blk,
+                                r->req.cmd.lba * (s->qdev.blocksize / 512),
+                                nb_sectors * (s->qdev.blocksize / 512),
+                                flags, scsi_aio_complete, r);
         return;
     }
 
@@ -1722,7 +1706,8 @@ static void scsi_disk_emulate_write_same(SCSIDiskReq *r, uint8_t *inbuf)
     data->sector = r->req.cmd.lba * (s->qdev.blocksize / 512);
     data->nb_sectors = nb_sectors * (s->qdev.blocksize / 512);
     data->iov.iov_len = MIN(data->nb_sectors * 512, SCSI_WRITE_SAME_MAX);
-    data->iov.iov_base = buf = qemu_blockalign(s->qdev.conf.bs, data->iov.iov_len);
+    data->iov.iov_base = buf = blk_blockalign(s->qdev.conf.blk,
+                                              data->iov.iov_len);
     qemu_iovec_init_external(&data->qiov, &data->iov, 1);
 
     for (i = 0; i < data->iov.iov_len; i += s->qdev.blocksize) {
@@ -1730,10 +1715,11 @@ static void scsi_disk_emulate_write_same(SCSIDiskReq *r, uint8_t *inbuf)
     }
 
     scsi_req_ref(&r->req);
-    bdrv_acct_start(s->qdev.conf.bs, &r->acct, data->iov.iov_len, BDRV_ACCT_WRITE);
-    r->req.aiocb = bdrv_aio_writev(s->qdev.conf.bs, data->sector,
-                                   &data->qiov, data->iov.iov_len / 512,
-                                   scsi_write_same_complete, data);
+    block_acct_start(blk_get_stats(s->qdev.conf.blk), &r->acct,
+                     data->iov.iov_len, BLOCK_ACCT_WRITE);
+    r->req.aiocb = blk_aio_writev(s->qdev.conf.blk, data->sector,
+                                  &data->qiov, data->iov.iov_len / 512,
+                                  scsi_write_same_complete, data);
 }
 
 static void scsi_disk_emulate_write_data(SCSIRequest *req)
@@ -1802,7 +1788,7 @@ static int32_t scsi_disk_emulate_command(SCSIRequest *req, uint8_t *buf)
         break;
 
     default:
-        if (s->tray_open || !bdrv_is_inserted(s->qdev.conf.bs)) {
+        if (s->tray_open || !blk_is_inserted(s->qdev.conf.blk)) {
             scsi_check_condition(r, SENSE_CODE(NO_MEDIUM));
             return 0;
         }
@@ -1823,7 +1809,7 @@ static int32_t scsi_disk_emulate_command(SCSIRequest *req, uint8_t *buf)
     r->buflen = MAX(4096, req->cmd.xfer);
 
     if (!r->iov.iov_base) {
-        r->iov.iov_base = qemu_blockalign(s->qdev.conf.bs, r->buflen);
+        r->iov.iov_base = blk_blockalign(s->qdev.conf.blk, r->buflen);
     }
 
     buflen = req->cmd.xfer;
@@ -1831,7 +1817,7 @@ static int32_t scsi_disk_emulate_command(SCSIRequest *req, uint8_t *buf)
     memset(outbuf, 0, r->buflen);
     switch (req->cmd.buf[0]) {
     case TEST_UNIT_READY:
-        assert(!s->tray_open && bdrv_is_inserted(s->qdev.conf.bs));
+        assert(!s->tray_open && blk_is_inserted(s->qdev.conf.blk));
         break;
     case INQUIRY:
         buflen = scsi_disk_emulate_inquiry(req, outbuf);
@@ -1879,12 +1865,12 @@ static int32_t scsi_disk_emulate_command(SCSIRequest *req, uint8_t *buf)
         break;
     case ALLOW_MEDIUM_REMOVAL:
         s->tray_locked = req->cmd.buf[4] & 1;
-        bdrv_lock_medium(s->qdev.conf.bs, req->cmd.buf[4] & 1);
+        blk_lock_medium(s->qdev.conf.blk, req->cmd.buf[4] & 1);
         break;
     case READ_CAPACITY_10:
         /* The normal LEN field for this command is zero.  */
         memset(outbuf, 0, 8);
-        bdrv_get_geometry(s->qdev.conf.bs, &nb_sectors);
+        blk_get_geometry(s->qdev.conf.blk, &nb_sectors);
         if (!nb_sectors) {
             scsi_check_condition(r, SENSE_CODE(LUN_NOT_READY));
             return 0;
@@ -1953,7 +1939,7 @@ static int32_t scsi_disk_emulate_command(SCSIRequest *req, uint8_t *buf)
         if ((req->cmd.buf[1] & 31) == SAI_READ_CAPACITY_16) {
             DPRINTF("SAI READ CAPACITY(16)\n");
             memset(outbuf, 0, req->cmd.xfer);
-            bdrv_get_geometry(s->qdev.conf.bs, &nb_sectors);
+            blk_get_geometry(s->qdev.conf.blk, &nb_sectors);
             if (!nb_sectors) {
                 scsi_check_condition(r, SENSE_CODE(LUN_NOT_READY));
                 return 0;
@@ -1994,8 +1980,9 @@ static int32_t scsi_disk_emulate_command(SCSIRequest *req, uint8_t *buf)
     case SYNCHRONIZE_CACHE:
         /* The request is used as the AIO opaque value, so add a ref.  */
         scsi_req_ref(&r->req);
-        bdrv_acct_start(s->qdev.conf.bs, &r->acct, 0, BDRV_ACCT_FLUSH);
-        r->req.aiocb = bdrv_aio_flush(s->qdev.conf.bs, scsi_aio_complete, r);
+        block_acct_start(blk_get_stats(s->qdev.conf.blk), &r->acct, 0,
+                         BLOCK_ACCT_FLUSH);
+        r->req.aiocb = blk_aio_flush(s->qdev.conf.blk, scsi_aio_complete, r);
         return 0;
     case SEEK_10:
         DPRINTF("Seek(10) (sector %" PRId64 ")\n", r->req.cmd.lba);
@@ -2069,7 +2056,7 @@ static int32_t scsi_disk_dma_command(SCSIRequest *req, uint8_t *buf)
 
     command = buf[0];
 
-    if (s->tray_open || !bdrv_is_inserted(s->qdev.conf.bs)) {
+    if (s->tray_open || !blk_is_inserted(s->qdev.conf.blk)) {
         scsi_check_condition(r, SENSE_CODE(NO_MEDIUM));
         return 0;
     }
@@ -2097,7 +2084,7 @@ static int32_t scsi_disk_dma_command(SCSIRequest *req, uint8_t *buf)
     case WRITE_VERIFY_10:
     case WRITE_VERIFY_12:
     case WRITE_VERIFY_16:
-        if (bdrv_is_read_only(s->qdev.conf.bs)) {
+        if (blk_is_read_only(s->qdev.conf.blk)) {
             scsi_check_condition(r, SENSE_CODE(WRITE_PROTECTED));
             return 0;
         }
@@ -2140,7 +2127,7 @@ static void scsi_disk_reset(DeviceState *dev)
 
     scsi_device_purge_requests(&s->qdev, SENSE_CODE(RESET));
 
-    bdrv_get_geometry(s->qdev.conf.bs, &nb_sectors);
+    blk_get_geometry(s->qdev.conf.blk, &nb_sectors);
     nb_sectors /= s->qdev.blocksize / 512;
     if (nb_sectors) {
         nb_sectors--;
@@ -2151,12 +2138,12 @@ static void scsi_disk_reset(DeviceState *dev)
     s->tray_open = 0;
 }
 
-static void scsi_destroy(SCSIDevice *dev)
+static void scsi_unrealize(SCSIDevice *dev, Error **errp)
 {
     SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, dev);
 
     scsi_device_purge_requests(&s->qdev, SENSE_CODE(NO_SENSE));
-    blockdev_mark_auto_del(s->qdev.conf.bs);
+    blockdev_mark_auto_del(s->qdev.conf.blk);
 }
 
 static void scsi_disk_resize_cb(void *opaque)
@@ -2234,25 +2221,29 @@ static void scsi_disk_unit_attention_reported(SCSIDevice *dev)
     }
 }
 
-static int scsi_initfn(SCSIDevice *dev)
+static void scsi_realize(SCSIDevice *dev, Error **errp)
 {
     SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, dev);
+    Error *err = NULL;
 
-    if (!s->qdev.conf.bs) {
-        error_report("drive property not set");
-        return -1;
+    if (!s->qdev.conf.blk) {
+        error_setg(errp, "drive property not set");
+        return;
     }
 
     if (!(s->features & (1 << SCSI_DISK_F_REMOVABLE)) &&
-        !bdrv_is_inserted(s->qdev.conf.bs)) {
-        error_report("Device needs media, but drive is empty");
-        return -1;
+        !blk_is_inserted(s->qdev.conf.blk)) {
+        error_setg(errp, "Device needs media, but drive is empty");
+        return;
     }
 
     blkconf_serial(&s->qdev.conf, &s->serial);
-    if (dev->type == TYPE_DISK
-        && blkconf_geometry(&dev->conf, NULL, 65535, 255, 255) < 0) {
-        return -1;
+    if (dev->type == TYPE_DISK) {
+        blkconf_geometry(&dev->conf, NULL, 65535, 255, 255, &err);
+        if (err) {
+            error_propagate(errp, err);
+            return;
+        }
     }
 
     if (s->qdev.conf.discard_granularity == -1) {
@@ -2267,25 +2258,23 @@ static int scsi_initfn(SCSIDevice *dev)
         s->vendor = g_strdup("QEMU");
     }
 
-    if (bdrv_is_sg(s->qdev.conf.bs)) {
-        error_report("unwanted /dev/sg*");
-        return -1;
+    if (blk_is_sg(s->qdev.conf.blk)) {
+        error_setg(errp, "unwanted /dev/sg*");
+        return;
     }
 
     if ((s->features & (1 << SCSI_DISK_F_REMOVABLE)) &&
             !(s->features & (1 << SCSI_DISK_F_NO_REMOVABLE_DEVOPS))) {
-        bdrv_set_dev_ops(s->qdev.conf.bs, &scsi_disk_removable_block_ops, s);
+        blk_set_dev_ops(s->qdev.conf.blk, &scsi_disk_removable_block_ops, s);
     } else {
-        bdrv_set_dev_ops(s->qdev.conf.bs, &scsi_disk_block_ops, s);
+        blk_set_dev_ops(s->qdev.conf.blk, &scsi_disk_block_ops, s);
     }
-    bdrv_set_guest_block_size(s->qdev.conf.bs, s->qdev.blocksize);
+    blk_set_guest_block_size(s->qdev.conf.blk, s->qdev.blocksize);
 
-    bdrv_iostatus_enable(s->qdev.conf.bs);
-    add_boot_device_path(s->qdev.conf.bootindex, &dev->qdev, NULL);
-    return 0;
+    blk_iostatus_enable(s->qdev.conf.blk);
 }
 
-static int scsi_hd_initfn(SCSIDevice *dev)
+static void scsi_hd_realize(SCSIDevice *dev, Error **errp)
 {
     SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, dev);
     s->qdev.blocksize = s->qdev.conf.logical_block_size;
@@ -2293,10 +2282,10 @@ static int scsi_hd_initfn(SCSIDevice *dev)
     if (!s->product) {
         s->product = g_strdup("QEMU HARDDISK");
     }
-    return scsi_initfn(&s->qdev);
+    scsi_realize(&s->qdev, errp);
 }
 
-static int scsi_cd_initfn(SCSIDevice *dev)
+static void scsi_cd_realize(SCSIDevice *dev, Error **errp)
 {
     SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, dev);
     s->qdev.blocksize = 2048;
@@ -2305,22 +2294,26 @@ static int scsi_cd_initfn(SCSIDevice *dev)
     if (!s->product) {
         s->product = g_strdup("QEMU CD-ROM");
     }
-    return scsi_initfn(&s->qdev);
+    scsi_realize(&s->qdev, errp);
 }
 
-static int scsi_disk_initfn(SCSIDevice *dev)
+static void scsi_disk_realize(SCSIDevice *dev, Error **errp)
 {
     DriveInfo *dinfo;
+    Error *local_err = NULL;
 
-    if (!dev->conf.bs) {
-        return scsi_initfn(dev);  /* ... and die there */
+    if (!dev->conf.blk) {
+        scsi_realize(dev, &local_err);
+        assert(local_err);
+        error_propagate(errp, local_err);
+        return;
     }
 
-    dinfo = drive_get_by_blockdev(dev->conf.bs);
-    if (dinfo->media_cd) {
-        return scsi_cd_initfn(dev);
+    dinfo = blk_legacy_dinfo(dev->conf.blk);
+    if (dinfo && dinfo->media_cd) {
+        scsi_cd_realize(dev, errp);
     } else {
-        return scsi_hd_initfn(dev);
+        scsi_hd_realize(dev, errp);
     }
 }
 
@@ -2330,7 +2323,6 @@ static const SCSIReqOps scsi_disk_emulate_reqops = {
     .send_command = scsi_disk_emulate_command,
     .read_data    = scsi_disk_emulate_read_data,
     .write_data   = scsi_disk_emulate_write_data,
-    .cancel_io    = scsi_cancel_io,
     .get_buf      = scsi_get_buf,
 };
 
@@ -2340,7 +2332,6 @@ static const SCSIReqOps scsi_disk_dma_reqops = {
     .send_command = scsi_disk_dma_command,
     .read_data    = scsi_read_data,
     .write_data   = scsi_write_data,
-    .cancel_io    = scsi_cancel_io,
     .get_buf      = scsi_get_buf,
     .load_request = scsi_disk_load_request,
     .save_request = scsi_disk_save_request,
@@ -2418,7 +2409,6 @@ static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
 #ifdef __linux__
 static int get_device_type(SCSIDiskState *s)
 {
-    BlockDriverState *bdrv = s->qdev.conf.bs;
     uint8_t cmd[16];
     uint8_t buf[36];
     uint8_t sensebuf[8];
@@ -2441,7 +2431,7 @@ static int get_device_type(SCSIDiskState *s)
     io_header.sbp = sensebuf;
     io_header.timeout = 6000; /* XXX */
 
-    ret = bdrv_ioctl(bdrv, SG_IO, &io_header);
+    ret = blk_ioctl(s->qdev.conf.blk, SG_IO, &io_header);
     if (ret < 0 || io_header.driver_status || io_header.host_status) {
         return -1;
     }
@@ -2452,35 +2442,35 @@ static int get_device_type(SCSIDiskState *s)
     return 0;
 }
 
-static int scsi_block_initfn(SCSIDevice *dev)
+static void scsi_block_realize(SCSIDevice *dev, Error **errp)
 {
     SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, dev);
     int sg_version;
     int rc;
 
-    if (!s->qdev.conf.bs) {
-        error_report("drive property not set");
-        return -1;
+    if (!s->qdev.conf.blk) {
+        error_setg(errp, "drive property not set");
+        return;
     }
 
     /* check we are using a driver managing SG_IO (version 3 and after) */
-    rc = bdrv_ioctl(s->qdev.conf.bs, SG_GET_VERSION_NUM, &sg_version);
+    rc = blk_ioctl(s->qdev.conf.blk, SG_GET_VERSION_NUM, &sg_version);
     if (rc < 0) {
-        error_report("cannot get SG_IO version number: %s.  "
+        error_setg(errp, "cannot get SG_IO version number: %s.  "
                      "Is this a SCSI device?",
                      strerror(-rc));
-        return -1;
+        return;
     }
     if (sg_version < 30000) {
-        error_report("scsi generic interface too old");
-        return -1;
+        error_setg(errp, "scsi generic interface too old");
+        return;
     }
 
     /* get device type from INQUIRY data */
     rc = get_device_type(s);
     if (rc < 0) {
-        error_report("INQUIRY failed");
-        return -1;
+        error_setg(errp, "INQUIRY failed");
+        return;
     }
 
     /* Make a guess for the block size, we'll fix it when the guest sends.
@@ -2498,15 +2488,11 @@ static int scsi_block_initfn(SCSIDevice *dev)
      */
     s->features |= (1 << SCSI_DISK_F_NO_REMOVABLE_DEVOPS);
 
-    return scsi_initfn(&s->qdev);
+    scsi_realize(&s->qdev, errp);
 }
 
-static SCSIRequest *scsi_block_new_request(SCSIDevice *d, uint32_t tag,
-                                           uint32_t lun, uint8_t *buf,
-                                           void *hba_private)
+static bool scsi_block_is_passthrough(SCSIDiskState *s, uint8_t *buf)
 {
-    SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, d);
-
     switch (buf[0]) {
     case READ_6:
     case READ_10:
@@ -2523,11 +2509,11 @@ static SCSIRequest *scsi_block_new_request(SCSIDevice *d, uint32_t tag,
     case WRITE_VERIFY_12:
     case WRITE_VERIFY_16:
         /* If we are not using O_DIRECT, we might read stale data from the
-	 * host cache if writes were made using other commands than these
-	 * ones (such as WRITE SAME or EXTENDED COPY, etc.).  So, without
-	 * O_DIRECT everything must go through SG_IO.
+         * host cache if writes were made using other commands than these
+         * ones (such as WRITE SAME or EXTENDED COPY, etc.).  So, without
+         * O_DIRECT everything must go through SG_IO.
          */
-        if (!(bdrv_get_flags(s->qdev.conf.bs) & BDRV_O_NOCACHE)) {
+        if (!(blk_get_flags(s->qdev.conf.blk) & BDRV_O_NOCACHE)) {
             break;
         }
 
@@ -2542,14 +2528,45 @@ static SCSIRequest *scsi_block_new_request(SCSIDevice *d, uint32_t tag,
          * just make scsi-block operate the same as scsi-generic for them.
          */
         if (s->qdev.type != TYPE_ROM) {
-            return scsi_req_alloc(&scsi_disk_dma_reqops, &s->qdev, tag, lun,
-                                  hba_private);
+            return false;
         }
+        break;
+
+    default:
+        break;
     }
 
-    return scsi_req_alloc(&scsi_generic_req_ops, &s->qdev, tag, lun,
-                          hba_private);
+    return true;
 }
+
+
+static SCSIRequest *scsi_block_new_request(SCSIDevice *d, uint32_t tag,
+                                           uint32_t lun, uint8_t *buf,
+                                           void *hba_private)
+{
+    SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, d);
+
+    if (scsi_block_is_passthrough(s, buf)) {
+        return scsi_req_alloc(&scsi_generic_req_ops, &s->qdev, tag, lun,
+                              hba_private);
+    } else {
+        return scsi_req_alloc(&scsi_disk_dma_reqops, &s->qdev, tag, lun,
+                              hba_private);
+    }
+}
+
+static int scsi_block_parse_cdb(SCSIDevice *d, SCSICommand *cmd,
+                                  uint8_t *buf, void *hba_private)
+{
+    SCSIDiskState *s = DO_UPCAST(SCSIDiskState, qdev, d);
+
+    if (scsi_block_is_passthrough(s, buf)) {
+        return scsi_bus_parse_cdb(&s->qdev, cmd, buf, hba_private);
+    } else {
+        return scsi_req_parse_cdb(&s->qdev, cmd, buf);
+    }
+}
+
 #endif
 
 #define DEFINE_SCSI_DISK_PROPERTIES()                                \
@@ -2594,8 +2611,8 @@ static void scsi_hd_class_initfn(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     SCSIDeviceClass *sc = SCSI_DEVICE_CLASS(klass);
 
-    sc->init         = scsi_hd_initfn;
-    sc->destroy      = scsi_destroy;
+    sc->realize      = scsi_hd_realize;
+    sc->unrealize    = scsi_unrealize;
     sc->alloc_req    = scsi_new_request;
     sc->unit_attention_reported = scsi_disk_unit_attention_reported;
     dc->fw_name = "disk";
@@ -2625,8 +2642,8 @@ static void scsi_cd_class_initfn(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     SCSIDeviceClass *sc = SCSI_DEVICE_CLASS(klass);
 
-    sc->init         = scsi_cd_initfn;
-    sc->destroy      = scsi_destroy;
+    sc->realize      = scsi_cd_realize;
+    sc->unrealize    = scsi_unrealize;
     sc->alloc_req    = scsi_new_request;
     sc->unit_attention_reported = scsi_disk_unit_attention_reported;
     dc->fw_name = "disk";
@@ -2645,8 +2662,7 @@ static const TypeInfo scsi_cd_info = {
 
 #ifdef __linux__
 static Property scsi_block_properties[] = {
-    DEFINE_PROP_DRIVE("drive", SCSIDiskState, qdev.conf.bs),
-    DEFINE_PROP_INT32("bootindex", SCSIDiskState, qdev.conf.bootindex, -1),
+    DEFINE_PROP_DRIVE("drive", SCSIDiskState, qdev.conf.blk),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -2655,9 +2671,10 @@ static void scsi_block_class_initfn(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     SCSIDeviceClass *sc = SCSI_DEVICE_CLASS(klass);
 
-    sc->init         = scsi_block_initfn;
-    sc->destroy      = scsi_destroy;
+    sc->realize      = scsi_block_realize;
+    sc->unrealize    = scsi_unrealize;
     sc->alloc_req    = scsi_block_new_request;
+    sc->parse_cdb    = scsi_block_parse_cdb;
     dc->fw_name = "disk";
     dc->desc = "SCSI block device passthrough";
     dc->reset = scsi_disk_reset;
@@ -2692,8 +2709,8 @@ static void scsi_disk_class_initfn(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     SCSIDeviceClass *sc = SCSI_DEVICE_CLASS(klass);
 
-    sc->init         = scsi_disk_initfn;
-    sc->destroy      = scsi_destroy;
+    sc->realize      = scsi_disk_realize;
+    sc->unrealize    = scsi_unrealize;
     sc->alloc_req    = scsi_new_request;
     sc->unit_attention_reported = scsi_disk_unit_attention_reported;
     dc->fw_name = "disk";

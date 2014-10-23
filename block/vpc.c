@@ -207,7 +207,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
             "incorrect.\n", bs->filename);
 
     /* Write 'checksum' back to footer, or else will leave it with zero. */
-    footer->checksum = be32_to_cpu(checksum);
+    footer->checksum = cpu_to_be32(checksum);
 
     // The visible size of a image in Virtual PC depends on the geometry
     // rather than on the size stored in the footer (the size in the footer
@@ -320,7 +320,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
     /* Disable migration when VHD images are used */
     error_set(&s->migration_blocker,
               QERR_BLOCK_FORMAT_FEATURE_NOT_SUPPORTED,
-              "vpc", bs->device_name, "live migration");
+              "vpc", bdrv_get_device_name(bs), "live migration");
     migrate_add_blocker(s->migration_blocker);
 
     return 0;
@@ -472,7 +472,7 @@ static int64_t alloc_block(BlockDriverState* bs, int64_t sector_num)
 
     // Write BAT entry to disk
     bat_offset = s->bat_offset + (4 * index);
-    bat_value = be32_to_cpu(s->pagetable[index]);
+    bat_value = cpu_to_be32(s->pagetable[index]);
     ret = bdrv_pwrite_sync(bs->file, bat_offset, &bat_value, 4);
     if (ret < 0)
         goto fail;
@@ -489,7 +489,7 @@ static int vpc_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
     BDRVVPCState *s = (BDRVVPCState *)bs->opaque;
     VHDFooter *footer = (VHDFooter *) s->footer_buf;
 
-    if (cpu_to_be32(footer->type) != VHD_FIXED) {
+    if (be32_to_cpu(footer->type) != VHD_FIXED) {
         bdi->cluster_size = s->block_size;
     }
 
@@ -506,7 +506,7 @@ static int vpc_read(BlockDriverState *bs, int64_t sector_num,
     int64_t sectors, sectors_per_block;
     VHDFooter *footer = (VHDFooter *) s->footer_buf;
 
-    if (cpu_to_be32(footer->type) == VHD_FIXED) {
+    if (be32_to_cpu(footer->type) == VHD_FIXED) {
         return bdrv_read(bs->file, sector_num, buf, nb_sectors);
     }
     while (nb_sectors > 0) {
@@ -555,7 +555,7 @@ static int vpc_write(BlockDriverState *bs, int64_t sector_num,
     int ret;
     VHDFooter *footer =  (VHDFooter *) s->footer_buf;
 
-    if (cpu_to_be32(footer->type) == VHD_FIXED) {
+    if (be32_to_cpu(footer->type) == VHD_FIXED) {
         return bdrv_write(bs->file, sector_num, buf, nb_sectors);
     }
     while (nb_sectors > 0) {
@@ -699,13 +699,13 @@ static int create_dynamic_disk(BlockDriverState *bs, uint8_t *buf,
      * Note: The spec is actually wrong here for data_offset, it says
      * 0xFFFFFFFF, but MS tools expect all 64 bits to be set.
      */
-    dyndisk_header->data_offset = be64_to_cpu(0xFFFFFFFFFFFFFFFFULL);
-    dyndisk_header->table_offset = be64_to_cpu(3 * 512);
-    dyndisk_header->version = be32_to_cpu(0x00010000);
-    dyndisk_header->block_size = be32_to_cpu(block_size);
-    dyndisk_header->max_table_entries = be32_to_cpu(num_bat_entries);
+    dyndisk_header->data_offset = cpu_to_be64(0xFFFFFFFFFFFFFFFFULL);
+    dyndisk_header->table_offset = cpu_to_be64(3 * 512);
+    dyndisk_header->version = cpu_to_be32(0x00010000);
+    dyndisk_header->block_size = cpu_to_be32(block_size);
+    dyndisk_header->max_table_entries = cpu_to_be32(num_bat_entries);
 
-    dyndisk_header->checksum = be32_to_cpu(vpc_checksum(buf, 1024));
+    dyndisk_header->checksum = cpu_to_be32(vpc_checksum(buf, 1024));
 
     // Write the header
     offset = 512;
@@ -757,7 +757,8 @@ static int vpc_create(const char *filename, QemuOpts *opts, Error **errp)
     BlockDriverState *bs = NULL;
 
     /* Read out options */
-    total_size = qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0);
+    total_size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
+                          BDRV_SECTOR_SIZE);
     disk_type_param = qemu_opt_get_del(opts, BLOCK_OPT_SUBFMT);
     if (disk_type_param) {
         if (!strcmp(disk_type_param, "dynamic")) {
@@ -809,36 +810,36 @@ static int vpc_create(const char *filename, QemuOpts *opts, Error **errp)
     memcpy(footer->creator_app, "qemu", 4);
     memcpy(footer->creator_os, "Wi2k", 4);
 
-    footer->features = be32_to_cpu(0x02);
-    footer->version = be32_to_cpu(0x00010000);
+    footer->features = cpu_to_be32(0x02);
+    footer->version = cpu_to_be32(0x00010000);
     if (disk_type == VHD_DYNAMIC) {
-        footer->data_offset = be64_to_cpu(HEADER_SIZE);
+        footer->data_offset = cpu_to_be64(HEADER_SIZE);
     } else {
-        footer->data_offset = be64_to_cpu(0xFFFFFFFFFFFFFFFFULL);
+        footer->data_offset = cpu_to_be64(0xFFFFFFFFFFFFFFFFULL);
     }
-    footer->timestamp = be32_to_cpu(time(NULL) - VHD_TIMESTAMP_BASE);
+    footer->timestamp = cpu_to_be32(time(NULL) - VHD_TIMESTAMP_BASE);
 
     /* Version of Virtual PC 2007 */
-    footer->major = be16_to_cpu(0x0005);
-    footer->minor = be16_to_cpu(0x0003);
+    footer->major = cpu_to_be16(0x0005);
+    footer->minor = cpu_to_be16(0x0003);
     if (disk_type == VHD_DYNAMIC) {
-        footer->orig_size = be64_to_cpu(total_sectors * 512);
-        footer->size = be64_to_cpu(total_sectors * 512);
+        footer->orig_size = cpu_to_be64(total_sectors * 512);
+        footer->size = cpu_to_be64(total_sectors * 512);
     } else {
-        footer->orig_size = be64_to_cpu(total_size);
-        footer->size = be64_to_cpu(total_size);
+        footer->orig_size = cpu_to_be64(total_size);
+        footer->size = cpu_to_be64(total_size);
     }
-    footer->cyls = be16_to_cpu(cyls);
+    footer->cyls = cpu_to_be16(cyls);
     footer->heads = heads;
     footer->secs_per_cyl = secs_per_cyl;
 
-    footer->type = be32_to_cpu(disk_type);
+    footer->type = cpu_to_be32(disk_type);
 
 #if defined(CONFIG_UUID)
     uuid_generate(footer->uuid);
 #endif
 
-    footer->checksum = be32_to_cpu(vpc_checksum(buf, HEADER_SIZE));
+    footer->checksum = cpu_to_be32(vpc_checksum(buf, HEADER_SIZE));
 
     if (disk_type == VHD_DYNAMIC) {
         ret = create_dynamic_disk(bs, buf, total_sectors);
@@ -857,7 +858,7 @@ static int vpc_has_zero_init(BlockDriverState *bs)
     BDRVVPCState *s = bs->opaque;
     VHDFooter *footer =  (VHDFooter *) s->footer_buf;
 
-    if (cpu_to_be32(footer->type) == VHD_FIXED) {
+    if (be32_to_cpu(footer->type) == VHD_FIXED) {
         return bdrv_has_zero_init(bs->file);
     } else {
         return 1;

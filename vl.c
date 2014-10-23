@@ -61,6 +61,7 @@ int main(int argc, char **argv)
 #include "qemu/sockets.h"
 #include "hw/hw.h"
 #include "hw/boards.h"
+#include "sysemu/accel.h"
 #include "hw/usb.h"
 #include "hw/pcmcia.h"
 #include "hw/i386/pc.h"
@@ -134,6 +135,7 @@ const char* keyboard_layout = NULL;
 ram_addr_t ram_size;
 const char *mem_path = NULL;
 int mem_prealloc = 0; /* force preallocation of physical target memory */
+bool enable_mlock = false;
 int nb_nics;
 NICInfo nd_table[MAX_NICS];
 int autostart;
@@ -178,23 +180,12 @@ int ctrl_grab = 0;
 unsigned int nb_prom_envs = 0;
 const char *prom_envs[MAX_PROM_ENVS];
 int boot_menu;
-static bool boot_strict;
+bool boot_strict;
 uint8_t *boot_splash_filedata;
 size_t boot_splash_filedata_size;
 uint8_t qemu_extra_params_fw[2];
 
 int icount_align_option;
-typedef struct FWBootEntry FWBootEntry;
-
-struct FWBootEntry {
-    QTAILQ_ENTRY(FWBootEntry) link;
-    int32_t bootindex;
-    DeviceState *dev;
-    char *suffix;
-};
-
-static QTAILQ_HEAD(, FWBootEntry) fw_boot_order =
-    QTAILQ_HEAD_INITIALIZER(fw_boot_order);
 
 int nb_numa_nodes;
 int max_numa_nodeid;
@@ -212,11 +203,9 @@ static NotifierList exit_notifiers =
 static NotifierList machine_init_done_notifiers =
     NOTIFIER_LIST_INITIALIZER(machine_init_done_notifiers);
 
-static bool tcg_allowed = true;
 bool xen_allowed;
 uint32_t xen_domid;
 enum xen_mode xen_mode = XEN_EMULATE;
-static int tcg_tb_size;
 
 static int has_defaults = 1;
 static int default_serial = 1;
@@ -388,6 +377,10 @@ static QemuOptsList qemu_machine_opts = {
             .name = PC_MACHINE_MAX_RAM_BELOW_4G,
             .type = QEMU_OPT_SIZE,
             .help = "maximum ram below the 4G boundary (32bit boundary)",
+        },{
+            .name = "iommu",
+            .type = QEMU_OPT_BOOL,
+            .help = "Set on/off to enable/disable Intel IOMMU (VT-d)",
         },
         { /* End of list */ }
     },
@@ -1164,6 +1157,7 @@ static void default_drive(int enable, int snapshot, BlockInterfaceType type,
                           int index, const char *optstr)
 {
     QemuOpts *opts;
+    DriveInfo *dinfo;
 
     if (!enable || drive_get_by_index(type, index)) {
         return;
@@ -1173,9 +1167,13 @@ static void default_drive(int enable, int snapshot, BlockInterfaceType type,
     if (snapshot) {
         drive_enable_snapshot(opts, NULL);
     }
-    if (!drive_new(opts, type)) {
+
+    dinfo = drive_new(opts, type);
+    if (!dinfo) {
         exit(1);
     }
+    dinfo->is_default = true;
+
 }
 
 void qemu_register_boot_set(QEMUBootSetHandler *func, void *opaque)
@@ -1235,111 +1233,6 @@ static void restore_boot_order(void *opaque)
 
     qemu_unregister_reset(restore_boot_order, normal_boot_order);
     g_free(normal_boot_order);
-}
-
-void add_boot_device_path(int32_t bootindex, DeviceState *dev,
-                          const char *suffix)
-{
-    FWBootEntry *node, *i;
-
-    if (bootindex < 0) {
-        return;
-    }
-
-    assert(dev != NULL || suffix != NULL);
-
-    node = g_malloc0(sizeof(FWBootEntry));
-    node->bootindex = bootindex;
-    node->suffix = g_strdup(suffix);
-    node->dev = dev;
-
-    QTAILQ_FOREACH(i, &fw_boot_order, link) {
-        if (i->bootindex == bootindex) {
-            fprintf(stderr, "Two devices with same boot index %d\n", bootindex);
-            exit(1);
-        } else if (i->bootindex < bootindex) {
-            continue;
-        }
-        QTAILQ_INSERT_BEFORE(i, node, link);
-        return;
-    }
-    QTAILQ_INSERT_TAIL(&fw_boot_order, node, link);
-}
-
-DeviceState *get_boot_device(uint32_t position)
-{
-    uint32_t counter = 0;
-    FWBootEntry *i = NULL;
-    DeviceState *res = NULL;
-
-    if (!QTAILQ_EMPTY(&fw_boot_order)) {
-        QTAILQ_FOREACH(i, &fw_boot_order, link) {
-            if (counter == position) {
-                res = i->dev;
-                break;
-            }
-            counter++;
-        }
-    }
-    return res;
-}
-
-/*
- * This function returns null terminated string that consist of new line
- * separated device paths.
- *
- * memory pointed by "size" is assigned total length of the array in bytes
- *
- */
-char *get_boot_devices_list(size_t *size, bool ignore_suffixes)
-{
-    FWBootEntry *i;
-    size_t total = 0;
-    char *list = NULL;
-
-    QTAILQ_FOREACH(i, &fw_boot_order, link) {
-        char *devpath = NULL, *bootpath;
-        size_t len;
-
-        if (i->dev) {
-            devpath = qdev_get_fw_dev_path(i->dev);
-            assert(devpath);
-        }
-
-        if (i->suffix && !ignore_suffixes && devpath) {
-            size_t bootpathlen = strlen(devpath) + strlen(i->suffix) + 1;
-
-            bootpath = g_malloc(bootpathlen);
-            snprintf(bootpath, bootpathlen, "%s%s", devpath, i->suffix);
-            g_free(devpath);
-        } else if (devpath) {
-            bootpath = devpath;
-        } else if (!ignore_suffixes) {
-            assert(i->suffix);
-            bootpath = g_strdup(i->suffix);
-        } else {
-            bootpath = g_strdup("");
-        }
-
-        if (total) {
-            list[total-1] = '\n';
-        }
-        len = strlen(bootpath) + 1;
-        list = g_realloc(list, total + len);
-        memcpy(&list[total], bootpath, len);
-        total += len;
-        g_free(bootpath);
-    }
-
-    *size = total;
-
-    if (boot_strict && *size > 0) {
-        list[total-1] = '\n';
-        list = g_realloc(list, total + 5);
-        memcpy(&list[total], "HALT", 5);
-        *size = total + 5;
-    }
-    return list;
 }
 
 static QemuOptsList qemu_smp_opts = {
@@ -1417,12 +1310,8 @@ static void smp_parse(QemuOpts *opts)
 
 }
 
-static void configure_realtime(QemuOpts *opts)
+static void realtime_init(void)
 {
-    bool enable_mlock;
-
-    enable_mlock = qemu_opt_get_bool(opts, "mlock", true);
-
     if (enable_mlock) {
         if (os_mlock() < 0) {
             fprintf(stderr, "qemu: locking memory failed\n");
@@ -1579,6 +1468,7 @@ static void machine_class_init(ObjectClass *oc, void *data)
     mc->hot_add_cpu = qm->hot_add_cpu;
     mc->kvm_type = qm->kvm_type;
     mc->block_default_type = qm->block_default_type;
+    mc->units_per_default_bus = qm->units_per_default_bus;
     mc->max_cpus = qm->max_cpus;
     mc->no_serial = qm->no_serial;
     mc->no_parallel = qm->no_parallel;
@@ -1717,11 +1607,11 @@ void qemu_del_vm_change_state_handler(VMChangeStateEntry *e)
 
 void vm_state_notify(int running, RunState state)
 {
-    VMChangeStateEntry *e;
+    VMChangeStateEntry *e, *next;
 
     trace_vm_state_notify(running, state);
 
-    for (e = vm_change_state_head.lh_first; e; e = e->entries.le_next) {
+    QLIST_FOREACH_SAFE(e, &vm_change_state_head, entries, next) {
         e->cb(e->opaque, running, state);
     }
 }
@@ -2674,84 +2564,6 @@ static MachineClass *machine_parse(const char *name)
     exit(!name || !is_help_option(name));
 }
 
-static int tcg_init(MachineClass *mc)
-{
-    tcg_exec_init(tcg_tb_size * 1024 * 1024);
-    return 0;
-}
-
-static struct {
-    const char *opt_name;
-    const char *name;
-    int (*available)(void);
-    int (*init)(MachineClass *mc);
-    bool *allowed;
-} accel_list[] = {
-    { "tcg", "tcg", tcg_available, tcg_init, &tcg_allowed },
-    { "xen", "Xen", xen_available, xen_init, &xen_allowed },
-    { "kvm", "KVM", kvm_available, kvm_init, &kvm_allowed },
-    { "qtest", "QTest", qtest_available, qtest_init_accel, &qtest_allowed },
-};
-
-static int configure_accelerator(MachineClass *mc)
-{
-    const char *p;
-    char buf[10];
-    int i, ret;
-    bool accel_initialised = false;
-    bool init_failed = false;
-
-    p = qemu_opt_get(qemu_get_machine_opts(), "accel");
-    if (p == NULL) {
-        /* Use the default "accelerator", tcg */
-        p = "tcg";
-    }
-
-    while (!accel_initialised && *p != '\0') {
-        if (*p == ':') {
-            p++;
-        }
-        p = get_opt_name(buf, sizeof (buf), p, ':');
-        for (i = 0; i < ARRAY_SIZE(accel_list); i++) {
-            if (strcmp(accel_list[i].opt_name, buf) == 0) {
-                if (!accel_list[i].available()) {
-                    printf("%s not supported for this target\n",
-                           accel_list[i].name);
-                    break;
-                }
-                *(accel_list[i].allowed) = true;
-                ret = accel_list[i].init(mc);
-                if (ret < 0) {
-                    init_failed = true;
-                    fprintf(stderr, "failed to initialize %s: %s\n",
-                            accel_list[i].name,
-                            strerror(-ret));
-                    *(accel_list[i].allowed) = false;
-                } else {
-                    accel_initialised = true;
-                }
-                break;
-            }
-        }
-        if (i == ARRAY_SIZE(accel_list)) {
-            fprintf(stderr, "\"%s\" accelerator does not exist.\n", buf);
-        }
-    }
-
-    if (!accel_initialised) {
-        if (!init_failed) {
-            fprintf(stderr, "No accelerator found!\n");
-        }
-        exit(1);
-    }
-
-    if (init_failed) {
-        fprintf(stderr, "Back to %s accelerator.\n", accel_list[i].name);
-    }
-
-    return !accel_initialised;
-}
-
 void qemu_add_exit_notifier(Notifier *notify)
 {
     notifier_list_add(&exit_notifiers, notify);
@@ -2837,15 +2649,15 @@ static void free_and_trace(gpointer mem)
     free(mem);
 }
 
-static int object_set_property(const char *name, const char *value, void *opaque)
+static int machine_set_property(const char *name, const char *value,
+                                void *opaque)
 {
     Object *obj = OBJECT(opaque);
     StringInputVisitor *siv;
     Error *local_err = NULL;
     char *c, *qom_name;
 
-    if (strcmp(name, "qom-type") == 0 || strcmp(name, "id") == 0 ||
-        strcmp(name, "type") == 0) {
+    if (strcmp(name, "type") == 0) {
         return 0;
     }
 
@@ -2964,6 +2776,7 @@ int main(int argc, char **argv, char **envp)
     ram_addr_t maxram_size = default_ram_size;
     uint64_t ram_slots = 0;
     FILE *vmstate_dump_file = NULL;
+    Error *main_loop_err = NULL;
 
     atexit(qemu_run_exit_notifiers);
     error_set_progname(argv[0]);
@@ -3354,34 +3167,34 @@ int main(int argc, char **argv, char **envp)
 
                     sz = qemu_opt_get_size(opts, "maxmem", 0);
                     if (sz < ram_size) {
-                        fprintf(stderr, "qemu: invalid -m option value: maxmem "
-                                "(%" PRIu64 ") <= initial memory ("
-                                RAM_ADDR_FMT ")\n", sz, ram_size);
+                        error_report("invalid -m option value: maxmem "
+                                "(0x%" PRIx64 ") <= initial memory (0x"
+                                RAM_ADDR_FMT ")", sz, ram_size);
                         exit(EXIT_FAILURE);
                     }
 
                     slots = qemu_opt_get_number(opts, "slots", 0);
                     if ((sz > ram_size) && !slots) {
-                        fprintf(stderr, "qemu: invalid -m option value: maxmem "
-                                "(%" PRIu64 ") more than initial memory ("
+                        error_report("invalid -m option value: maxmem "
+                                "(0x%" PRIx64 ") more than initial memory (0x"
                                 RAM_ADDR_FMT ") but no hotplug slots where "
-                                "specified\n", sz, ram_size);
+                                "specified", sz, ram_size);
                         exit(EXIT_FAILURE);
                     }
 
                     if ((sz <= ram_size) && slots) {
-                        fprintf(stderr, "qemu: invalid -m option value:  %"
+                        error_report("invalid -m option value:  %"
                                 PRIu64 " hotplug slots where specified but "
-                                "maxmem (%" PRIu64 ") <= initial memory ("
-                                RAM_ADDR_FMT ")\n", slots, sz, ram_size);
+                                "maxmem (0x%" PRIx64 ") <= initial memory (0x"
+                                RAM_ADDR_FMT ")", slots, sz, ram_size);
                         exit(EXIT_FAILURE);
                     }
                     maxram_size = sz;
                     ram_slots = slots;
                 } else if ((!maxmem_str && slots_str) ||
                            (maxmem_str && !slots_str)) {
-                    fprintf(stderr, "qemu: invalid -m option value: missing "
-                            "'%s' option\n", slots_str ? "maxmem" : "slots");
+                    error_report("invalid -m option value: missing "
+                            "'%s' option", slots_str ? "maxmem" : "slots");
                     exit(EXIT_FAILURE);
                 }
                 break;
@@ -3969,7 +3782,7 @@ int main(int argc, char **argv, char **envp)
                 if (!opts) {
                     exit(1);
                 }
-                configure_realtime(opts);
+                enable_mlock = qemu_opt_get_bool(opts, "mlock", true);
                 break;
             case QEMU_OPTION_msg:
                 opts = qemu_opts_parse(qemu_find_opts("msg"), optarg, 0);
@@ -3994,8 +3807,8 @@ int main(int argc, char **argv, char **envp)
 
     os_daemonize();
 
-    if (qemu_init_main_loop()) {
-        fprintf(stderr, "qemu_init_main_loop failed\n");
+    if (qemu_init_main_loop(&main_loop_err)) {
+        error_report("%s", error_get_pretty(main_loop_err));
         exit(1);
     }
 
@@ -4031,11 +3844,6 @@ int main(int argc, char **argv, char **envp)
 
     if (machine_class->hw_version) {
         qemu_set_version(machine_class->hw_version);
-    }
-
-    if (qemu_opts_foreach(qemu_find_opts("object"),
-                          object_create, NULL, 0) != 0) {
-        exit(1);
     }
 
     /* Init CPU def lists, based on config
@@ -4249,14 +4057,19 @@ int main(int argc, char **argv, char **envp)
         exit(0);
     }
 
+    if (qemu_opts_foreach(qemu_find_opts("object"),
+                          object_create, NULL, 0) != 0) {
+        exit(1);
+    }
+
     machine_opts = qemu_get_machine_opts();
-    if (qemu_opt_foreach(machine_opts, object_set_property, current_machine,
+    if (qemu_opt_foreach(machine_opts, machine_set_property, current_machine,
                          1) < 0) {
         object_unref(OBJECT(current_machine));
         exit(1);
     }
 
-    configure_accelerator(machine_class);
+    configure_accelerator(current_machine);
 
     if (qtest_chrdev) {
         Error *local_err = NULL;
@@ -4330,6 +4143,7 @@ int main(int argc, char **argv, char **envp)
     qemu_spice_init();
 #endif
 
+    cpu_ticks_init();
     if (icount_opts) {
         if (kvm_enabled() || xen_enabled()) {
             fprintf(stderr, "-icount is not allowed with kvm or xen\n");
@@ -4366,6 +4180,13 @@ int main(int argc, char **argv, char **envp)
 
     blk_mig_init();
     ram_mig_init();
+
+    /* If the currently selected machine wishes to override the units-per-bus
+     * property of its default HBA interface type, do so now. */
+    if (machine_class->units_per_default_bus) {
+        override_max_devs(machine_class->block_default_type,
+                          machine_class->units_per_default_bus);
+    }
 
     /* open the virtual block devices */
     if (snapshot)
@@ -4436,6 +4257,8 @@ int main(int argc, char **argv, char **envp)
 
     machine_class->init(current_machine);
 
+    realtime_init();
+
     audio_init();
 
     cpu_synchronize_all_post_init();
@@ -4451,6 +4274,9 @@ int main(int argc, char **argv, char **envp)
     /* init generic devices */
     if (qemu_opts_foreach(qemu_find_opts("device"), device_init_func, NULL, 1) != 0)
         exit(1);
+
+    /* Did we create any drives that we failed to create a device for? */
+    drive_check_orphaned();
 
     net_check_clients();
 
@@ -4537,7 +4363,7 @@ int main(int argc, char **argv, char **envp)
         }
     }
 
-    qdev_prop_check_global();
+    qdev_prop_check_globals();
     if (vmstate_dump_file) {
         /* dump and exit */
         dump_vmstate_json_to_file(vmstate_dump_file);

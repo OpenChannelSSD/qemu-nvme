@@ -26,7 +26,7 @@
 #include "hw/boards.h"
 #include "hw/loader.h"
 #include "elf.h"
-#include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "milkymist-hw.h"
 #include "lm32.h"
 #include "exec/address-spaces.h"
@@ -118,16 +118,17 @@ milkymist_init(MachineState *machine)
 
     cpu_lm32_set_phys_msb_ignore(env, 1);
 
-    memory_region_init_ram(phys_sdram, NULL, "milkymist.sdram", sdram_size);
+    memory_region_init_ram(phys_sdram, NULL, "milkymist.sdram", sdram_size,
+                           &error_abort);
     vmstate_register_ram_global(phys_sdram);
     memory_region_add_subregion(address_space_mem, sdram_base, phys_sdram);
 
     dinfo = drive_get(IF_PFLASH, 0, 0);
     /* Numonyx JS28F256J3F105 */
     pflash_cfi01_register(flash_base, NULL, "milkymist.flash", flash_size,
-                          dinfo ? dinfo->bdrv : NULL, flash_sector_size,
-                          flash_size / flash_sector_size, 2,
-                          0x00, 0x89, 0x00, 0x1d, 1);
+                          dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
+                          flash_sector_size, flash_size / flash_sector_size,
+                          2, 0x00, 0x89, 0x00, 0x1d, 1);
 
     /* create irq lines */
     cpu_irq = qemu_allocate_irqs(cpu_irq_handler, cpu, 1);

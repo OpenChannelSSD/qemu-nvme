@@ -28,11 +28,12 @@
 #include "hw/block/flash.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/qtest.h"
-#include "block/block.h"
+#include "sysemu/block-backend.h"
 #include "hw/boards.h"
 #include "qemu/log.h"
 #include "qemu/error-report.h"
 #include "hw/loader.h"
+#include "sysemu/block-backend.h"
 #include "sysemu/blockdev.h"
 #include "exec/address-spaces.h"
 
@@ -214,7 +215,7 @@ static void ref405ep_init(MachineState *machine)
                         33333333, &pic, kernel_filename == NULL ? 0 : 1);
     /* allocate SRAM */
     sram_size = 512 * 1024;
-    memory_region_init_ram(sram, NULL, "ef405ep.sram", sram_size);
+    memory_region_init_ram(sram, NULL, "ef405ep.sram", sram_size, &error_abort);
     vmstate_register_ram_global(sram);
     memory_region_add_subregion(sysmem, 0xFFF00000, sram);
     /* allocate and load BIOS */
@@ -225,17 +226,19 @@ static void ref405ep_init(MachineState *machine)
 #ifdef USE_FLASH_BIOS
     dinfo = drive_get(IF_PFLASH, 0, fl_idx);
     if (dinfo) {
-        bios_size = bdrv_getlength(dinfo->bdrv);
+        BlockBackend *blk = blk_by_legacy_dinfo(dinfo);
+
+        bios_size = blk_getlength(blk);
         fl_sectors = (bios_size + 65535) >> 16;
 #ifdef DEBUG_BOARD_INIT
         printf("Register parallel flash %d size %lx"
                " at addr %lx '%s' %d\n",
                fl_idx, bios_size, -bios_size,
-               bdrv_get_device_name(dinfo->bdrv), fl_sectors);
+               blk_name(blk), fl_sectors);
 #endif
         pflash_cfi02_register((uint32_t)(-bios_size),
                               NULL, "ef405ep.bios", bios_size,
-                              dinfo->bdrv, 65536, fl_sectors, 1,
+                              blk, 65536, fl_sectors, 1,
                               2, 0x0001, 0x22DA, 0x0000, 0x0000, 0x555, 0x2AA,
                               1);
         fl_idx++;
@@ -246,7 +249,8 @@ static void ref405ep_init(MachineState *machine)
         printf("Load BIOS from file\n");
 #endif
         bios = g_new(MemoryRegion, 1);
-        memory_region_init_ram(bios, NULL, "ef405ep.bios", BIOS_SIZE);
+        memory_region_init_ram(bios, NULL, "ef405ep.bios", BIOS_SIZE,
+                               &error_abort);
         vmstate_register_ram_global(bios);
 
         if (bios_name == NULL)
@@ -547,7 +551,9 @@ static void taihu_405ep_init(MachineState *machine)
 #if defined(USE_FLASH_BIOS)
     dinfo = drive_get(IF_PFLASH, 0, fl_idx);
     if (dinfo) {
-        bios_size = bdrv_getlength(dinfo->bdrv);
+        BlockBackend *blk = blk_by_legacy_dinfo(dinfo);
+
+        bios_size = blk_getlength(blk);
         /* XXX: should check that size is 2MB */
         //        bios_size = 2 * 1024 * 1024;
         fl_sectors = (bios_size + 65535) >> 16;
@@ -555,11 +561,11 @@ static void taihu_405ep_init(MachineState *machine)
         printf("Register parallel flash %d size %lx"
                " at addr %lx '%s' %d\n",
                fl_idx, bios_size, -bios_size,
-               bdrv_get_device_name(dinfo->bdrv), fl_sectors);
+               blk_name(blk), fl_sectors);
 #endif
         pflash_cfi02_register((uint32_t)(-bios_size),
                               NULL, "taihu_405ep.bios", bios_size,
-                              dinfo->bdrv, 65536, fl_sectors, 1,
+                              blk, 65536, fl_sectors, 1,
                               4, 0x0001, 0x22DA, 0x0000, 0x0000, 0x555, 0x2AA,
                               1);
         fl_idx++;
@@ -572,7 +578,8 @@ static void taihu_405ep_init(MachineState *machine)
         if (bios_name == NULL)
             bios_name = BIOS_FILENAME;
         bios = g_new(MemoryRegion, 1);
-        memory_region_init_ram(bios, NULL, "taihu_405ep.bios", BIOS_SIZE);
+        memory_region_init_ram(bios, NULL, "taihu_405ep.bios", BIOS_SIZE,
+                               &error_abort);
         vmstate_register_ram_global(bios);
         filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, bios_name);
         if (filename) {
@@ -593,7 +600,9 @@ static void taihu_405ep_init(MachineState *machine)
     /* Register Linux flash */
     dinfo = drive_get(IF_PFLASH, 0, fl_idx);
     if (dinfo) {
-        bios_size = bdrv_getlength(dinfo->bdrv);
+        BlockBackend *blk = blk_by_legacy_dinfo(dinfo);
+
+        bios_size = blk_getlength(blk);
         /* XXX: should check that size is 32MB */
         bios_size = 32 * 1024 * 1024;
         fl_sectors = (bios_size + 65535) >> 16;
@@ -601,10 +610,10 @@ static void taihu_405ep_init(MachineState *machine)
         printf("Register parallel flash %d size %lx"
                " at addr " TARGET_FMT_lx " '%s'\n",
                fl_idx, bios_size, (target_ulong)0xfc000000,
-               bdrv_get_device_name(dinfo->bdrv));
+               blk_name(blk));
 #endif
         pflash_cfi02_register(0xfc000000, NULL, "taihu_405ep.flash", bios_size,
-                              dinfo->bdrv, 65536, fl_sectors, 1,
+                              blk, 65536, fl_sectors, 1,
                               4, 0x0001, 0x22DA, 0x0000, 0x0000, 0x555, 0x2AA,
                               1);
         fl_idx++;

@@ -17,7 +17,7 @@
 #include "hw/virtio/virtio.h"
 #include "hw/block/block.h"
 #include "sysemu/iothread.h"
-#include "block/block.h"
+#include "sysemu/block-backend.h"
 
 #define TYPE_VIRTIO_BLK "virtio-blk-device"
 #define VIRTIO_BLK(obj) \
@@ -120,21 +120,18 @@ struct VirtIOBlockDataPlane;
 struct VirtIOBlockReq;
 typedef struct VirtIOBlock {
     VirtIODevice parent_obj;
-    BlockDriverState *bs;
+    BlockBackend *blk;
     VirtQueue *vq;
     void *rq;
     QEMUBH *bh;
-    BlockConf *conf;
-    VirtIOBlkConf blk;
+    VirtIOBlkConf conf;
     unsigned short sector_mask;
     bool original_wce;
     VMChangeStateEntry *change;
     /* Function to push to vq and notify guest */
     void (*complete_request)(struct VirtIOBlockReq *req, unsigned char status);
-#ifdef CONFIG_VIRTIO_BLK_DATA_PLANE
     Notifier migration_state_notifier;
     struct VirtIOBlockDataPlane *dataplane;
-#endif
 } VirtIOBlock;
 
 typedef struct MultiReqBuffer {
@@ -161,6 +158,6 @@ int virtio_blk_handle_scsi_req(VirtIOBlock *blk,
 
 void virtio_blk_handle_request(VirtIOBlockReq *req, MultiReqBuffer *mrb);
 
-void virtio_submit_multiwrite(BlockDriverState *bs, MultiReqBuffer *mrb);
+void virtio_submit_multiwrite(BlockBackend *blk, MultiReqBuffer *mrb);
 
 #endif

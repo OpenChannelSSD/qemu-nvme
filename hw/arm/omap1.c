@@ -21,6 +21,7 @@
 #include "hw/arm/omap.h"
 #include "sysemu/sysemu.h"
 #include "hw/arm/soc_dma.h"
+#include "sysemu/block-backend.h"
 #include "sysemu/blockdev.h"
 #include "qemu/range.h"
 #include "hw/sysbus.h"
@@ -3854,10 +3855,12 @@ struct omap_mpu_state_s *omap310_mpu_init(MemoryRegion *system_memory,
     omap_clk_init(s);
 
     /* Memory-mapped stuff */
-    memory_region_init_ram(&s->emiff_ram, NULL, "omap1.dram", s->sdram_size);
+    memory_region_init_ram(&s->emiff_ram, NULL, "omap1.dram", s->sdram_size,
+                           &error_abort);
     vmstate_register_ram_global(&s->emiff_ram);
     memory_region_add_subregion(system_memory, OMAP_EMIFF_BASE, &s->emiff_ram);
-    memory_region_init_ram(&s->imif_ram, NULL, "omap1.sram", s->sram_size);
+    memory_region_init_ram(&s->imif_ram, NULL, "omap1.sram", s->sram_size,
+                           &error_abort);
     vmstate_register_ram_global(&s->imif_ram);
     memory_region_add_subregion(system_memory, OMAP_IMIF_BASE, &s->imif_ram);
 
@@ -3976,7 +3979,8 @@ struct omap_mpu_state_s *omap310_mpu_init(MemoryRegion *system_memory,
         fprintf(stderr, "qemu: missing SecureDigital device\n");
         exit(1);
     }
-    s->mmc = omap_mmc_init(0xfffb7800, system_memory, dinfo->bdrv,
+    s->mmc = omap_mmc_init(0xfffb7800, system_memory,
+                           blk_by_legacy_dinfo(dinfo),
                            qdev_get_gpio_in(s->ih[1], OMAP_INT_OQN),
                            &s->drq[OMAP_DMA_MMC_TX],
                     omap_findclk(s, "mmc_ck"));

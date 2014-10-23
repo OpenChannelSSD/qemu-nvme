@@ -138,9 +138,9 @@ static int aio_worker(void *arg)
     return ret;
 }
 
-static BlockDriverAIOCB *paio_submit(BlockDriverState *bs, HANDLE hfile,
+static BlockAIOCB *paio_submit(BlockDriverState *bs, HANDLE hfile,
         int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
-        BlockDriverCompletionFunc *cb, void *opaque, int type)
+        BlockCompletionFunc *cb, void *opaque, int type)
 {
     RawWin32AIOData *acb = g_slice_new(RawWin32AIOData);
     ThreadPool *pool;
@@ -369,9 +369,9 @@ fail:
     return ret;
 }
 
-static BlockDriverAIOCB *raw_aio_readv(BlockDriverState *bs,
+static BlockAIOCB *raw_aio_readv(BlockDriverState *bs,
                          int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
-                         BlockDriverCompletionFunc *cb, void *opaque)
+                         BlockCompletionFunc *cb, void *opaque)
 {
     BDRVRawState *s = bs->opaque;
     if (s->aio) {
@@ -383,9 +383,9 @@ static BlockDriverAIOCB *raw_aio_readv(BlockDriverState *bs,
     }
 }
 
-static BlockDriverAIOCB *raw_aio_writev(BlockDriverState *bs,
+static BlockAIOCB *raw_aio_writev(BlockDriverState *bs,
                           int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
-                          BlockDriverCompletionFunc *cb, void *opaque)
+                          BlockCompletionFunc *cb, void *opaque)
 {
     BDRVRawState *s = bs->opaque;
     if (s->aio) {
@@ -397,8 +397,8 @@ static BlockDriverAIOCB *raw_aio_writev(BlockDriverState *bs,
     }
 }
 
-static BlockDriverAIOCB *raw_aio_flush(BlockDriverState *bs,
-                         BlockDriverCompletionFunc *cb, void *opaque)
+static BlockAIOCB *raw_aio_flush(BlockDriverState *bs,
+                         BlockCompletionFunc *cb, void *opaque)
 {
     BDRVRawState *s = bs->opaque;
     return paio_submit(bs, s->hfile, 0, NULL, 0, cb, opaque, QEMU_AIO_FLUSH);
@@ -511,8 +511,8 @@ static int raw_create(const char *filename, QemuOpts *opts, Error **errp)
     strstart(filename, "file:", &filename);
 
     /* Read out options */
-    total_size =
-        qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0) / 512;
+    total_size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
+                          BDRV_SECTOR_SIZE);
 
     fd = qemu_open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY,
                    0644);
@@ -521,7 +521,7 @@ static int raw_create(const char *filename, QemuOpts *opts, Error **errp)
         return -EIO;
     }
     set_sparse(fd);
-    ftruncate(fd, total_size * 512);
+    ftruncate(fd, total_size);
     qemu_close(fd);
     return 0;
 }

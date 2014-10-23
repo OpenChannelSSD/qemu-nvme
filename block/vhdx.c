@@ -99,7 +99,8 @@ static const MSGUID logical_sector_guid = { .data1 = 0x8141bf1d,
 /* Each parent type must have a valid GUID; this is for parent images
  * of type 'VHDX'.  If we were to allow e.g. a QCOW2 parent, we would
  * need to make up our own QCOW2 GUID type */
-static const MSGUID parent_vhdx_guid = { .data1 = 0xb04aefb7,
+static const MSGUID parent_vhdx_guid __attribute__((unused))
+                                     = { .data1 = 0xb04aefb7,
                                          .data2 = 0xd19e,
                                          .data3 = 0x4a81,
                                          .data4 = { 0xb7, 0x89, 0x25, 0xb8,
@@ -1003,7 +1004,7 @@ static int vhdx_open(BlockDriverState *bs, QDict *options, int flags,
     /* Disable migration when VHDX images are used */
     error_set(&s->migration_blocker,
             QERR_BLOCK_FORMAT_FEATURE_NOT_SUPPORTED,
-            "vhdx", bs->device_name, "live migration");
+            "vhdx", bdrv_get_device_name(bs), "live migration");
     migrate_add_blocker(s->migration_blocker);
 
     return 0;
@@ -1381,7 +1382,7 @@ static int vhdx_create_new_headers(BlockDriverState *bs, uint64_t image_size,
     int ret = 0;
     VHDXHeader *hdr = NULL;
 
-    hdr = g_malloc0(sizeof(VHDXHeader));
+    hdr = g_new0(VHDXHeader, 1);
 
     hdr->signature       = VHDX_HEADER_SIGNATURE;
     hdr->sequence_number = g_random_int();
@@ -1407,6 +1408,12 @@ exit:
     return ret;
 }
 
+#define VHDX_METADATA_ENTRY_BUFFER_SIZE \
+                                    (sizeof(VHDXFileParameters)               +\
+                                     sizeof(VHDXVirtualDiskSize)              +\
+                                     sizeof(VHDXPage83Data)                   +\
+                                     sizeof(VHDXVirtualDiskLogicalSectorSize) +\
+                                     sizeof(VHDXVirtualDiskPhysicalSectorSize))
 
 /*
  * Create the Metadata entries.
@@ -1445,11 +1452,7 @@ static int vhdx_create_new_metadata(BlockDriverState *bs,
     VHDXVirtualDiskLogicalSectorSize  *mt_log_sector_size;
     VHDXVirtualDiskPhysicalSectorSize *mt_phys_sector_size;
 
-    entry_buffer = g_malloc0(sizeof(VHDXFileParameters)               +
-                             sizeof(VHDXVirtualDiskSize)              +
-                             sizeof(VHDXPage83Data)                   +
-                             sizeof(VHDXVirtualDiskLogicalSectorSize) +
-                             sizeof(VHDXVirtualDiskPhysicalSectorSize));
+    entry_buffer = g_malloc0(VHDX_METADATA_ENTRY_BUFFER_SIZE);
 
     mt_file_params = entry_buffer;
     offset += sizeof(VHDXFileParameters);
@@ -1530,7 +1533,7 @@ static int vhdx_create_new_metadata(BlockDriverState *bs,
     }
 
     ret = bdrv_pwrite(bs, metadata_offset + (64 * KiB), entry_buffer,
-                      VHDX_HEADER_BLOCK_SIZE);
+                      VHDX_METADATA_ENTRY_BUFFER_SIZE);
     if (ret < 0) {
         goto exit;
     }
@@ -1593,7 +1596,7 @@ static int vhdx_create_bat(BlockDriverState *bs, BDRVVHDXState *s,
                 bdrv_has_zero_init(bs) == 0) {
         /* for a fixed file, the default BAT entry is not zero */
         s->bat = g_try_malloc0(length);
-        if (length && s->bat != NULL) {
+        if (length && s->bat == NULL) {
             ret = -ENOMEM;
             goto exit;
         }
@@ -1654,7 +1657,7 @@ static int vhdx_create_new_region_table(BlockDriverState *bs,
 
     /* Populate enough of the BDRVVHDXState to be able to use the
      * pre-existing BAT calculation, translation, and update functions */
-    s = g_malloc0(sizeof(BDRVVHDXState));
+    s = g_new0(BDRVVHDXState, 1);
 
     s->chunk_ratio = (VHDX_MAX_SECTORS_PER_BLOCK) *
                      (uint64_t) sector_size / (uint64_t) block_size;
@@ -1725,7 +1728,6 @@ static int vhdx_create_new_region_table(BlockDriverState *bs,
         goto exit;
     }
 
-
 exit:
     g_free(s);
     g_free(buffer);
@@ -1766,7 +1768,8 @@ static int vhdx_create(const char *filename, QemuOpts *opts, Error **errp)
     VHDXImageType image_type;
     Error *local_err = NULL;
 
-    image_size = qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0);
+    image_size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
+                          BDRV_SECTOR_SIZE);
     log_size = qemu_opt_get_size_del(opts, VHDX_BLOCK_OPT_LOG_SIZE, 0);
     block_size = qemu_opt_get_size_del(opts, VHDX_BLOCK_OPT_BLOCK_SIZE, 0);
     type = qemu_opt_get_del(opts, BLOCK_OPT_SUBFMT);
@@ -1873,7 +1876,6 @@ static int vhdx_create(const char *filename, QemuOpts *opts, Error **errp)
     if (ret < 0) {
         goto delete_and_exit;
     }
-
 
 
 delete_and_exit:

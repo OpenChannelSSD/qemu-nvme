@@ -41,7 +41,9 @@ static void arm_cpu_set_pc(CPUState *cs, vaddr value)
 static bool arm_cpu_has_work(CPUState *cs)
 {
     return cs->interrupt_request &
-        (CPU_INTERRUPT_FIQ | CPU_INTERRUPT_HARD | CPU_INTERRUPT_EXITTB);
+        (CPU_INTERRUPT_FIQ | CPU_INTERRUPT_HARD
+         | CPU_INTERRUPT_VFIQ | CPU_INTERRUPT_VIRQ
+         | CPU_INTERRUPT_EXITTB);
 }
 
 static void cp_reg_reset(gpointer key, gpointer value, gpointer opaque)
@@ -129,26 +131,38 @@ static void arm_cpu_reset(CPUState *s)
     env->uncached_cpsr = ARM_CPU_MODE_SVC;
     env->daif = PSTATE_D | PSTATE_A | PSTATE_I | PSTATE_F;
     /* On ARMv7-M the CPSR_I is the value of the PRIMASK register, and is
-       clear at reset.  Initial SP and PC are loaded from ROM.  */
+     * clear at reset. Initial SP and PC are loaded from ROM.
+     */
     if (IS_M(env)) {
-        uint32_t pc;
+        uint32_t initial_msp; /* Loaded from 0x0 */
+        uint32_t initial_pc; /* Loaded from 0x4 */
         uint8_t *rom;
+
         env->daif &= ~PSTATE_I;
         rom = rom_ptr(0);
         if (rom) {
-            /* We should really use ldl_phys here, in case the guest
-               modified flash and reset itself.  However images
-               loaded via -kernel have not been copied yet, so load the
-               values directly from there.  */
-            env->regs[13] = ldl_p(rom) & 0xFFFFFFFC;
-            pc = ldl_p(rom + 4);
-            env->thumb = pc & 1;
-            env->regs[15] = pc & ~1;
+            /* Address zero is covered by ROM which hasn't yet been
+             * copied into physical memory.
+             */
+            initial_msp = ldl_p(rom);
+            initial_pc = ldl_p(rom + 4);
+        } else {
+            /* Address zero not covered by a ROM blob, or the ROM blob
+             * is in non-modifiable memory and this is a second reset after
+             * it got copied into memory. In the latter case, rom_ptr
+             * will return a NULL pointer and we should use ldl_phys instead.
+             */
+            initial_msp = ldl_phys(s->as, 0);
+            initial_pc = ldl_phys(s->as, 4);
         }
+
+        env->regs[13] = initial_msp & 0xFFFFFFFC;
+        env->regs[15] = initial_pc & ~1;
+        env->thumb = initial_pc & 1;
     }
 
     if (env->cp15.c1_sys & SCTLR_V) {
-            env->regs[15] = 0xFFFF0000;
+        env->regs[15] = 0xFFFF0000;
     }
 
     env->vfp.xregs[ARM_VFP_FPEXC] = 0;
@@ -161,38 +175,86 @@ static void arm_cpu_reset(CPUState *s)
     set_float_detect_tininess(float_tininess_before_rounding,
                               &env->vfp.standard_fp_status);
     tlb_flush(s, 1);
-    /* Reset is a state change for some CPUARMState fields which we
-     * bake assumptions about into translated code, so we need to
-     * tb_flush().
-     */
-    tb_flush(env);
 
 #ifndef CONFIG_USER_ONLY
     if (kvm_enabled()) {
         kvm_arm_reset_vcpu(cpu);
     }
 #endif
+
+    hw_breakpoint_update_all(cpu);
+    hw_watchpoint_update_all(cpu);
+}
+
+bool arm_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
+{
+    CPUClass *cc = CPU_GET_CLASS(cs);
+    bool ret = false;
+
+    if (interrupt_request & CPU_INTERRUPT_FIQ
+        && arm_excp_unmasked(cs, EXCP_FIQ)) {
+        cs->exception_index = EXCP_FIQ;
+        cc->do_interrupt(cs);
+        ret = true;
+    }
+    /* ARMv7-M interrupt return works by loading a magic value
+       into the PC.  On real hardware the load causes the
+       return to occur.  The qemu implementation performs the
+       jump normally, then does the exception return when the
+       CPU tries to execute code at the magic address.
+       This will cause the magic PC value to be pushed to
+       the stack if an interrupt occurred at the wrong time.
+       We avoid this by disabling interrupts when
+       pc contains a magic address.  */
+    if (interrupt_request & CPU_INTERRUPT_HARD
+        && arm_excp_unmasked(cs, EXCP_IRQ)) {
+        cs->exception_index = EXCP_IRQ;
+        cc->do_interrupt(cs);
+        ret = true;
+    }
+    if (interrupt_request & CPU_INTERRUPT_VIRQ
+        && arm_excp_unmasked(cs, EXCP_VIRQ)) {
+        cs->exception_index = EXCP_VIRQ;
+        cc->do_interrupt(cs);
+        ret = true;
+    }
+    if (interrupt_request & CPU_INTERRUPT_VFIQ
+        && arm_excp_unmasked(cs, EXCP_VFIQ)) {
+        cs->exception_index = EXCP_VFIQ;
+        cc->do_interrupt(cs);
+        ret = true;
+    }
+
+    return ret;
 }
 
 #ifndef CONFIG_USER_ONLY
 static void arm_cpu_set_irq(void *opaque, int irq, int level)
 {
     ARMCPU *cpu = opaque;
+    CPUARMState *env = &cpu->env;
     CPUState *cs = CPU(cpu);
+    static const int mask[] = {
+        [ARM_CPU_IRQ] = CPU_INTERRUPT_HARD,
+        [ARM_CPU_FIQ] = CPU_INTERRUPT_FIQ,
+        [ARM_CPU_VIRQ] = CPU_INTERRUPT_VIRQ,
+        [ARM_CPU_VFIQ] = CPU_INTERRUPT_VFIQ
+    };
 
     switch (irq) {
-    case ARM_CPU_IRQ:
-        if (level) {
-            cpu_interrupt(cs, CPU_INTERRUPT_HARD);
-        } else {
-            cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+    case ARM_CPU_VIRQ:
+    case ARM_CPU_VFIQ:
+        if (!arm_feature(env, ARM_FEATURE_EL2)) {
+            hw_error("%s: Virtual interrupt line %d with no EL2 support\n",
+                     __func__, irq);
         }
-        break;
+        /* fall through */
+    case ARM_CPU_IRQ:
     case ARM_CPU_FIQ:
         if (level) {
-            cpu_interrupt(cs, CPU_INTERRUPT_FIQ);
+            cpu_interrupt(cs, mask[irq]);
         } else {
-            cpu_reset_interrupt(cs, CPU_INTERRUPT_FIQ);
+            cpu_reset_interrupt(cs, mask[irq]);
         }
         break;
     default:
@@ -242,9 +304,12 @@ static void arm_cpu_initfn(Object *obj)
 #ifndef CONFIG_USER_ONLY
     /* Our inbound IRQ and FIQ lines */
     if (kvm_enabled()) {
-        qdev_init_gpio_in(DEVICE(cpu), arm_cpu_kvm_set_irq, 2);
+        /* VIRQ and VFIQ are unused with KVM but we add them to maintain
+         * the same interface as non-KVM CPUs.
+         */
+        qdev_init_gpio_in(DEVICE(cpu), arm_cpu_kvm_set_irq, 4);
     } else {
-        qdev_init_gpio_in(DEVICE(cpu), arm_cpu_set_irq, 2);
+        qdev_init_gpio_in(DEVICE(cpu), arm_cpu_set_irq, 4);
     }
 
     cpu->gt_timer[GTIMER_PHYS] = timer_new(QEMU_CLOCK_VIRTUAL, GTIMER_SCALE,
@@ -640,6 +705,7 @@ static void cortex_a8_initfn(Object *obj)
     cpu->id_isar2 = 0x21232031;
     cpu->id_isar3 = 0x11112131;
     cpu->id_isar4 = 0x00111142;
+    cpu->dbgdidr = 0x15141000;
     cpu->clidr = (1 << 27) | (2 << 24) | 3;
     cpu->ccsidr[0] = 0xe007e01a; /* 16k L1 dcache. */
     cpu->ccsidr[1] = 0x2007e01a; /* 16k L1 icache. */
@@ -712,9 +778,10 @@ static void cortex_a9_initfn(Object *obj)
     cpu->id_isar2 = 0x21232041;
     cpu->id_isar3 = 0x11112131;
     cpu->id_isar4 = 0x00111142;
+    cpu->dbgdidr = 0x35141000;
     cpu->clidr = (1 << 27) | (1 << 24) | 3;
-    cpu->ccsidr[0] = 0xe00fe015; /* 16k L1 dcache. */
-    cpu->ccsidr[1] = 0x200fe015; /* 16k L1 icache. */
+    cpu->ccsidr[0] = 0xe00fe019; /* 16k L1 dcache. */
+    cpu->ccsidr[1] = 0x200fe019; /* 16k L1 icache. */
     define_arm_cp_regs(cpu, cortexa9_cp_reginfo);
 }
 
@@ -773,6 +840,7 @@ static void cortex_a15_initfn(Object *obj)
     cpu->id_isar2 = 0x21232041;
     cpu->id_isar3 = 0x11112131;
     cpu->id_isar4 = 0x10011142;
+    cpu->dbgdidr = 0x3515f021;
     cpu->clidr = 0x0a200023;
     cpu->ccsidr[0] = 0x701fe00a; /* 32K L1 dcache */
     cpu->ccsidr[1] = 0x201fe00a; /* 32K L1 icache */
@@ -1036,6 +1104,7 @@ static void arm_cpu_class_init(ObjectClass *oc, void *data)
     cc->class_by_name = arm_cpu_class_by_name;
     cc->has_work = arm_cpu_has_work;
     cc->do_interrupt = arm_cpu_do_interrupt;
+    cc->cpu_exec_interrupt = arm_cpu_exec_interrupt;
     cc->dump_state = arm_cpu_dump_state;
     cc->set_pc = arm_cpu_set_pc;
     cc->gdb_read_register = arm_cpu_gdb_read_register;
@@ -1048,6 +1117,8 @@ static void arm_cpu_class_init(ObjectClass *oc, void *data)
 #endif
     cc->gdb_num_core_regs = 26;
     cc->gdb_core_xml_file = "arm-core.xml";
+    cc->gdb_stop_before_watchpoint = true;
+    cc->debug_excp_handler = arm_debug_excp_handler;
 }
 
 static void cpu_register(const ARMCPUInfo *info)

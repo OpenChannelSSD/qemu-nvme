@@ -113,6 +113,7 @@ PowerPCCPUClass *ppc_cpu_class_by_pvr(uint32_t pvr);
 PowerPCCPUClass *ppc_cpu_class_by_pvr_mask(uint32_t pvr);
 
 void ppc_cpu_do_interrupt(CPUState *cpu);
+bool ppc_cpu_exec_interrupt(CPUState *cpu, int int_req);
 void ppc_cpu_dump_state(CPUState *cpu, FILE *f, fprintf_function cpu_fprintf,
                         int flags);
 void ppc_cpu_dump_statistics(CPUState *cpu, FILE *f,
@@ -127,6 +128,7 @@ int ppc64_cpu_write_elf64_qemunote(WriteCoreDumpFunction f,
 int ppc64_cpu_write_elf64_note(WriteCoreDumpFunction f, CPUState *cs,
                                int cpuid, void *opaque);
 #ifndef CONFIG_USER_ONLY
+void ppc_cpu_do_system_reset(CPUState *cs);
 extern const struct VMStateDescription vmstate_ppc_cpu;
 
 typedef struct PPCTimebase {

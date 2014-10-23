@@ -40,7 +40,7 @@
 #include "hw/empty_slot.h"
 #include "hw/loader.h"
 #include "elf.h"
-#include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "trace.h"
 
 /*
@@ -527,7 +527,7 @@ static void apc_init(hwaddr power_base, qemu_irq cpu_halt)
     sysbus_connect_irq(s, 0, cpu_halt);
 }
 
-static void tcx_init(hwaddr addr, int vram_size, int width,
+static void tcx_init(hwaddr addr, qemu_irq irq, int vram_size, int width,
                      int height, int depth)
 {
     DeviceState *dev;
@@ -541,25 +541,43 @@ static void tcx_init(hwaddr addr, int vram_size, int width,
     qdev_prop_set_uint64(dev, "prom_addr", addr);
     qdev_init_nofail(dev);
     s = SYS_BUS_DEVICE(dev);
-    /* FCode ROM */
+
+    /* 10/ROM : FCode ROM */
     sysbus_mmio_map(s, 0, addr);
-    /* DAC */
-    sysbus_mmio_map(s, 1, addr + 0x00200000ULL);
-    /* TEC (dummy) */
-    sysbus_mmio_map(s, 2, addr + 0x00700000ULL);
-    /* THC 24 bit: NetBSD writes here even with 8-bit display: dummy */
-    sysbus_mmio_map(s, 3, addr + 0x00301000ULL);
-    /* 8-bit plane */
-    sysbus_mmio_map(s, 4, addr + 0x00800000ULL);
-    if (depth == 24) {
-        /* 24-bit plane */
-        sysbus_mmio_map(s, 5, addr + 0x02000000ULL);
-        /* Control plane */
-        sysbus_mmio_map(s, 6, addr + 0x0a000000ULL);
+    /* 2/STIP : Stipple */
+    sysbus_mmio_map(s, 1, addr + 0x04000000ULL);
+    /* 3/BLIT : Blitter */
+    sysbus_mmio_map(s, 2, addr + 0x06000000ULL);
+    /* 5/RSTIP : Raw Stipple */
+    sysbus_mmio_map(s, 3, addr + 0x0c000000ULL);
+    /* 6/RBLIT : Raw Blitter */
+    sysbus_mmio_map(s, 4, addr + 0x0e000000ULL);
+    /* 7/TEC : Transform Engine */
+    sysbus_mmio_map(s, 5, addr + 0x00700000ULL);
+    /* 8/CMAP  : DAC */
+    sysbus_mmio_map(s, 6, addr + 0x00200000ULL);
+    /* 9/THC : */
+    if (depth == 8) {
+        sysbus_mmio_map(s, 7, addr + 0x00300000ULL);
     } else {
-        /* THC 8 bit (dummy) */
-        sysbus_mmio_map(s, 5, addr + 0x00300000ULL);
+        sysbus_mmio_map(s, 7, addr + 0x00301000ULL);
     }
+    /* 11/DHC : */
+    sysbus_mmio_map(s, 8, addr + 0x00240000ULL);
+    /* 12/ALT : */
+    sysbus_mmio_map(s, 9, addr + 0x00280000ULL);
+    /* 0/DFB8 : 8-bit plane */
+    sysbus_mmio_map(s, 10, addr + 0x00800000ULL);
+    /* 1/DFB24 : 24bit plane */
+    sysbus_mmio_map(s, 11, addr + 0x02000000ULL);
+    /* 4/RDFB32: Raw framebuffer. Control plane */
+    sysbus_mmio_map(s, 12, addr + 0x0a000000ULL);
+    /* 9/THC24bits : NetBSD writes here even with 8-bit display: dummy */
+    if (depth == 8) {
+        sysbus_mmio_map(s, 13, addr + 0x00301000ULL);
+    }
+
+    sysbus_connect_irq(s, 0, irq);
 }
 
 static void cg3_init(hwaddr addr, qemu_irq irq, int vram_size, int width,
@@ -621,7 +639,7 @@ static int idreg_init1(SysBusDevice *dev)
     IDRegState *s = MACIO_ID_REGISTER(dev);
 
     memory_region_init_ram(&s->mem, OBJECT(s),
-                           "sun4m.idreg", sizeof(idreg_data));
+                           "sun4m.idreg", sizeof(idreg_data), &error_abort);
     vmstate_register_ram_global(&s->mem);
     memory_region_set_readonly(&s->mem, true);
     sysbus_init_mmio(dev, &s->mem);
@@ -668,7 +686,7 @@ static int afx_init1(SysBusDevice *dev)
 {
     AFXState *s = TCX_AFX(dev);
 
-    memory_region_init_ram(&s->mem, OBJECT(s), "sun4m.afx", 4);
+    memory_region_init_ram(&s->mem, OBJECT(s), "sun4m.afx", 4, &error_abort);
     vmstate_register_ram_global(&s->mem);
     sysbus_init_mmio(dev, &s->mem);
     return 0;
@@ -742,7 +760,8 @@ static int prom_init1(SysBusDevice *dev)
 {
     PROMState *s = OPENPROM(dev);
 
-    memory_region_init_ram(&s->prom, OBJECT(s), "sun4m.prom", PROM_SIZE_MAX);
+    memory_region_init_ram(&s->prom, OBJECT(s), "sun4m.prom", PROM_SIZE_MAX,
+                           &error_abort);
     vmstate_register_ram_global(&s->prom);
     memory_region_set_readonly(&s->prom, true);
     sysbus_init_mmio(dev, &s->prom);
@@ -784,7 +803,8 @@ static int ram_init1(SysBusDevice *dev)
 {
     RamDevice *d = SUN4M_RAM(dev);
 
-    memory_region_init_ram(&d->ram, OBJECT(d), "sun4m.ram", d->size);
+    memory_region_init_ram(&d->ram, OBJECT(d), "sun4m.ram", d->size,
+                           &error_abort);
     vmstate_register_ram_global(&d->ram);
     sysbus_init_mmio(dev, &d->ram);
     return 0;
@@ -974,8 +994,8 @@ static void sun4m_hw_init(const struct sun4m_hwdef *hwdef,
                 exit(1);
             }
 
-            tcx_init(hwdef->tcx_base, 0x00100000, graphic_width, graphic_height,
-                     graphic_depth);
+            tcx_init(hwdef->tcx_base, slavio_irq[11], 0x00100000,
+                     graphic_width, graphic_height, graphic_depth);
         }
     }
 

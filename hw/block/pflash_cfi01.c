@@ -38,7 +38,7 @@
 
 #include "hw/hw.h"
 #include "hw/block/flash.h"
-#include "block/block.h"
+#include "sysemu/block-backend.h"
 #include "qemu/timer.h"
 #include "qemu/bitops.h"
 #include "exec/address-spaces.h"
@@ -69,7 +69,7 @@ struct pflash_t {
     SysBusDevice parent_obj;
     /*< public >*/
 
-    BlockDriverState *bs;
+    BlockBackend *blk;
     uint32_t nb_blocs;
     uint64_t sector_len;
     uint8_t bank_width;
@@ -94,10 +94,13 @@ struct pflash_t {
     void *storage;
 };
 
+static int pflash_post_load(void *opaque, int version_id);
+
 static const VMStateDescription vmstate_pflash = {
     .name = "pflash_cfi01",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = pflash_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_UINT8(wcycle, pflash_t),
         VMSTATE_UINT8(cmd, pflash_t),
@@ -209,11 +212,11 @@ static uint32_t pflash_devid_query(pflash_t *pfl, hwaddr offset)
     switch (boff & 0xFF) {
     case 0:
         resp = pfl->ident0;
-        DPRINTF("%s: Manufacturer Code %04x\n", __func__, ret);
+        DPRINTF("%s: Manufacturer Code %04x\n", __func__, resp);
         break;
     case 1:
         resp = pfl->ident1;
-        DPRINTF("%s: Device ID Code %04x\n", __func__, ret);
+        DPRINTF("%s: Device ID Code %04x\n", __func__, resp);
         break;
     default:
         DPRINTF("%s: Read Device Information offset=%x\n", __func__,
@@ -392,13 +395,13 @@ static void pflash_update(pflash_t *pfl, int offset,
                           int size)
 {
     int offset_end;
-    if (pfl->bs) {
+    if (pfl->blk) {
         offset_end = offset + size;
         /* round to sectors */
         offset = offset >> 9;
         offset_end = (offset_end + 511) >> 9;
-        bdrv_write(pfl->bs, offset, pfl->storage + (offset << 9),
-                   offset_end - offset);
+        blk_write(pfl->blk, offset, pfl->storage + (offset << 9),
+                  offset_end - offset);
     }
 }
 
@@ -750,6 +753,7 @@ static void pflash_cfi01_realize(DeviceState *dev, Error **errp)
     int ret;
     uint64_t blocks_per_device, device_len;
     int num_devices;
+    Error *local_err = NULL;
 
     total_len = pfl->sector_len * pfl->nb_blocs;
 
@@ -770,25 +774,29 @@ static void pflash_cfi01_realize(DeviceState *dev, Error **errp)
     memory_region_init_rom_device(
         &pfl->mem, OBJECT(dev),
         pfl->be ? &pflash_cfi01_ops_be : &pflash_cfi01_ops_le, pfl,
-        pfl->name, total_len);
+        pfl->name, total_len, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return;
+    }
+
     vmstate_register_ram(&pfl->mem, DEVICE(pfl));
     pfl->storage = memory_region_get_ram_ptr(&pfl->mem);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &pfl->mem);
 
-    if (pfl->bs) {
+    if (pfl->blk) {
         /* read the initial flash content */
-        ret = bdrv_read(pfl->bs, 0, pfl->storage, total_len >> 9);
+        ret = blk_read(pfl->blk, 0, pfl->storage, total_len >> 9);
 
         if (ret < 0) {
             vmstate_unregister_ram(&pfl->mem, DEVICE(pfl));
-            memory_region_destroy(&pfl->mem);
             error_setg(errp, "failed to read the initial flash content");
             return;
         }
     }
 
-    if (pfl->bs) {
-        pfl->ro = bdrv_is_read_only(pfl->bs);
+    if (pfl->blk) {
+        pfl->ro = blk_is_read_only(pfl->blk);
     } else {
         pfl->ro = 0;
     }
@@ -890,7 +898,7 @@ static void pflash_cfi01_realize(DeviceState *dev, Error **errp)
 }
 
 static Property pflash_cfi01_properties[] = {
-    DEFINE_PROP_DRIVE("drive", struct pflash_t, bs),
+    DEFINE_PROP_DRIVE("drive", struct pflash_t, blk),
     /* num-blocks is the number of blocks actually visible to the guest,
      * ie the total size of the device divided by the sector length.
      * If we're emulating flash devices wired in parallel the actual
@@ -954,14 +962,14 @@ type_init(pflash_cfi01_register_types)
 pflash_t *pflash_cfi01_register(hwaddr base,
                                 DeviceState *qdev, const char *name,
                                 hwaddr size,
-                                BlockDriverState *bs,
+                                BlockBackend *blk,
                                 uint32_t sector_len, int nb_blocs,
                                 int bank_width, uint16_t id0, uint16_t id1,
                                 uint16_t id2, uint16_t id3, int be)
 {
     DeviceState *dev = qdev_create(NULL, TYPE_CFI_PFLASH01);
 
-    if (bs && qdev_prop_set_drive(dev, "drive", bs)) {
+    if (blk && qdev_prop_set_drive(dev, "drive", blk)) {
         abort();
     }
     qdev_prop_set_uint32(dev, "num-blocks", nb_blocs);
@@ -982,4 +990,15 @@ pflash_t *pflash_cfi01_register(hwaddr base,
 MemoryRegion *pflash_cfi01_get_memory(pflash_t *fl)
 {
     return &fl->mem;
+}
+
+static int pflash_post_load(void *opaque, int version_id)
+{
+    pflash_t *pfl = opaque;
+
+    if (!pfl->ro) {
+        DPRINTF("%s: updating bdrv for %s\n", __func__, pfl->name);
+        pflash_update(pfl, 0, pfl->sector_len * pfl->nb_blocs);
+    }
+    return 0;
 }

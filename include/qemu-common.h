@@ -105,6 +105,8 @@ static inline char *realpath(const char *path, char *resolved_path)
 }
 #endif
 
+void cpu_ticks_init(void);
+
 /* icount */
 void configure_icount(QemuOpts *opts, Error **errp);
 extern int use_icount;
@@ -187,6 +189,9 @@ int64_t strtosz_suffix_unit(const char *nptr, char **end,
 
 /* used to print char* safely */
 #define STR_OR_NULL(str) ((str) ? (str) : "null")
+
+/* id.c */
+bool id_wellformed(const char *id);
 
 /* path.c */
 void init_paths(const char *prefix);

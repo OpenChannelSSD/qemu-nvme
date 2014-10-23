@@ -36,7 +36,7 @@
 #include "hw/loader.h"
 #include "hw/usb.h"
 #include "hw/block/flash.h"
-#include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "exec/address-spaces.h"
 
 #define FLASH_BASE 0x00000000
@@ -255,7 +255,7 @@ static void r2d_init(MachineState *machine)
     qemu_register_reset(main_cpu_reset, reset_info);
 
     /* Allocate memory space */
-    memory_region_init_ram(sdram, NULL, "r2d.sdram", SDRAM_SIZE);
+    memory_region_init_ram(sdram, NULL, "r2d.sdram", SDRAM_SIZE, &error_abort);
     vmstate_register_ram_global(sdram);
     memory_region_add_subregion(address_space_mem, SDRAM_BASE, sdram);
     /* Register peripherals */
@@ -290,8 +290,8 @@ static void r2d_init(MachineState *machine)
     /* onboard flash memory */
     dinfo = drive_get(IF_PFLASH, 0, 0);
     pflash_cfi02_register(0x0, NULL, "r2d.flash", FLASH_SIZE,
-                          dinfo ? dinfo->bdrv : NULL, (16 * 1024),
-                          FLASH_SIZE >> 16,
+                          dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
+                          (16 * 1024), FLASH_SIZE >> 16,
                           1, 4, 0x0000, 0x0000, 0x0000, 0x0000,
                           0x555, 0x2aa, 0);
 

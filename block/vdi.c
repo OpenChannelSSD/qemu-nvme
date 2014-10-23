@@ -292,7 +292,7 @@ static int vdi_check(BlockDriverState *bs, BdrvCheckResult *res,
         return -ENOTSUP;
     }
 
-    bmap = g_try_malloc(s->header.blocks_in_image * sizeof(uint32_t));
+    bmap = g_try_new(uint32_t, s->header.blocks_in_image);
     if (s->header.blocks_in_image && bmap == NULL) {
         res->check_errors++;
         return -ENOMEM;
@@ -490,7 +490,7 @@ static int vdi_open(BlockDriverState *bs, QDict *options, int flags,
     /* Disable migration when vdi images are used */
     error_set(&s->migration_blocker,
               QERR_BLOCK_FORMAT_FEATURE_NOT_SUPPORTED,
-              "vdi", bs->device_name, "live migration");
+              "vdi", bdrv_get_device_name(bs), "live migration");
     migrate_add_blocker(s->migration_blocker);
 
     return 0;
@@ -700,7 +700,8 @@ static int vdi_create(const char *filename, QemuOpts *opts, Error **errp)
     logout("\n");
 
     /* Read out options. */
-    bytes = qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0);
+    bytes = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
+                     BDRV_SECTOR_SIZE);
 #if defined(CONFIG_VDI_BLOCK_SIZE)
     /* TODO: Additional checks (SECTOR_SIZE * 2^n, ...). */
     block_size = qemu_opt_get_size_del(opts,

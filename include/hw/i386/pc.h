@@ -176,6 +176,8 @@ void pc_acpi_init(const char *default_dsdt);
 PcGuestInfo *pc_guest_info_init(ram_addr_t below_4g_mem_size,
                                 ram_addr_t above_4g_mem_size);
 
+void pc_set_legacy_acpi_data_size(void);
+
 #define PCI_HOST_PROP_PCI_HOLE_START   "pci-hole-start"
 #define PCI_HOST_PROP_PCI_HOLE_END     "pci-hole-end"
 #define PCI_HOST_PROP_PCI_HOLE64_START "pci-hole64-start"
@@ -304,6 +306,22 @@ bool e820_get_entry(int, uint32_t, uint64_t *, uint64_t *);
             .driver   = "intel-hda",\
             .property = "old_msi_addr",\
             .value    = "on",\
+        },{\
+            .driver   = "VGA",\
+            .property = "qemu-extended-regs",\
+            .value    = "off",\
+        },{\
+            .driver   = "secondary-vga",\
+            .property = "qemu-extended-regs",\
+            .value    = "off",\
+        },{\
+            .driver   = "usb-mouse",\
+            .property = "usb_version",\
+            .value    = stringify(1),\
+        },{\
+            .driver   = "usb-kbd",\
+            .property = "usb_version",\
+            .value    = stringify(1),\
         }
 
 #define PC_COMPAT_2_0 \
@@ -326,6 +344,11 @@ bool e820_get_entry(int, uint32_t, uint64_t *, uint64_t *);
             .driver   = "nec-usb-xhci",\
             .property = "superspeed-ports-first",\
             .value    = "off",\
+        },\
+        {\
+            .driver   = "nec-usb-xhci",\
+            .property = "force-pcie-endcap",\
+            .value    = "on",\
         },\
         {\
             .driver   = "pci-serial",\

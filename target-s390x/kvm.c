@@ -181,9 +181,10 @@ unsigned long kvm_arch_vcpu_id(CPUState *cpu)
     return cpu->cpu_index;
 }
 
-int kvm_arch_init_vcpu(CPUState *cpu)
+int kvm_arch_init_vcpu(CPUState *cs)
 {
-    /* nothing todo yet */
+    S390CPU *cpu = S390_CPU(cs);
+    kvm_s390_set_cpu_state(cpu, cpu->env.cpu_state);
     return 0;
 }
 
@@ -197,7 +198,7 @@ void kvm_s390_reset_vcpu(S390CPU *cpu)
      * Before this ioctl cpu_synchronize_state() is called in common kvm
      * code (kvm-all) */
     if (kvm_vcpu_ioctl(cs, KVM_S390_INITIAL_RESET, NULL)) {
-        perror("Can't reset vcpu\n");
+        error_report("Initial CPU reset failed on CPU %i\n", cs->cpu_index);
     }
 }
 
@@ -916,23 +917,30 @@ static int handle_diag(S390CPU *cpu, struct kvm_run *run, uint32_t ipb)
     return r;
 }
 
-static int kvm_s390_cpu_start(S390CPU *cpu)
+static void sigp_cpu_start(void *arg)
 {
-    s390_add_running_cpu(cpu);
-    qemu_cpu_kick(CPU(cpu));
+    CPUState *cs = arg;
+    S390CPU *cpu = S390_CPU(cs);
+
+    s390_cpu_set_state(CPU_STATE_OPERATING, cpu);
     DPRINTF("DONE: KVM cpu start: %p\n", &cpu->env);
-    return 0;
 }
 
-int kvm_s390_cpu_restart(S390CPU *cpu)
+static void sigp_cpu_restart(void *arg)
 {
+    CPUState *cs = arg;
+    S390CPU *cpu = S390_CPU(cs);
     struct kvm_s390_irq irq = {
         .type = KVM_S390_RESTART,
     };
 
     kvm_s390_vcpu_interrupt(cpu, &irq);
-    s390_add_running_cpu(cpu);
-    qemu_cpu_kick(CPU(cpu));
+    s390_cpu_set_state(CPU_STATE_OPERATING, cpu);
+}
+
+int kvm_s390_cpu_restart(S390CPU *cpu)
+{
+    run_on_cpu(CPU(cpu), sigp_cpu_restart, CPU(cpu));
     DPRINTF("DONE: KVM cpu restart: %p\n", &cpu->env);
     return 0;
 }
@@ -944,6 +952,7 @@ static void sigp_initial_cpu_reset(void *arg)
 
     cpu_synchronize_state(cpu);
     scc->initial_cpu_reset(cpu);
+    cpu_synchronize_post_reset(cpu);
 }
 
 static void sigp_cpu_reset(void *arg)
@@ -953,6 +962,7 @@ static void sigp_cpu_reset(void *arg)
 
     cpu_synchronize_state(cpu);
     scc->cpu_reset(cpu);
+    cpu_synchronize_post_reset(cpu);
 }
 
 #define SIGP_ORDER_MASK 0x000000ff
@@ -980,10 +990,12 @@ static int handle_sigp(S390CPU *cpu, struct kvm_run *run, uint8_t ipa1)
 
     switch (order_code) {
     case SIGP_START:
-        cc = kvm_s390_cpu_start(target_cpu);
+        run_on_cpu(CPU(target_cpu), sigp_cpu_start, CPU(target_cpu));
+        cc = 0;
         break;
     case SIGP_RESTART:
-        cc = kvm_s390_cpu_restart(target_cpu);
+        run_on_cpu(CPU(target_cpu), sigp_cpu_restart, CPU(target_cpu));
+        cc = 0;
         break;
     case SIGP_SET_ARCH:
         *statusreg &= 0xffffffff00000000UL;
@@ -1065,7 +1077,7 @@ static void unmanageable_intercept(S390CPU *cpu, const char *str, int pswoffset)
     error_report("Unmanageable %s! CPU%i new PSW: 0x%016lx:%016lx",
                  str, cs->cpu_index, ldq_phys(cs->as, cpu->env.psa + pswoffset),
                  ldq_phys(cs->as, cpu->env.psa + pswoffset + 8));
-    s390_del_running_cpu(cpu);
+    s390_cpu_halt(cpu);
     guest_panicked();
 }
 
@@ -1094,7 +1106,8 @@ static int handle_intercept(S390CPU *cpu)
             break;
         case ICPT_WAITPSW:
             /* disabled wait, since enabled wait is handled in kernel */
-            if (s390_del_running_cpu(cpu) == 0) {
+            cpu_synchronize_state(cs);
+            if (s390_cpu_halt(cpu) == 0) {
                 if (is_special_wait_psw(cs)) {
                     qemu_system_shutdown_request();
                 } else {
@@ -1104,7 +1117,7 @@ static int handle_intercept(S390CPU *cpu)
             r = EXCP_HALTED;
             break;
         case ICPT_CPU_STOP:
-            if (s390_del_running_cpu(cpu) == 0) {
+            if (s390_cpu_set_state(CPU_STATE_STOPPED, cpu) == 0) {
                 qemu_system_shutdown_request();
             }
             r = EXCP_HALTED;
@@ -1305,4 +1318,47 @@ int kvm_s390_assign_subch_ioeventfd(EventNotifier *notifier, uint32_t sch,
         kick.flags |= KVM_IOEVENTFD_FLAG_DEASSIGN;
     }
     return kvm_vm_ioctl(kvm_state, KVM_IOEVENTFD, &kick);
+}
+
+int kvm_s390_get_memslot_count(KVMState *s)
+{
+    return kvm_check_extension(s, KVM_CAP_NR_MEMSLOTS);
+}
+
+int kvm_s390_set_cpu_state(S390CPU *cpu, uint8_t cpu_state)
+{
+    struct kvm_mp_state mp_state = {};
+    int ret;
+
+    /* the kvm part might not have been initialized yet */
+    if (CPU(cpu)->kvm_state == NULL) {
+        return 0;
+    }
+
+    switch (cpu_state) {
+    case CPU_STATE_STOPPED:
+        mp_state.mp_state = KVM_MP_STATE_STOPPED;
+        break;
+    case CPU_STATE_CHECK_STOP:
+        mp_state.mp_state = KVM_MP_STATE_CHECK_STOP;
+        break;
+    case CPU_STATE_OPERATING:
+        mp_state.mp_state = KVM_MP_STATE_OPERATING;
+        break;
+    case CPU_STATE_LOAD:
+        mp_state.mp_state = KVM_MP_STATE_LOAD;
+        break;
+    default:
+        error_report("Requested CPU state is not a valid S390 CPU state: %u",
+                     cpu_state);
+        exit(1);
+    }
+
+    ret = kvm_vcpu_ioctl(CPU(cpu), KVM_SET_MP_STATE, &mp_state);
+    if (ret) {
+        trace_kvm_failed_cpu_state_set(CPU(cpu)->cpu_index, cpu_state,
+                                       strerror(-ret));
+    }
+
+    return ret;
 }

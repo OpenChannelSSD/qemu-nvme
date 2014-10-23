@@ -10,6 +10,8 @@
 #include <stdarg.h>
 #include "qemu/sockets.h" /* for EINPROGRESS on Windows */
 #include "block/block_int.h"
+#include "qapi/qmp/qdict.h"
+#include "qapi/qmp/qstring.h"
 
 typedef struct {
     BlockDriverState *test_file;
@@ -17,7 +19,7 @@ typedef struct {
 
 typedef struct BlkverifyAIOCB BlkverifyAIOCB;
 struct BlkverifyAIOCB {
-    BlockDriverAIOCB common;
+    BlockAIOCB common;
     QEMUBH *bh;
 
     /* Request metadata */
@@ -27,7 +29,6 @@ struct BlkverifyAIOCB {
 
     int ret;                    /* first completed request's result */
     unsigned int done;          /* completion counter */
-    bool *finished;             /* completion signal for cancel */
 
     QEMUIOVector *qiov;         /* user I/O vector */
     QEMUIOVector raw_qiov;      /* cloned I/O vector for raw file */
@@ -36,22 +37,8 @@ struct BlkverifyAIOCB {
     void (*verify)(BlkverifyAIOCB *acb);
 };
 
-static void blkverify_aio_cancel(BlockDriverAIOCB *blockacb)
-{
-    BlkverifyAIOCB *acb = (BlkverifyAIOCB *)blockacb;
-    AioContext *aio_context = bdrv_get_aio_context(blockacb->bs);
-    bool finished = false;
-
-    /* Wait until request completes, invokes its callback, and frees itself */
-    acb->finished = &finished;
-    while (!finished) {
-        aio_poll(aio_context, true);
-    }
-}
-
 static const AIOCBInfo blkverify_aiocb_info = {
     .aiocb_size         = sizeof(BlkverifyAIOCB),
-    .cancel             = blkverify_aio_cancel,
 };
 
 static void GCC_FMT_ATTR(2, 3) blkverify_err(BlkverifyAIOCB *acb,
@@ -156,6 +143,7 @@ static int blkverify_open(BlockDriverState *bs, QDict *options, int flags,
 
     ret = 0;
 fail:
+    qemu_opts_del(opts);
     return ret;
 }
 
@@ -177,7 +165,7 @@ static int64_t blkverify_getlength(BlockDriverState *bs)
 static BlkverifyAIOCB *blkverify_aio_get(BlockDriverState *bs, bool is_write,
                                          int64_t sector_num, QEMUIOVector *qiov,
                                          int nb_sectors,
-                                         BlockDriverCompletionFunc *cb,
+                                         BlockCompletionFunc *cb,
                                          void *opaque)
 {
     BlkverifyAIOCB *acb = qemu_aio_get(&blkverify_aiocb_info, bs, cb, opaque);
@@ -191,7 +179,6 @@ static BlkverifyAIOCB *blkverify_aio_get(BlockDriverState *bs, bool is_write,
     acb->qiov = qiov;
     acb->buf = NULL;
     acb->verify = NULL;
-    acb->finished = NULL;
     return acb;
 }
 
@@ -205,10 +192,7 @@ static void blkverify_aio_bh(void *opaque)
         qemu_vfree(acb->buf);
     }
     acb->common.cb(acb->common.opaque, acb->ret);
-    if (acb->finished) {
-        *acb->finished = true;
-    }
-    qemu_aio_release(acb);
+    qemu_aio_unref(acb);
 }
 
 static void blkverify_aio_cb(void *opaque, int ret)
@@ -245,9 +229,9 @@ static void blkverify_verify_readv(BlkverifyAIOCB *acb)
     }
 }
 
-static BlockDriverAIOCB *blkverify_aio_readv(BlockDriverState *bs,
+static BlockAIOCB *blkverify_aio_readv(BlockDriverState *bs,
         int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
-        BlockDriverCompletionFunc *cb, void *opaque)
+        BlockCompletionFunc *cb, void *opaque)
 {
     BDRVBlkverifyState *s = bs->opaque;
     BlkverifyAIOCB *acb = blkverify_aio_get(bs, false, sector_num, qiov,
@@ -265,9 +249,9 @@ static BlockDriverAIOCB *blkverify_aio_readv(BlockDriverState *bs,
     return &acb->common;
 }
 
-static BlockDriverAIOCB *blkverify_aio_writev(BlockDriverState *bs,
+static BlockAIOCB *blkverify_aio_writev(BlockDriverState *bs,
         int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
-        BlockDriverCompletionFunc *cb, void *opaque)
+        BlockCompletionFunc *cb, void *opaque)
 {
     BDRVBlkverifyState *s = bs->opaque;
     BlkverifyAIOCB *acb = blkverify_aio_get(bs, true, sector_num, qiov,
@@ -280,9 +264,9 @@ static BlockDriverAIOCB *blkverify_aio_writev(BlockDriverState *bs,
     return &acb->common;
 }
 
-static BlockDriverAIOCB *blkverify_aio_flush(BlockDriverState *bs,
-                                             BlockDriverCompletionFunc *cb,
-                                             void *opaque)
+static BlockAIOCB *blkverify_aio_flush(BlockDriverState *bs,
+                                       BlockCompletionFunc *cb,
+                                       void *opaque)
 {
     BDRVBlkverifyState *s = bs->opaque;
 
@@ -320,6 +304,32 @@ static void blkverify_attach_aio_context(BlockDriverState *bs,
     bdrv_attach_aio_context(s->test_file, new_context);
 }
 
+static void blkverify_refresh_filename(BlockDriverState *bs)
+{
+    BDRVBlkverifyState *s = bs->opaque;
+
+    /* bs->file has already been refreshed */
+    bdrv_refresh_filename(s->test_file);
+
+    if (bs->file->full_open_options && s->test_file->full_open_options) {
+        QDict *opts = qdict_new();
+        qdict_put_obj(opts, "driver", QOBJECT(qstring_from_str("blkverify")));
+
+        QINCREF(bs->file->full_open_options);
+        qdict_put_obj(opts, "raw", QOBJECT(bs->file->full_open_options));
+        QINCREF(s->test_file->full_open_options);
+        qdict_put_obj(opts, "test", QOBJECT(s->test_file->full_open_options));
+
+        bs->full_open_options = opts;
+    }
+
+    if (bs->file->exact_filename[0] && s->test_file->exact_filename[0]) {
+        snprintf(bs->exact_filename, sizeof(bs->exact_filename),
+                 "blkverify:%s:%s",
+                 bs->file->exact_filename, s->test_file->exact_filename);
+    }
+}
+
 static BlockDriver bdrv_blkverify = {
     .format_name                      = "blkverify",
     .protocol_name                    = "blkverify",
@@ -329,6 +339,7 @@ static BlockDriver bdrv_blkverify = {
     .bdrv_file_open                   = blkverify_open,
     .bdrv_close                       = blkverify_close,
     .bdrv_getlength                   = blkverify_getlength,
+    .bdrv_refresh_filename            = blkverify_refresh_filename,
 
     .bdrv_aio_readv                   = blkverify_aio_readv,
     .bdrv_aio_writev                  = blkverify_aio_writev,

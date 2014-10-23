@@ -337,6 +337,8 @@
 #define MSR_MTRRphysBase(reg)           (0x200 + 2 * (reg))
 #define MSR_MTRRphysMask(reg)           (0x200 + 2 * (reg) + 1)
 
+#define MSR_MTRRphysIndex(addr)         ((((addr) & ~1u) - 0x200) / 2)
+
 #define MSR_MTRRfix64K_00000            0x250
 #define MSR_MTRRfix16K_80000            0x258
 #define MSR_MTRRfix16K_A0000            0x259
@@ -930,7 +932,7 @@ typedef struct CPUX86State {
     /* MTRRs */
     uint64_t mtrr_fixed[11];
     uint64_t mtrr_deftype;
-    MTRRVar mtrr_var[8];
+    MTRRVar mtrr_var[MSR_MTRRcap_VCNT];
 
     /* For KVM */
     uint32_t mp_state;
@@ -1119,7 +1121,7 @@ static inline int hw_breakpoint_len(unsigned long dr7, int index)
 void hw_breakpoint_insert(CPUX86State *env, int index);
 void hw_breakpoint_remove(CPUX86State *env, int index);
 bool check_hw_breakpoints(CPUX86State *env, bool force_dr6_update);
-void breakpoint_handler(CPUX86State *env);
+void breakpoint_handler(CPUState *cs);
 
 /* will be suppressed */
 void cpu_x86_update_cr0(CPUX86State *env, uint32_t new_cr0);
@@ -1249,6 +1251,7 @@ void QEMU_NORETURN raise_interrupt(CPUX86State *nenv, int intno, int is_int,
 /* cc_helper.c */
 extern const uint8_t parity_table[256];
 uint32_t cpu_cc_compute_all(CPUX86State *env1, int op);
+void update_fp_status(CPUX86State *env);
 
 static inline uint32_t cpu_compute_eflags(CPUX86State *env)
 {
@@ -1284,6 +1287,7 @@ static inline void cpu_load_efer(CPUX86State *env, uint64_t val)
 
 /* fpu_helper.c */
 void cpu_set_mxcsr(CPUX86State *env, uint32_t val);
+void cpu_set_fpuc(CPUX86State *env, uint16_t val);
 
 /* svm_helper.c */
 void cpu_svm_check_intercept_param(CPUX86State *env1, uint32_t type,

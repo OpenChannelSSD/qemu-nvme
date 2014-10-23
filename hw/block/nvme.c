@@ -99,8 +99,11 @@
 #include <hw/pci/msix.h>
 #include <hw/pci/msi.h>
 #include <hw/pci/pci.h>
+#include <qapi/visitor.h>
 #include <qemu/bitops.h>
 #include <qemu/bitmap.h>
+#include <sysemu/sysemu.h>
+#include <sysemu/block-backend.h>
 
 #include "nvme.h"
 
@@ -451,207 +454,6 @@ static void nvme_aer_process_cb(void *param)
     }
 }
 
-static uint16_t nvme_sgl_verify_dif_interleave(NvmeCtrl *n, QEMUSGList *qsg,
-    uint16_t ctrl, NvmeNamespace *ns, int slba)
-{
-    const uint8_t lba_index  = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
-    const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
-    const uint8_t first = ns->id_ns.dps & DPS_FIRST_EIGHT;
-    const uint32_t bs = 1 << data_shift;
-
-    uint32_t i = 0, offset = 0, buf_offset = 0;
-    uint32_t trans_len, dma_len = bs;
-    uint8_t tmp[bs];
-    uint32_t len = qsg->size;
-    uint16_t meta_offset = first ? ms - 8 : 0;
-    NvmeDifTuple dif;
-
-    while (len) {
-        trans_len = MIN(dma_len, qsg->sg[i].len - offset);
-        trans_len = MIN(trans_len, len);
-
-        pci_dma_read(&n->parent_obj, qsg->sg[i].base + offset,
-            tmp + buf_offset, trans_len);
-
-        len -= trans_len;
-        dma_len -= trans_len;
-        offset += trans_len;
-        buf_offset += trans_len;
-
-        if (dma_len == 0) {
-            dma_addr_t tuple = qsg->sg[i].base + offset + meta_offset;
-
-            pci_dma_read(&n->parent_obj, tuple, &dif, sizeof(dif));
-            if (test_bit(slba, ns->util)) {
-                if (ctrl & NVME_RW_PRINFO_PRCHK_GUARD) {
-                    if (dif.guard_tag != cpu_to_be16(crc_t10dif(tmp, bs))) {
-                        return NVME_E2E_GUARD_ERROR;
-                    }
-                }
-                if (ctrl & NVME_RW_PRINFO_PRCHK_REF) {
-                    if (slba != be32_to_cpu(dif.ref_tag)) {
-                        return NVME_E2E_REF_ERROR;
-                    }
-                }
-            } else {
-                dif.guard_tag = dif.app_tag = 0xffff;
-                dif.ref_tag = 0xffffffff;
-                pci_dma_write(&n->parent_obj, tuple, &dif, sizeof(dif));
-            }
-
-            offset += ms;
-            dma_len = bs;
-            slba++;
-            buf_offset = 0;
-        }
-
-        assert(offset <= qsg->sg[i].len);
-        if (offset == qsg->sg[i].len) {
-            offset = 0;
-            i++;
-        }
-    }
-
-    return NVME_SUCCESS;
-}
-
-static uint16_t nvme_sgl_verify_dif_separate(NvmeCtrl *n, QEMUSGList *qsg,
-    uint8_t *buf, uint16_t ctrl, NvmeNamespace *ns, uint32_t slba,
-    uint8_t first)
-{
-    const uint8_t lba_index  = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
-    const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
-    const uint32_t bs = 1 << data_shift;
-
-    uint32_t i = 0, offset = 0, buf_offset = 0;
-    uint32_t trans_len, dma_len = bs;
-    uint8_t tmp[bs];
-    uint32_t len = qsg->size;
-    uint16_t meta_offset = first ? ms - 8 : 0;
-    NvmeDifTuple *dif;
-
-    while (len) {
-        trans_len = MIN(dma_len, qsg->sg[i].len - offset);
-        trans_len = MIN(trans_len, len);
-
-        pci_dma_read(&n->parent_obj, qsg->sg[i].base + offset,
-            tmp + buf_offset, trans_len);
-
-        len -= trans_len;
-        dma_len -= trans_len;
-        offset += trans_len;
-        buf_offset += trans_len;
-
-        if (dma_len == 0) {
-            dif = (NvmeDifTuple *)(buf + meta_offset);
-            if (test_bit(slba, ns->util)) {
-                if (ctrl & NVME_RW_PRINFO_PRCHK_GUARD) {
-                    if (dif->guard_tag != cpu_to_be16(crc_t10dif(tmp, bs))) {
-                        return NVME_E2E_GUARD_ERROR;
-                    }
-                }
-                if (ctrl & NVME_RW_PRINFO_PRCHK_REF) {
-                    if (slba != be32_to_cpu(dif->ref_tag)) {
-                        return NVME_E2E_REF_ERROR;
-                    }
-                }
-            } else {
-                dif->guard_tag = dif->app_tag = 0xffff;
-                dif->ref_tag = 0xffffffff;
-            }
-
-            dma_len = bs;
-            buf += ms;
-            slba++;
-            buf_offset = 0;
-        }
-        if (offset == qsg->sg[i].len) {
-            offset = 0;
-            i++;
-        }
-    }
-
-    return NVME_SUCCESS;
-}
-
-static uint16_t nvme_pract_verify_dif(uint8_t *buf, const uint32_t bs,
-    const uint16_t ms, uint16_t ctrl, uint32_t nlb, uint32_t slba,
-    unsigned long *util, uint8_t first)
-{
-    NvmeDifTuple *dif;
-    uint8_t *end = buf + ((bs + ms) * nlb);
-    uint16_t meta_offset = first ? ms - 8 : 0;
-
-    for (; buf < end; buf += (bs + ms)) {
-        dif = (NvmeDifTuple *)(buf + meta_offset);
-        if (test_bit(slba, util)) {
-            if (ctrl & NVME_RW_PRINFO_PRCHK_GUARD) {
-                if (dif->guard_tag != cpu_to_be16(crc_t10dif(buf, bs))) {
-                    return NVME_E2E_GUARD_ERROR;
-                }
-            }
-            if (ctrl & NVME_RW_PRINFO_PRCHK_REF) {
-                if (be32_to_cpu(dif->ref_tag) != slba) {
-                    return NVME_E2E_REF_ERROR;
-                }
-            }
-            slba++;
-        }
-    }
-
-    return NVME_SUCCESS;
-}
-
-static void nvme_pract_generate_dif(NvmeNamespace *ns, uint8_t *buf,
-    const uint32_t bs, const uint16_t ms, uint16_t ctrl, uint32_t nlb,
-    int32_t slba, uint8_t first)
-{
-    NvmeDifTuple *dif;
-    uint8_t *end = buf + ((bs + ms) * nlb);
-    uint16_t meta_offset = first ? ms - 8 : 0;
-
-    for (; buf < end; buf += (bs + ms), slba++) {
-        dif = (NvmeDifTuple *)(buf + meta_offset);
-        dif->guard_tag = cpu_to_be16(crc_t10dif(buf, bs));
-        dif->ref_tag = cpu_to_be32(slba);
-        dif->app_tag = 0;
-    }
-}
-
-static void nvme_interleave_sgl(NvmeCtrl *n, QEMUSGList *qsg, uint8_t *buf,
-    uint8_t len, const uint32_t bs, const uint16_t ms, int is_write)
-{
-    uint32_t i = 0, sg_offset = 0;
-    uint32_t trans_len, dma_len = bs;
-
-    while (len) {
-        trans_len = MIN(MIN(len, dma_len), qsg->sg[i].len - sg_offset);
-        if (is_write) {
-            pci_dma_read(&n->parent_obj, qsg->sg[i].base + sg_offset, buf,
-                trans_len);
-        } else {
-            pci_dma_write(&n->parent_obj, qsg->sg[i].base + sg_offset, buf,
-                trans_len);
-        }
-
-        buf += trans_len;
-        len -= trans_len;
-        dma_len -= trans_len;
-        sg_offset += trans_len;
-        if (dma_len == 0) {
-            dma_len = bs;
-            buf += ms;
-            len -= ms;
-        }
-        if (sg_offset == qsg->sg[i].len) {
-            sg_offset = 0;
-            i++;
-        }
-    }
-}
-
 static void nvme_rw_cb(void *opaque, int ret)
 {
     NvmeRequest *req = opaque;
@@ -660,30 +462,9 @@ static void nvme_rw_cb(void *opaque, int ret)
     NvmeCQueue *cq = n->cq[sq->cqid];
     NvmeNamespace *ns = req->ns;
 
-    const uint8_t pi = ns->id_ns.dps & DPS_TYPE_MASK;
-    const uint8_t first = ns->id_ns.dps & DPS_FIRST_EIGHT;
-    const uint8_t lba_index  = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    const uint8_t separate = !NVME_ID_NS_FLBAS_EXTENDED(ns->id_ns.flbas);
-    const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
-
-    bdrv_acct_done(n->conf.bs, &req->acct);
+    block_acct_done(blk_get_stats(n->conf.blk), &req->acct);
     if (!ret) {
         req->status = NVME_SUCCESS;
-        if (req->meta_size) {
-            if (separate) {
-                if (pi) {
-                    req->status = nvme_sgl_verify_dif_separate(n, &req->qsg,
-                        req->meta_buf, req->ctrl, ns, req->slba, first);
-                }
-                pci_dma_write(&n->parent_obj, req->mptr, req->meta_buf,
-                    req->meta_size);
-            }
-            g_free(req->meta_buf);
-        }
-        if (req->status == NVME_SUCCESS && ms && !separate && pi) {
-            req->status = nvme_sgl_verify_dif_interleave(n, &req->qsg,
-                req->ctrl, ns, req->slba);
-        }
     } else {
         req->status = NVME_INTERNAL_DEV_ERROR;
     }
@@ -708,17 +489,11 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint64_t prp1 = le64_to_cpu(rw->prp1);
     uint64_t prp2 = le64_to_cpu(rw->prp2);
-    uint64_t mptr = le64_to_cpu(rw->mptr);
 
-    uint64_t offset;
     const uint64_t elba = slba + nlb;
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    const uint8_t separate = !NVME_ID_NS_FLBAS_EXTENDED(ns->id_ns.flbas);
     const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
-    const uint32_t bs = 1 << data_shift;
     const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
-    const uint8_t pi = ns->id_ns.dps & DPS_TYPE_MASK;
-    const uint8_t first = ns->id_ns.dps & DPS_FIRST_EIGHT;
     uint64_t data_size = nlb << data_shift;
     uint64_t meta_size = nlb * ms;
     uint64_t aio_slba =
@@ -735,7 +510,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             offsetof(NvmeRwCmd, nlb), nlb, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    if (meta_size && !mptr && separate && !(ctrl & NVME_RW_PRINFO_PRACT)) {
+    if (meta_size) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
             offsetof(NvmeRwCmd, control), ctrl, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -751,122 +526,28 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_UNRECOVERED_READ;
     }
 
-    if (separate && meta_size && !mptr) {
-        /* separate meta-buffer, controller gen/strip; do nothing */
-        return NVME_INVALID_FIELD | NVME_DNR;
-        meta_size = 0;
-    } else if (!separate && (!(ctrl & NVME_RW_PRINFO_PRACT) ||
-            ms != sizeof(NvmeDifTuple))) {
-        data_size += meta_size;
-        assert(data_size == (nlb * ((1 << data_shift) + ms)));
-    }
-
     if (nvme_map_prp(&req->qsg, prp1, prp2, data_size, n)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
             offsetof(NvmeRwCmd, prp1), 0, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    if (!separate && (ctrl & NVME_RW_PRINFO_PRACT)) {
-        data_size += meta_size;
-        assert(data_size == (nlb * ((1 << data_shift) + ms)));
-    }
-
     req->slba = slba;
     req->meta_size = 0;
     req->status = NVME_SUCCESS;
-    offset = ns->meta_start_offset + (req->slba * ms);
-    if (req->is_write) {
-        bitmap_set(ns->util, slba, nlb);
-        bitmap_clear(ns->uncorrectable, slba, nlb);
-    }
-    if (!separate && (!(ctrl & NVME_RW_PRINFO_PRACT) ||
-            ms != sizeof(NvmeDifTuple))) {
-        meta_size = req->qsg.size % BDRV_SECTOR_SIZE;
-        offset = aio_slba * BDRV_SECTOR_SIZE + (req->qsg.size - meta_size);
-        mptr = req->qsg.sg[req->qsg.nsg - 1].base +
-            (req->qsg.sg[req->qsg.nsg - 1].len - meta_size);
-    }
-    if (meta_size) {
-        void *buf = g_malloc(meta_size);
-        if (req->is_write) {
-            pci_dma_read(&n->parent_obj, mptr, buf, meta_size);
-            if (separate && pi) {
-                req->status = nvme_sgl_verify_dif_separate(n, &req->qsg,
-                    buf, ctrl, ns, req->slba, first);
-            }
-            if (req->status == NVME_SUCCESS) {
-                if (bdrv_pwrite_sync(n->conf.bs, offset, buf, meta_size)) {
-                    req->status = NVME_INTERNAL_DEV_ERROR;
-                }
-            }
-            free(buf);
-        } else {
-            if (bdrv_pread(n->conf.bs, offset, buf, meta_size) != meta_size) {
-                free(buf);
-                return NVME_INTERNAL_DEV_ERROR;
-            }
-            if (separate && pi) {
-                req->mptr = mptr;
-                req->meta_size = meta_size;
-                req->meta_buf = buf;
-                req->ctrl = ctrl;
-            } else {
-                pci_dma_write(&n->parent_obj, mptr, buf, meta_size);
-                free(buf);
-            }
-        }
-        if (req->status) {
-            return req->status;
-        }
-    } else if (ctrl & NVME_RW_PRINFO_PRACT && ms == sizeof(NvmeDifTuple)) {
-        /* the mete-data is interleaved; strip/insert meta-data */
-        void *buf = g_malloc(data_size);
-        offset = aio_slba * BDRV_SECTOR_SIZE + slba * ms;
-
-        if (!req->is_write) {
-            if (bdrv_pread(n->conf.bs, offset, buf, data_size) != data_size) {
-                qemu_sglist_destroy(&req->qsg);
-                g_free(buf);
-
-                nvme_set_error_page(n, req->sq->sqid, req->cqe.cid,
-                    NVME_INTERNAL_DEV_ERROR, offsetof(NvmeRwCmd, slba),
-                    req->slba, ns->id);
-
-                return NVME_INTERNAL_DEV_ERROR;
-            }
-            req->status = nvme_pract_verify_dif(buf, bs, ms, ctrl, nlb, slba,
-                ns->util, first);
-        }
-
-        nvme_interleave_sgl(n, &req->qsg, buf, data_size, bs, ms, req->is_write);
-        if (req->is_write) {
-            nvme_pract_generate_dif(ns, buf, bs, ms, ctrl, nlb, slba, first);
-            if (bdrv_pwrite(n->conf.bs, offset, buf, data_size) != data_size) {
-                qemu_sglist_destroy(&req->qsg);
-                g_free(buf);
-
-                nvme_set_error_page(n, req->sq->sqid, req->cqe.cid,
-                    NVME_INTERNAL_DEV_ERROR, offsetof(NvmeRwCmd, slba),
-                    req->slba, ns->id);
-
-                return NVME_INTERNAL_DEV_ERROR;
-            }
-        }
-
-        qemu_sglist_destroy(&req->qsg);
-        g_free(buf);
-        return NVME_SUCCESS;
-    }
-
     req->nlb = nlb;
     req->ns = ns;
-    dma_acct_start(n->conf.bs, &req->acct, &req->qsg, req->is_write ?
-        BDRV_ACCT_WRITE : BDRV_ACCT_READ);
+
+    dma_acct_start(n->conf.blk, &req->acct, &req->qsg, req->is_write ?
+        BLOCK_ACCT_WRITE : BLOCK_ACCT_READ);
     req->aiocb = req->is_write ?
-        dma_bdrv_write(n->conf.bs, &req->qsg, aio_slba, nvme_rw_cb, req) :
-        dma_bdrv_read(n->conf.bs, &req->qsg, aio_slba, nvme_rw_cb, req);
+        dma_blk_write(n->conf.blk, &req->qsg, aio_slba, nvme_rw_cb, req) :
+        dma_blk_read(n->conf.blk, &req->qsg, aio_slba, nvme_rw_cb, req);
 
     return NVME_NO_COMPLETE;
+}
+
+static void nvme_discard_cb(void *opaque, int ret)
+{
 }
 
 static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -902,10 +583,8 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 return NVME_LBA_RANGE | NVME_DNR;
             }
 
-            if (bdrv_discard(n->conf.bs, ns->start_block + (slba << data_shift),
-                    nlb << data_shift) < 0) {
-                req->status = NVME_INTERNAL_DEV_ERROR;
-            }
+            blk_aio_discard(n->conf.blk, ns->start_block + (slba << data_shift),
+                    nlb << data_shift, nvme_discard_cb, NULL) < 0;
             bitmap_clear(ns->util, slba, nlb);
         }
     }
@@ -951,7 +630,7 @@ static uint16_t nvme_compare(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         uint32_t len = req->qsg.sg[i].len;
         uint8_t tmp[2][len];
 
-        if (bdrv_pread(n->conf.bs, offset, tmp[0], len) != len) {
+        if (blk_pread(n->conf.blk, offset, tmp[0], len) != len) {
             qemu_sglist_destroy(&req->qsg);
             nvme_set_error_page(n, req->sq->sqid, req->cqe.cid,
                 NVME_INTERNAL_DEV_ERROR, offsetof(NvmeRwCmd, slba),
@@ -964,7 +643,6 @@ static uint16_t nvme_compare(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             qemu_sglist_destroy(&req->qsg);
             return NVME_CMP_FAILURE;
         }
-
         offset += len;
     }
 
@@ -979,7 +657,7 @@ static void nvme_misc_cb(void *opaque, int ret)
     NvmeCtrl *n = sq->ctrl;
     NvmeCQueue *cq = n->cq[sq->cqid];
 
-    bdrv_acct_done(n->conf.bs, &req->acct);
+    block_acct_done(blk_get_stats(n->conf.blk), &req->acct);
     if (!ret) {
         req->status = NVME_SUCCESS;
     } else {
@@ -991,8 +669,8 @@ static void nvme_misc_cb(void *opaque, int ret)
 static uint16_t nvme_flush(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
-    bdrv_acct_start(n->conf.bs, &req->acct, 0, BDRV_ACCT_FLUSH);
-    req->aiocb = bdrv_aio_flush(n->conf.bs, nvme_misc_cb, req);
+    block_acct_start(blk_get_stats(n->conf.blk), &req->acct, 0, BLOCK_ACCT_FLUSH);
+    req->aiocb = blk_aio_flush(n->conf.blk, nvme_misc_cb, req);
     return NVME_NO_COMPLETE;
 }
 
@@ -1013,8 +691,8 @@ static uint16_t nvme_write_zeros(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_LBA_RANGE | NVME_DNR;
     }
 
-    bdrv_acct_start(n->conf.bs, &req->acct, 0, BDRV_ACCT_WRITE);
-    req->aiocb = bdrv_aio_write_zeroes(n->conf.bs, aio_slba, aio_nlb, 0,
+    block_acct_start(blk_get_stats(n->conf.blk), &req->acct, 0, BLOCK_ACCT_WRITE);
+    req->aiocb = blk_aio_write_zeroes(n->conf.blk, aio_slba, aio_nlb, 0,
                                         nvme_misc_cb, req);
     return NVME_NO_COMPLETE;
 }
@@ -1115,7 +793,7 @@ static uint16_t nvme_del_sq(NvmeCtrl *n, NvmeCmd *cmd)
     sq = n->sq[qid];
     QTAILQ_FOREACH_SAFE(req, &sq->out_req_list, entry, next) {
         if (req->aiocb) {
-            bdrv_aio_cancel(req->aiocb);
+            blk_aio_cancel(req->aiocb);
         }
     }
     if (!nvme_check_cqid(n, sq->cqid)) {
@@ -1517,12 +1195,14 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     time_t current_seconds;
     NvmeSmartLog smart;
 
+    BlockAcctStats *stats = blk_get_stats(n->conf.blk);
+
     trans_len = MIN(sizeof(smart), buf_len);
     memset(&smart, 0x0, sizeof(smart));
-    smart.data_units_read[0] = cpu_to_le64(n->conf.bs->nr_bytes[BDRV_ACCT_READ]);
-    smart.data_units_written[0] = cpu_to_le64(n->conf.bs->nr_bytes[BDRV_ACCT_WRITE]);
-    smart.host_read_commands[0] = cpu_to_le64(n->conf.bs->nr_ops[BDRV_ACCT_READ]);
-    smart.host_write_commands[0] = cpu_to_le64(n->conf.bs->nr_ops[BDRV_ACCT_WRITE]);
+    smart.data_units_read[0] = cpu_to_le64(stats->nr_bytes[BLOCK_ACCT_READ]);
+    smart.data_units_written[0] = cpu_to_le64(stats->nr_bytes[BLOCK_ACCT_WRITE]);
+    smart.host_read_commands[0] = cpu_to_le64(stats->nr_ops[BLOCK_ACCT_READ]);
+    smart.host_write_commands[0] = cpu_to_le64(stats->nr_ops[BLOCK_ACCT_WRITE]);
 
     smart.number_of_error_log_entries[0] = cpu_to_le64(n->num_errors);
     smart.temperature[0] = n->temperature & 0xff;
@@ -1885,7 +1565,7 @@ static void nvme_clear_ctrl(NvmeCtrl *n)
         g_free(event);
     }
 
-    bdrv_flush(n->conf.bs);
+    blk_flush(n->conf.blk);
     n->bar.cc = 0;
     n->features.temp_thresh = 0x14d;
     n->temp_warn_issued = 0;
@@ -2030,6 +1710,7 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
             cq->head = new_val;
         }
         if (start_sqs) {
+            NvmeSQueue *sq;
             QTAILQ_FOREACH(sq, &cq->sq_list, entry) {
                 if (!timer_pending(sq->timer)) {
                     timer_mod(sq->timer, qemu_clock_get_ns(
@@ -2089,7 +1770,7 @@ static const MemoryRegionOps nvme_mmio_ops = {
 
 static int nvme_check_constraints(NvmeCtrl *n)
 {
-    if ((!(n->conf.bs)) || !(n->serial) ||
+    if ((!(n->conf.blk)) || !(n->serial) ||
         (n->num_namespaces == 0 || n->num_namespaces > NVME_MAX_NUM_NAMESPACES) ||
         (n->num_queues < 1 || n->num_queues > NVME_MAX_QS) ||
         (n->db_stride > NVME_MAX_STRIDE) ||
@@ -2120,11 +1801,10 @@ static int nvme_check_constraints(NvmeCtrl *n)
 
 static void nvme_init_namespaces(NvmeCtrl *n)
 {
-    int i, j, k;
-    int ji = n->meta ? 2 : 1;
+    int i, j;
 
     for (i = 0; i < n->num_namespaces; i++) {
-        uint64_t blks, bdrv_blks;
+        uint64_t blks;
         int lba_index;
         NvmeNamespace *ns = &n->namespaces[i];
         NvmeIdNs *id_ns = &ns->id_ns;
@@ -2136,25 +1816,17 @@ static void nvme_init_namespaces(NvmeCtrl *n)
         id_ns->dpc = n->dpc;
         id_ns->dps = n->dps;
 
-        for (j = 0; j < ji; j++) {
-            for (k = 0; k < n->nlbaf / ji; k++) {
-                id_ns->lbaf[k + (n->nlbaf / ji) * j].ds = BDRV_SECTOR_BITS + k;
-                if (j) {
-                    id_ns->lbaf[k + (n->nlbaf / ji)].ms = cpu_to_le16(n->meta);
-                }
-            }
+        for (j = 0; j < n->nlbaf; j++) {
+            id_ns->lbaf[j + (n->nlbaf)].ds = BDRV_SECTOR_BITS + j;
         }
 
         lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-        blks = n->ns_size / ((1 << id_ns->lbaf[lba_index].ds) + n->meta);
+        blks = n->ns_size / ((1 << id_ns->lbaf[lba_index].ds));
         id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(blks);
-        bdrv_blks = blks << (id_ns->lbaf[lba_index].ds - BDRV_SECTOR_BITS);
 
         ns->id = i + 1;
         ns->ctrl = n;
-        ns->start_block = ((n->ns_size >> BDRV_SECTOR_BITS) +
-            (n->meta * bdrv_blks)) * i;
-        ns->meta_start_offset = (ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS;
+        ns->start_block = n->ns_size >> BDRV_SECTOR_BITS;
         ns->util = bitmap_new(blks);
         ns->uncorrectable = bitmap_new(blks);
     }
@@ -2259,7 +1931,7 @@ static int nvme_init(PCIDevice *pci_dev)
         return -1;
     }
 
-    bs_size = bdrv_getlength(n->conf.bs);
+    bs_size = blk_getlength(n->conf.blk);
     if (bs_size < 0) {
         return -1;
     }
@@ -2295,7 +1967,7 @@ static void nvme_exit(PCIDevice *pci_dev)
     g_free(n->cq);
     g_free(n->sq);
     msix_uninit_exclusive_bar(pci_dev);
-    memory_region_destroy(&n->iomem);
+    memory_region_unref(&n->iomem);
 }
 
 static Property nvme_props[] = {
@@ -2354,11 +2026,53 @@ static void nvme_class_init(ObjectClass *oc, void *data)
     dc->vmsd = &nvme_vmstate;
 }
 
+static void nvme_get_bootindex(Object *obj, Visitor *v, void *opaque,
+                                  const char *name, Error **errp)
+{
+    NvmeCtrl *s = NVME(obj);
+
+    visit_type_int32(v, &s->conf.bootindex, name, errp);
+}
+
+static void nvme_set_bootindex(Object *obj, Visitor *v, void *opaque,
+                                  const char *name, Error **errp)
+{
+    NvmeCtrl *s = NVME(obj);
+    int32_t boot_index;
+    Error *local_err = NULL;
+
+    visit_type_int32(v, &boot_index, name, &local_err);
+    if (local_err) {
+        goto out;
+    }
+    /* check whether bootindex is present in fw_boot_order list  */
+    check_boot_index(boot_index, &local_err);
+    if (local_err) {
+        goto out;
+    }
+    /* change bootindex to a new one */
+    s->conf.bootindex = boot_index;
+
+out:
+    if (local_err) {
+        error_propagate(errp, local_err);
+    }
+}
+
+static void nvme_instance_init(Object *obj)
+{
+    object_property_add(obj, "bootindex", "int32",
+                        nvme_get_bootindex,
+                        nvme_set_bootindex, NULL, NULL, NULL);
+    object_property_set_int(obj, -1, "bootindex", NULL);
+}
+
 static const TypeInfo nvme_info = {
     .name          = "nvme",
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(NvmeCtrl),
     .class_init    = nvme_class_init,
+    .instance_init = nvme_instance_init,
 };
 
 static void nvme_register_types(void)

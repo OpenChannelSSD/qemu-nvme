@@ -26,8 +26,6 @@
 #include "block/block_int.h"
 #include "block/qcow2.h"
 #include "qemu/range.h"
-#include "qapi/qmp/types.h"
-#include "qapi-event.h"
 
 static int64_t alloc_clusters_noref(BlockDriverState *bs, uint64_t size);
 static int QEMU_WARN_UNUSED_RESULT update_refcount(BlockDriverState *bs,
@@ -110,6 +108,13 @@ static int get_refcount(BlockDriverState *bs, int64_t cluster_index)
     if (!refcount_block_offset)
         return 0;
 
+    if (offset_into_cluster(s, refcount_block_offset)) {
+        qcow2_signal_corruption(bs, true, -1, -1, "Refblock offset %#" PRIx64
+                                " unaligned (reftable index: %#" PRIx64 ")",
+                                refcount_block_offset, refcount_table_index);
+        return -EIO;
+    }
+
     ret = qcow2_cache_get(bs, s->refcount_block_cache, refcount_block_offset,
         (void**) &refcount_block);
     if (ret < 0) {
@@ -183,6 +188,14 @@ static int alloc_refcount_block(BlockDriverState *bs,
 
         /* If it's already there, we're done */
         if (refcount_block_offset) {
+            if (offset_into_cluster(s, refcount_block_offset)) {
+                qcow2_signal_corruption(bs, true, -1, -1, "Refblock offset %#"
+                                        PRIx64 " unaligned (reftable index: "
+                                        "%#x)", refcount_block_offset,
+                                        refcount_table_index);
+                return -EIO;
+            }
+
              return load_refcount_block(bs, refcount_block_offset,
                  (void**) refcount_block);
         }
@@ -350,7 +363,7 @@ static int alloc_refcount_block(BlockDriverState *bs,
     uint64_t meta_offset = (blocks_used * refcount_block_clusters) *
         s->cluster_size;
     uint64_t table_offset = meta_offset + blocks_clusters * s->cluster_size;
-    uint64_t *new_table = g_try_malloc0(table_size * sizeof(uint64_t));
+    uint64_t *new_table = g_try_new0(uint64_t, table_size);
     uint16_t *new_blocks = g_try_malloc0(blocks_clusters * s->cluster_size);
 
     assert(table_size > 0 && blocks_clusters > 0);
@@ -511,6 +524,7 @@ found:
         QTAILQ_REMOVE(&s->discards, p, next);
         d->offset = MIN(d->offset, p->offset);
         d->bytes += p->bytes;
+        g_free(p);
     }
 }
 
@@ -838,8 +852,14 @@ void qcow2_free_any_clusters(BlockDriverState *bs, uint64_t l2_entry,
     case QCOW2_CLUSTER_NORMAL:
     case QCOW2_CLUSTER_ZERO:
         if (l2_entry & L2E_OFFSET_MASK) {
-            qcow2_free_clusters(bs, l2_entry & L2E_OFFSET_MASK,
-                                nb_clusters << s->cluster_bits, type);
+            if (offset_into_cluster(s, l2_entry & L2E_OFFSET_MASK)) {
+                qcow2_signal_corruption(bs, false, -1, -1,
+                                        "Cannot free unaligned cluster %#llx",
+                                        l2_entry & L2E_OFFSET_MASK);
+            } else {
+                qcow2_free_clusters(bs, l2_entry & L2E_OFFSET_MASK,
+                                    nb_clusters << s->cluster_bits, type);
+            }
         }
         break;
     case QCOW2_CLUSTER_UNALLOCATED:
@@ -903,6 +923,14 @@ int qcow2_update_snapshot_refcount(BlockDriverState *bs,
             old_l2_offset = l2_offset;
             l2_offset &= L1E_OFFSET_MASK;
 
+            if (offset_into_cluster(s, l2_offset)) {
+                qcow2_signal_corruption(bs, true, -1, -1, "L2 table offset %#"
+                                        PRIx64 " unaligned (L1 index: %#x)",
+                                        l2_offset, i);
+                ret = -EIO;
+                goto fail;
+            }
+
             ret = qcow2_cache_get(bs, s->l2_table_cache, l2_offset,
                 (void**) &l2_table);
             if (ret < 0) {
@@ -935,6 +963,17 @@ int qcow2_update_snapshot_refcount(BlockDriverState *bs,
 
                     case QCOW2_CLUSTER_NORMAL:
                     case QCOW2_CLUSTER_ZERO:
+                        if (offset_into_cluster(s, offset & L2E_OFFSET_MASK)) {
+                            qcow2_signal_corruption(bs, true, -1, -1, "Data "
+                                                    "cluster offset %#llx "
+                                                    "unaligned (L2 offset: %#"
+                                                    PRIx64 ", L2 index: %#x)",
+                                                    offset & L2E_OFFSET_MASK,
+                                                    l2_offset, j);
+                            ret = -EIO;
+                            goto fail;
+                        }
+
                         cluster_index = (offset & L2E_OFFSET_MASK) >> s->cluster_bits;
                         if (!cluster_index) {
                             /* unallocated */
@@ -1524,7 +1563,7 @@ int qcow2_check_refcounts(BlockDriverState *bs, BdrvCheckResult *res,
         return -EFBIG;
     }
 
-    refcount_table = g_try_malloc0(nb_clusters * sizeof(uint16_t));
+    refcount_table = g_try_new0(uint16_t, nb_clusters);
     if (nb_clusters && refcount_table == NULL) {
         res->check_errors++;
         return -ENOMEM;
@@ -1605,8 +1644,8 @@ int qcow2_check_refcounts(BlockDriverState *bs, BdrvCheckResult *res,
                         /* increase refcount_table size if necessary */
                         int old_nb_clusters = nb_clusters;
                         nb_clusters = (new_offset >> s->cluster_bits) + 1;
-                        refcount_table = g_realloc(refcount_table,
-                                nb_clusters * sizeof(uint16_t));
+                        refcount_table = g_renew(uint16_t, refcount_table,
+                                                 nb_clusters);
                         memset(&refcount_table[old_nb_clusters], 0, (nb_clusters
                                 - old_nb_clusters) * sizeof(uint16_t));
                     }
@@ -1838,26 +1877,11 @@ int qcow2_pre_write_overlap_check(BlockDriverState *bs, int ign, int64_t offset,
         return ret;
     } else if (ret > 0) {
         int metadata_ol_bitnr = ffs(ret) - 1;
-        char *message;
-
         assert(metadata_ol_bitnr < QCOW2_OL_MAX_BITNR);
 
-        fprintf(stderr, "qcow2: Preventing invalid write on metadata (overlaps "
-                "with %s); image marked as corrupt.\n",
-                metadata_ol_names[metadata_ol_bitnr]);
-        message = g_strdup_printf("Prevented %s overwrite",
-                metadata_ol_names[metadata_ol_bitnr]);
-        qapi_event_send_block_image_corrupted(bdrv_get_device_name(bs),
-                                              message,
-                                              true,
-                                              offset,
-                                              true,
-                                              size,
-                                              &error_abort);
-        g_free(message);
-
-        qcow2_mark_corrupt(bs);
-        bs->drv = NULL; /* make BDS unusable */
+        qcow2_signal_corruption(bs, true, offset, size, "Preventing invalid "
+                                "write on metadata (overlaps with %s)",
+                                metadata_ol_names[metadata_ol_bitnr]);
         return -EIO;
     }
 

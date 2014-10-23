@@ -241,7 +241,7 @@ typedef struct AHCIDevice AHCIDevice;
 
 typedef struct NCQTransferState {
     AHCIDevice *drive;
-    BlockDriverAIOCB *aiocb;
+    BlockAIOCB *aiocb;
     QEMUSGList sglist;
     BlockAcctCookie acct;
     uint16_t sector_count;
@@ -331,5 +331,7 @@ void ahci_init(AHCIState *s, DeviceState *qdev, AddressSpace *as, int ports);
 void ahci_uninit(AHCIState *s);
 
 void ahci_reset(AHCIState *s);
+
+void ahci_ide_create_devs(PCIDevice *dev, DriveInfo **hd);
 
 #endif /* HW_IDE_AHCI_H */

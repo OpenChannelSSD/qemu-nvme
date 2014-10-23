@@ -30,7 +30,7 @@
 #include "hw/boards.h"
 #include "hw/loader.h"
 #include "exec/address-spaces.h"
-#include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "hw/block/flash.h"
 #include "sysemu/device_tree.h"
 #include "qemu/error-report.h"
@@ -252,7 +252,8 @@ static void a9_daughterboard_init(const VEDBoardInfo *daughterboard,
         exit(1);
     }
 
-    memory_region_init_ram(ram, NULL, "vexpress.highmem", ram_size);
+    memory_region_init_ram(ram, NULL, "vexpress.highmem", ram_size,
+                           &error_abort);
     vmstate_register_ram_global(ram);
     low_ram_size = ram_size;
     if (low_ram_size > 0x4000000) {
@@ -346,7 +347,8 @@ static void a15_daughterboard_init(const VEDBoardInfo *daughterboard,
         }
     }
 
-    memory_region_init_ram(ram, NULL, "vexpress.highmem", ram_size);
+    memory_region_init_ram(ram, NULL, "vexpress.highmem", ram_size,
+                           &error_abort);
     vmstate_register_ram_global(ram);
     /* RAM is from 0x80000000 upwards; there is no low-memory alias for it. */
     memory_region_add_subregion(sysmem, 0x80000000, ram);
@@ -364,7 +366,8 @@ static void a15_daughterboard_init(const VEDBoardInfo *daughterboard,
     /* 0x2b060000: SP805 watchdog: not modelled */
     /* 0x2b0a0000: PL341 dynamic memory controller: not modelled */
     /* 0x2e000000: system SRAM */
-    memory_region_init_ram(sram, NULL, "vexpress.a15sram", 0x10000);
+    memory_region_init_ram(sram, NULL, "vexpress.a15sram", 0x10000,
+                           &error_abort);
     vmstate_register_ram_global(sram);
     memory_region_add_subregion(sysmem, 0x2e000000, sram);
 
@@ -488,7 +491,8 @@ static pflash_t *ve_pflash_cfi01_register(hwaddr base, const char *name,
 {
     DeviceState *dev = qdev_create(NULL, "cfi.pflash01");
 
-    if (di && qdev_prop_set_drive(dev, "drive", di->bdrv)) {
+    if (di && qdev_prop_set_drive(dev, "drive",
+                                  blk_by_legacy_dinfo(di))) {
         abort();
     }
 
@@ -634,12 +638,14 @@ static void vexpress_common_init(VEDBoardInfo *daughterboard,
     }
 
     sram_size = 0x2000000;
-    memory_region_init_ram(sram, NULL, "vexpress.sram", sram_size);
+    memory_region_init_ram(sram, NULL, "vexpress.sram", sram_size,
+                           &error_abort);
     vmstate_register_ram_global(sram);
     memory_region_add_subregion(sysmem, map[VE_SRAM], sram);
 
     vram_size = 0x800000;
-    memory_region_init_ram(vram, NULL, "vexpress.vram", vram_size);
+    memory_region_init_ram(vram, NULL, "vexpress.vram", vram_size,
+                           &error_abort);
     vmstate_register_ram_global(vram);
     memory_region_add_subregion(sysmem, map[VE_VIDEORAM], vram);
 

@@ -19,6 +19,7 @@
 #include "qemu/option.h"
 #include "qemu/config-file.h"
 #include "qemu/readline.h"
+#include "sysemu/block-backend.h"
 #include "block/block_int.h"
 #include "trace/control.h"
 
@@ -26,6 +27,7 @@
 
 static char *progname;
 
+static BlockBackend *qemuio_blk;
 static BlockDriverState *qemuio_bs;
 
 /* qemu-io commands passed using -c */
@@ -36,8 +38,9 @@ static ReadLineState *readline_state;
 
 static int close_f(BlockDriverState *bs, int argc, char **argv)
 {
-    bdrv_unref(bs);
+    blk_unref(qemuio_blk);
     qemuio_bs = NULL;
+    qemuio_blk = NULL;
     return 0;
 }
 
@@ -58,30 +61,22 @@ static int openfile(char *name, int flags, int growable, QDict *opts)
         return 1;
     }
 
-    if (growable) {
-        if (bdrv_open(&qemuio_bs, name, NULL, opts, flags | BDRV_O_PROTOCOL,
-                      NULL, &local_err))
-        {
-            fprintf(stderr, "%s: can't open%s%s: %s\n", progname,
-                    name ? " device " : "", name ?: "",
-                    error_get_pretty(local_err));
-            error_free(local_err);
-            return 1;
-        }
-    } else {
-        qemuio_bs = bdrv_new("hda", &error_abort);
+    qemuio_blk = blk_new_with_bs("hda", &error_abort);
+    qemuio_bs = blk_bs(qemuio_blk);
 
-        if (bdrv_open(&qemuio_bs, name, NULL, opts, flags, NULL, &local_err)
-            < 0)
-        {
-            fprintf(stderr, "%s: can't open%s%s: %s\n", progname,
-                    name ? " device " : "", name ?: "",
-                    error_get_pretty(local_err));
-            error_free(local_err);
-            bdrv_unref(qemuio_bs);
-            qemuio_bs = NULL;
-            return 1;
-        }
+    if (growable) {
+        flags |= BDRV_O_PROTOCOL;
+    }
+
+    if (bdrv_open(&qemuio_bs, name, NULL, opts, flags, NULL, &local_err) < 0) {
+        fprintf(stderr, "%s: can't open%s%s: %s\n", progname,
+                name ? " device " : "", name ?: "",
+                error_get_pretty(local_err));
+        error_free(local_err);
+        blk_unref(qemuio_blk);
+        qemuio_bs = NULL;
+        qemuio_blk = NULL;
+        return 1;
     }
 
     return 0;
@@ -356,7 +351,7 @@ static void command_loop(void)
 
 static void add_user_command(char *optarg)
 {
-    cmdline = g_realloc(cmdline, ++ncmdline * sizeof(char *));
+    cmdline = g_renew(char *, cmdline, ++ncmdline);
     cmdline[ncmdline-1] = optarg;
 }
 
@@ -389,6 +384,7 @@ int main(int argc, char **argv)
     int c;
     int opt_index = 0;
     int flags = BDRV_O_UNMAP;
+    Error *local_error = NULL;
 
 #ifdef CONFIG_POSIX
     signal(SIGPIPE, SIG_IGN);
@@ -454,7 +450,11 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    qemu_init_main_loop();
+    if (qemu_init_main_loop(&local_error)) {
+        error_report("%s", error_get_pretty(local_error));
+        error_free(local_error);
+        exit(1);
+    }
     bdrv_init();
 
     /* initialize commands */
@@ -486,9 +486,7 @@ int main(int argc, char **argv)
      */
     bdrv_drain_all();
 
-    if (qemuio_bs) {
-        bdrv_unref(qemuio_bs);
-    }
+    blk_unref(qemuio_blk);
     g_free(readline_state);
     return 0;
 }

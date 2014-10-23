@@ -1098,10 +1098,10 @@ static void vfio_bar_write(void *opaque, hwaddr addr,
         buf.byte = data;
         break;
     case 2:
-        buf.word = data;
+        buf.word = cpu_to_le16(data);
         break;
     case 4:
-        buf.dword = data;
+        buf.dword = cpu_to_le32(data);
         break;
     default:
         hw_error("vfio: unsupported write size, %d bytes", size);
@@ -1158,10 +1158,10 @@ static uint64_t vfio_bar_read(void *opaque,
         data = buf.byte;
         break;
     case 2:
-        data = buf.word;
+        data = le16_to_cpu(buf.word);
         break;
     case 4:
-        data = buf.dword;
+        data = le32_to_cpu(buf.dword);
         break;
     default:
         hw_error("vfio: unsupported read size, %d bytes", size);
@@ -1188,7 +1188,7 @@ static uint64_t vfio_bar_read(void *opaque,
 static const MemoryRegionOps vfio_bar_ops = {
     .read = vfio_bar_read,
     .write = vfio_bar_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
 static void vfio_pci_load_rom(VFIODevice *vdev)
@@ -1255,7 +1255,7 @@ static uint64_t vfio_rom_read(void *opaque, hwaddr addr, unsigned size)
         uint16_t word;
         uint32_t dword;
         uint64_t qword;
-    } buf;
+    } val;
     uint64_t data = 0;
 
     /* Load the ROM lazily when the guest tries to read it */
@@ -1263,21 +1263,21 @@ static uint64_t vfio_rom_read(void *opaque, hwaddr addr, unsigned size)
         vfio_pci_load_rom(vdev);
     }
 
-    memcpy(&buf, vdev->rom + addr,
+    memcpy(&val, vdev->rom + addr,
            (addr < vdev->rom_size) ? MIN(size, vdev->rom_size - addr) : 0);
 
     switch (size) {
     case 1:
-        data = buf.byte;
+        data = val.byte;
         break;
     case 2:
-        data = buf.word;
+        data = le16_to_cpu(val.word);
         break;
     case 4:
-        data = buf.dword;
+        data = le32_to_cpu(val.dword);
         break;
     default:
-        hw_error("vfio: unsupported read size, %d bytes", size);
+        hw_error("vfio: unsupported read size, %d bytes\n", size);
         break;
     }
 
@@ -1296,7 +1296,7 @@ static void vfio_rom_write(void *opaque, hwaddr addr,
 static const MemoryRegionOps vfio_rom_ops = {
     .read = vfio_rom_read,
     .write = vfio_rom_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
 static bool vfio_blacklist_opt_rom(VFIODevice *vdev)
@@ -2194,9 +2194,13 @@ static void vfio_probe_nvidia_bar0_88000_quirk(VFIODevice *vdev, int nr)
 {
     PCIDevice *pdev = &vdev->pdev;
     VFIOQuirk *quirk;
+    uint16_t vendor, class;
 
-    if (!vdev->has_vga || nr != 0 ||
-        pci_get_word(pdev->config + PCI_VENDOR_ID) != PCI_VENDOR_ID_NVIDIA) {
+    vendor = pci_get_word(pdev->config + PCI_VENDOR_ID);
+    class = pci_get_word(pdev->config + PCI_CLASS_DEVICE);
+
+    if (nr != 0 || vendor != PCI_VENDOR_ID_NVIDIA ||
+        class != PCI_CLASS_DISPLAY_VGA) {
         return;
     }
 
@@ -2282,7 +2286,7 @@ static void vfio_vga_quirk_teardown(VFIODevice *vdev)
         while (!QLIST_EMPTY(&vdev->vga.region[i].quirks)) {
             VFIOQuirk *quirk = QLIST_FIRST(&vdev->vga.region[i].quirks);
             memory_region_del_subregion(&vdev->vga.region[i].mem, &quirk->mem);
-            memory_region_destroy(&quirk->mem);
+            object_unparent(OBJECT(&quirk->mem));
             QLIST_REMOVE(quirk, next);
             g_free(quirk);
         }
@@ -2306,7 +2310,7 @@ static void vfio_bar_quirk_teardown(VFIODevice *vdev, int nr)
     while (!QLIST_EMPTY(&bar->quirks)) {
         VFIOQuirk *quirk = QLIST_FIRST(&bar->quirks);
         memory_region_del_subregion(&bar->mem, &quirk->mem);
-        memory_region_destroy(&quirk->mem);
+        object_unparent(OBJECT(&quirk->mem));
         QLIST_REMOVE(quirk, next);
         g_free(quirk);
     }
@@ -2873,15 +2877,11 @@ static void vfio_unmap_bar(VFIODevice *vdev, int nr)
 
     memory_region_del_subregion(&bar->mem, &bar->mmap_mem);
     munmap(bar->mmap, memory_region_size(&bar->mmap_mem));
-    memory_region_destroy(&bar->mmap_mem);
 
     if (vdev->msix && vdev->msix->table_bar == nr) {
         memory_region_del_subregion(&bar->mem, &vdev->msix->mmap_mem);
         munmap(vdev->msix->mmap, memory_region_size(&vdev->msix->mmap_mem));
-        memory_region_destroy(&vdev->msix->mmap_mem);
     }
-
-    memory_region_destroy(&bar->mem);
 }
 
 static int vfio_mmap_bar(VFIODevice *vdev, VFIOBAR *bar,
@@ -3034,9 +3034,6 @@ static void vfio_unmap_bars(VFIODevice *vdev)
     if (vdev->has_vga) {
         vfio_vga_quirk_teardown(vdev);
         pci_unregister_vga(&vdev->pdev);
-        memory_region_destroy(&vdev->vga.region[QEMU_PCI_VGA_MEM].mem);
-        memory_region_destroy(&vdev->vga.region[QEMU_PCI_VGA_IO_LO].mem);
-        memory_region_destroy(&vdev->vga.region[QEMU_PCI_VGA_IO_HI].mem);
     }
 }
 
@@ -4299,7 +4296,6 @@ static int vfio_initfn(PCIDevice *pdev)
         }
     }
 
-    add_boot_device_path(vdev->bootindex, &pdev->qdev, NULL);
     vfio_register_err_notifier(vdev);
 
     return 0;
@@ -4368,13 +4364,22 @@ post_reset:
     vfio_pci_post_reset(vdev);
 }
 
+static void vfio_instance_init(Object *obj)
+{
+    PCIDevice *pci_dev = PCI_DEVICE(obj);
+    VFIODevice *vdev = DO_UPCAST(VFIODevice, pdev, PCI_DEVICE(obj));
+
+    device_add_bootindex_property(obj, &vdev->bootindex,
+                                  "bootindex", NULL,
+                                  &pci_dev->qdev, NULL);
+}
+
 static Property vfio_pci_dev_properties[] = {
     DEFINE_PROP_PCI_HOST_DEVADDR("host", VFIODevice, host),
     DEFINE_PROP_UINT32("x-intx-mmap-timeout-ms", VFIODevice,
                        intx.mmap_timeout, 1100),
     DEFINE_PROP_BIT("x-vga", VFIODevice, features,
                     VFIO_FEATURE_ENABLE_VGA_BIT, false),
-    DEFINE_PROP_INT32("bootindex", VFIODevice, bootindex, -1),
     /*
      * TODO - support passed fds... is this necessary?
      * DEFINE_PROP_STRING("vfiofd", VFIODevice, vfiofd_name),
@@ -4410,6 +4415,7 @@ static const TypeInfo vfio_pci_dev_info = {
     .parent = TYPE_PCI_DEVICE,
     .instance_size = sizeof(VFIODevice),
     .class_init = vfio_pci_dev_class_init,
+    .instance_init = vfio_instance_init,
 };
 
 static void register_vfio_pci_dev_type(void)

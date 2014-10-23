@@ -23,6 +23,7 @@
 #include "hw/virtio/vhost.h"
 #include "hw/virtio/virtio-scsi.h"
 #include "hw/virtio/virtio-bus.h"
+#include "hw/virtio/virtio-access.h"
 
 /* Features supported by host kernel. */
 static const int kernel_feature_bits[] = {
@@ -163,8 +164,8 @@ static void vhost_scsi_set_config(VirtIODevice *vdev,
     VirtIOSCSIConfig *scsiconf = (VirtIOSCSIConfig *)config;
     VirtIOSCSICommon *vs = VIRTIO_SCSI_COMMON(vdev);
 
-    if ((uint32_t) ldl_p(&scsiconf->sense_size) != vs->sense_size ||
-        (uint32_t) ldl_p(&scsiconf->cdb_size) != vs->cdb_size) {
+    if ((uint32_t) virtio_ldl_p(vdev, &scsiconf->sense_size) != vs->sense_size ||
+        (uint32_t) virtio_ldl_p(vdev, &scsiconf->cdb_size) != vs->cdb_size) {
         error_report("vhost-scsi does not support changing the sense data and CDB sizes");
         exit(1);
     }
@@ -238,6 +239,7 @@ static void vhost_scsi_realize(DeviceState *dev, Error **errp)
     s->dev.nvqs = VHOST_SCSI_VQ_NUM_FIXED + vs->conf.num_queues;
     s->dev.vqs = g_new(struct vhost_virtqueue, s->dev.nvqs);
     s->dev.vq_index = 0;
+    s->dev.backend_features = 0;
 
     ret = vhost_dev_init(&s->dev, (void *)(uintptr_t)vhostfd,
                          VHOST_BACKEND_TYPE_KERNEL, true);
@@ -246,7 +248,6 @@ static void vhost_scsi_realize(DeviceState *dev, Error **errp)
                    strerror(-ret));
         return;
     }
-    s->dev.backend_features = 0;
 
     error_setg(&s->migration_blocker,
             "vhost-scsi does not support migration");

@@ -157,7 +157,7 @@ static uint64_t coroutine_fn mirror_iteration(MirrorBlockJob *s)
     BlockDriverState *source = s->common.bs;
     int nb_sectors, sectors_per_chunk, nb_chunks;
     int64_t end, sector_num, next_chunk, next_sector, hbitmap_next_sector;
-    uint64_t delay_ns;
+    uint64_t delay_ns = 0;
     MirrorOp *op;
 
     s->sector_num = hbitmap_iter_next(&s->hbi);
@@ -247,8 +247,6 @@ static uint64_t coroutine_fn mirror_iteration(MirrorBlockJob *s)
         next_chunk += added_chunks;
         if (!s->synced && s->common.speed) {
             delay_ns = ratelimit_calculate_delay(&s->limit, added_sectors);
-        } else {
-            delay_ns = 0;
         }
     } while (delay_ns == 0 && next_sector < end);
 
@@ -569,7 +567,8 @@ static void mirror_complete(BlockJob *job, Error **errp)
         return;
     }
     if (!s->synced) {
-        error_set(errp, QERR_BLOCK_JOB_NOT_READY, job->bs->device_name);
+        error_set(errp, QERR_BLOCK_JOB_NOT_READY,
+                  bdrv_get_device_name(job->bs));
         return;
     }
 
@@ -614,7 +613,7 @@ static void mirror_start_job(BlockDriverState *bs, BlockDriverState *target,
                              int64_t buf_size,
                              BlockdevOnError on_source_error,
                              BlockdevOnError on_target_error,
-                             BlockDriverCompletionFunc *cb,
+                             BlockCompletionFunc *cb,
                              void *opaque, Error **errp,
                              const BlockJobDriver *driver,
                              bool is_none_mode, BlockDriverState *base)
@@ -674,7 +673,7 @@ void mirror_start(BlockDriverState *bs, BlockDriverState *target,
                   int64_t speed, int64_t granularity, int64_t buf_size,
                   MirrorSyncMode mode, BlockdevOnError on_source_error,
                   BlockdevOnError on_target_error,
-                  BlockDriverCompletionFunc *cb,
+                  BlockCompletionFunc *cb,
                   void *opaque, Error **errp)
 {
     bool is_none_mode;
@@ -691,7 +690,7 @@ void mirror_start(BlockDriverState *bs, BlockDriverState *target,
 void commit_active_start(BlockDriverState *bs, BlockDriverState *base,
                          int64_t speed,
                          BlockdevOnError on_error,
-                         BlockDriverCompletionFunc *cb,
+                         BlockCompletionFunc *cb,
                          void *opaque, Error **errp)
 {
     int64_t length, base_length;

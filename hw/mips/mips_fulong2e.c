@@ -25,7 +25,7 @@
 #include "net/net.h"
 #include "hw/boards.h"
 #include "hw/i2c/smbus.h"
-#include "block/block.h"
+#include "sysemu/block-backend.h"
 #include "hw/block/flash.h"
 #include "hw/mips/mips.h"
 #include "hw/mips/cpudevs.h"
@@ -302,9 +302,10 @@ static void mips_fulong2e_init(MachineState *machine)
     bios_size = 1024 * 1024;
 
     /* allocate RAM */
-    memory_region_init_ram(ram, NULL, "fulong2e.ram", ram_size);
+    memory_region_init_ram(ram, NULL, "fulong2e.ram", ram_size, &error_abort);
     vmstate_register_ram_global(ram);
-    memory_region_init_ram(bios, NULL, "fulong2e.bios", bios_size);
+    memory_region_init_ram(bios, NULL, "fulong2e.bios", bios_size,
+                           &error_abort);
     vmstate_register_ram_global(bios);
     memory_region_set_readonly(bios, true);
 
@@ -349,7 +350,7 @@ static void mips_fulong2e_init(MachineState *machine)
     pci_bus = bonito_init((qemu_irq *)&(env->irq[2]));
 
     /* South bridge */
-    ide_drive_get(hd, MAX_IDE_BUS);
+    ide_drive_get(hd, ARRAY_SIZE(hd));
 
     isa_bus = vt82c686b_init(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 0));
     if (!isa_bus) {

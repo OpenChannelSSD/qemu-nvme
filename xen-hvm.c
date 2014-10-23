@@ -71,7 +71,7 @@ static inline ioreq_t *xen_vcpu_ioreq(shared_iopage_t *shared_page, int vcpu)
 typedef struct XenPhysmap {
     hwaddr start_addr;
     ram_addr_t size;
-    char *name;
+    const char *name;
     hwaddr phys_offset;
 
     QLIST_ENTRY(XenPhysmap) list;
@@ -188,7 +188,8 @@ static void xen_ram_init(ram_addr_t *below_4g_mem_size,
          */
         block_len = (1ULL << 32) + *above_4g_mem_size;
     }
-    memory_region_init_ram(&ram_memory, NULL, "xen.ram", block_len);
+    memory_region_init_ram(&ram_memory, NULL, "xen.ram", block_len,
+                           &error_abort);
     *ram_memory_p = &ram_memory;
     vmstate_register_ram_global(&ram_memory);
 
@@ -291,6 +292,7 @@ static int xen_add_to_physmap(XenIOState *state,
     hwaddr pfn, start_gpfn;
     hwaddr phys_offset = memory_region_get_ram_addr(mr);
     char path[80], value[17];
+    const char *mr_name;
 
     if (get_physmapping(state, start_addr, size)) {
         return 0;
@@ -326,11 +328,13 @@ go_physmap:
         }
     }
 
+    mr_name = memory_region_name(mr);
+
     physmap = g_malloc(sizeof (XenPhysmap));
 
     physmap->start_addr = start_addr;
     physmap->size = size;
-    physmap->name = (char *)mr->name;
+    physmap->name = mr_name;
     physmap->phys_offset = phys_offset;
 
     QLIST_INSERT_HEAD(&state->physmap, physmap, list);
@@ -354,11 +358,11 @@ go_physmap:
     if (!xs_write(state->xenstore, 0, path, value, strlen(value))) {
         return -1;
     }
-    if (mr->name) {
+    if (mr_name) {
         snprintf(path, sizeof(path),
                 "/local/domain/0/device-model/%d/physmap/%"PRIx64"/name",
                 xen_domid, (uint64_t)phys_offset);
-        if (!xs_write(state->xenstore, 0, path, mr->name, strlen(mr->name))) {
+        if (!xs_write(state->xenstore, 0, path, mr_name, strlen(mr_name))) {
             return -1;
         }
     }
@@ -975,6 +979,7 @@ static void xen_wakeup_notifier(Notifier *notifier, void *data)
     xc_set_hvm_param(xen_xc, xen_domid, HVM_PARAM_ACPI_S_STATE, 0);
 }
 
+/* return 0 means OK, or -1 means critical issue -- will exit(1) */
 int xen_hvm_init(ram_addr_t *below_4g_mem_size, ram_addr_t *above_4g_mem_size,
                  MemoryRegion **ram_memory)
 {
@@ -988,15 +993,13 @@ int xen_hvm_init(ram_addr_t *below_4g_mem_size, ram_addr_t *above_4g_mem_size,
     state->xce_handle = xen_xc_evtchn_open(NULL, 0);
     if (state->xce_handle == XC_HANDLER_INITIAL_VALUE) {
         perror("xen: event channel open");
-        g_free(state);
-        return -errno;
+        return -1;
     }
 
     state->xenstore = xs_daemon_open();
     if (state->xenstore == NULL) {
         perror("xen: xenstore open");
-        g_free(state);
-        return -errno;
+        return -1;
     }
 
     state->exit.notify = xen_exit_notifier;
@@ -1066,7 +1069,7 @@ int xen_hvm_init(ram_addr_t *below_4g_mem_size, ram_addr_t *above_4g_mem_size,
     /* Initialize backend core & drivers */
     if (xen_be_init() != 0) {
         fprintf(stderr, "%s: xen backend core setup failed\n", __FUNCTION__);
-        exit(1);
+        return -1;
     }
     xen_be_register("console", &xen_console_ops);
     xen_be_register("vkbd", &xen_kbdmouse_ops);

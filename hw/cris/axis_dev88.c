@@ -30,7 +30,7 @@
 #include "hw/loader.h"
 #include "elf.h"
 #include "boot.h"
-#include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "exec/address-spaces.h"
 #include "sysemu/qtest.h"
 
@@ -270,19 +270,21 @@ void axisdev88_init(MachineState *machine)
     env = &cpu->env;
 
     /* allocate RAM */
-    memory_region_init_ram(phys_ram, NULL, "axisdev88.ram", ram_size);
+    memory_region_init_ram(phys_ram, NULL, "axisdev88.ram", ram_size,
+                           &error_abort);
     vmstate_register_ram_global(phys_ram);
     memory_region_add_subregion(address_space_mem, 0x40000000, phys_ram);
 
     /* The ETRAX-FS has 128Kb on chip ram, the docs refer to it as the 
        internal memory.  */
-    memory_region_init_ram(phys_intmem, NULL, "axisdev88.chipram", INTMEM_SIZE);
+    memory_region_init_ram(phys_intmem, NULL, "axisdev88.chipram", INTMEM_SIZE,
+                           &error_abort);
     vmstate_register_ram_global(phys_intmem);
     memory_region_add_subregion(address_space_mem, 0x38000000, phys_intmem);
 
       /* Attach a NAND flash to CS1.  */
     nand = drive_get(IF_MTD, 0, 0);
-    nand_state.nand = nand_init(nand ? nand->bdrv : NULL,
+    nand_state.nand = nand_init(nand ? blk_by_legacy_dinfo(nand) : NULL,
                                 NAND_MFR_STMICRO, 0x39);
     memory_region_init_io(&nand_state.iomem, NULL, &nand_ops, &nand_state,
                           "nand", 0x05000000);

@@ -12,11 +12,12 @@
 #define HW_BLOCK_COMMON_H
 
 #include "qemu-common.h"
+#include "qapi/error.h"
 
 /* Configuration */
 
 typedef struct BlockConf {
-    BlockDriverState *bs;
+    BlockBackend *blk;
     uint16_t physical_block_size;
     uint16_t logical_block_size;
     uint16_t min_io_size;
@@ -41,14 +42,13 @@ static inline unsigned int get_physical_block_exp(BlockConf *conf)
 }
 
 #define DEFINE_BLOCK_PROPERTIES(_state, _conf)                          \
-    DEFINE_PROP_DRIVE("drive", _state, _conf.bs),                       \
+    DEFINE_PROP_DRIVE("drive", _state, _conf.blk),                      \
     DEFINE_PROP_BLOCKSIZE("logical_block_size", _state,                 \
                           _conf.logical_block_size, 512),               \
     DEFINE_PROP_BLOCKSIZE("physical_block_size", _state,                \
                           _conf.physical_block_size, 512),              \
     DEFINE_PROP_UINT16("min_io_size", _state, _conf.min_io_size, 0),  \
     DEFINE_PROP_UINT32("opt_io_size", _state, _conf.opt_io_size, 0),    \
-    DEFINE_PROP_INT32("bootindex", _state, _conf.bootindex, -1),        \
     DEFINE_PROP_UINT32("discard_granularity", _state, \
                        _conf.discard_granularity, -1)
 
@@ -60,12 +60,13 @@ static inline unsigned int get_physical_block_exp(BlockConf *conf)
 /* Configuration helpers */
 
 void blkconf_serial(BlockConf *conf, char **serial);
-int blkconf_geometry(BlockConf *conf, int *trans,
-                     unsigned cyls_max, unsigned heads_max, unsigned secs_max);
+void blkconf_geometry(BlockConf *conf, int *trans,
+                      unsigned cyls_max, unsigned heads_max, unsigned secs_max,
+                      Error **errp);
 
 /* Hard disk geometry */
 
-void hd_geometry_guess(BlockDriverState *bs,
+void hd_geometry_guess(BlockBackend *blk,
                        uint32_t *pcyls, uint32_t *pheads, uint32_t *psecs,
                        int *ptrans);
 int hd_bios_chs_auto_trans(uint32_t cyls, uint32_t heads, uint32_t secs);

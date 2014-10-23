@@ -21,7 +21,7 @@
 
 #include "sysemu/tpm_backend.h"
 #include "tpm_int.h"
-#include "block/block.h"
+#include "sysemu/block-backend.h"
 #include "exec/address-spaces.h"
 #include "hw/hw.h"
 #include "hw/i386/pc.h"
@@ -896,14 +896,6 @@ static void tpm_tis_initfn(Object *obj)
                                 &s->mmio);
 }
 
-static void tpm_tis_uninitfn(Object *obj)
-{
-    TPMState *s = TPM(obj);
-
-    memory_region_del_subregion(get_system_memory(), &s->mmio);
-    memory_region_destroy(&s->mmio);
-}
-
 static void tpm_tis_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -919,7 +911,6 @@ static const TypeInfo tpm_tis_info = {
     .parent = TYPE_ISA_DEVICE,
     .instance_size = sizeof(TPMState),
     .instance_init = tpm_tis_initfn,
-    .instance_finalize = tpm_tis_uninitfn,
     .class_init  = tpm_tis_class_init,
 };
 

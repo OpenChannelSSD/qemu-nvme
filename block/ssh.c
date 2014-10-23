@@ -517,6 +517,11 @@ static int connect_to_ssh(BDRVSSHState *s, QDict *options,
     const char *host, *user, *path, *host_key_check;
     int port;
 
+    if (!qdict_haskey(options, "host")) {
+        ret = -EINVAL;
+        error_setg(errp, "No hostname was specified");
+        goto err;
+    }
     host = qdict_get_str(options, "host");
 
     if (qdict_haskey(options, "port")) {
@@ -525,6 +530,11 @@ static int connect_to_ssh(BDRVSSHState *s, QDict *options,
         port = 22;
     }
 
+    if (!qdict_haskey(options, "path")) {
+        ret = -EINVAL;
+        error_setg(errp, "No path was specified");
+        goto err;
+    }
     path = qdict_get_str(options, "path");
 
     if (qdict_haskey(options, "user")) {
@@ -700,7 +710,8 @@ static int ssh_create(const char *filename, QemuOpts *opts, Error **errp)
     ssh_state_init(&s);
 
     /* Get desired file size. */
-    total_size = qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0);
+    total_size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
+                          BDRV_SECTOR_SIZE);
     DPRINTF("total_size=%" PRIi64, total_size);
 
     uri_options = qdict_new();

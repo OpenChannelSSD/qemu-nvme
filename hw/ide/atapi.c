@@ -25,6 +25,7 @@
 
 #include "hw/ide/internal.h"
 #include "hw/scsi/scsi.h"
+#include "sysemu/block-backend.h"
 
 static void ide_atapi_cmd_read_dma_cb(void *opaque, int ret);
 
@@ -110,14 +111,16 @@ static int cd_read_sector(IDEState *s, int lba, uint8_t *buf, int sector_size)
 
     switch(sector_size) {
     case 2048:
-        bdrv_acct_start(s->bs, &s->acct, 4 * BDRV_SECTOR_SIZE, BDRV_ACCT_READ);
-        ret = bdrv_read(s->bs, (int64_t)lba << 2, buf, 4);
-        bdrv_acct_done(s->bs, &s->acct);
+        block_acct_start(blk_get_stats(s->blk), &s->acct,
+                         4 * BDRV_SECTOR_SIZE, BLOCK_ACCT_READ);
+        ret = blk_read(s->blk, (int64_t)lba << 2, buf, 4);
+        block_acct_done(blk_get_stats(s->blk), &s->acct);
         break;
     case 2352:
-        bdrv_acct_start(s->bs, &s->acct, 4 * BDRV_SECTOR_SIZE, BDRV_ACCT_READ);
-        ret = bdrv_read(s->bs, (int64_t)lba << 2, buf + 16, 4);
-        bdrv_acct_done(s->bs, &s->acct);
+        block_acct_start(blk_get_stats(s->blk), &s->acct,
+                         4 * BDRV_SECTOR_SIZE, BLOCK_ACCT_READ);
+        ret = blk_read(s->blk, (int64_t)lba << 2, buf + 16, 4);
+        block_acct_done(blk_get_stats(s->blk), &s->acct);
         if (ret < 0)
             return ret;
         cd_data_to_raw(buf, lba);
@@ -134,6 +137,7 @@ void ide_atapi_cmd_ok(IDEState *s)
     s->error = 0;
     s->status = READY_STAT | SEEK_STAT;
     s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO | ATAPI_INT_REASON_CD;
+    ide_transfer_stop(s);
     ide_set_irq(s->bus);
 }
 
@@ -147,6 +151,7 @@ void ide_atapi_cmd_error(IDEState *s, int sense_key, int asc)
     s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO | ATAPI_INT_REASON_CD;
     s->sense_key = sense_key;
     s->asc = asc;
+    ide_transfer_stop(s);
     ide_set_irq(s->bus);
 }
 
@@ -174,9 +179,7 @@ void ide_atapi_cmd_reply_end(IDEState *s)
 #endif
     if (s->packet_transfer_size <= 0) {
         /* end of transfer */
-        s->status = READY_STAT | SEEK_STAT;
-        s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO | ATAPI_INT_REASON_CD;
-        ide_transfer_stop(s);
+        ide_atapi_cmd_ok(s);
         ide_set_irq(s->bus);
 #ifdef DEBUG_IDE_ATAPI
         printf("status=0x%x\n", s->status);
@@ -186,7 +189,6 @@ void ide_atapi_cmd_reply_end(IDEState *s)
         if (s->lba != -1 && s->io_buffer_index >= s->cd_sector_size) {
             ret = cd_read_sector(s, s->lba, s->io_buffer, s->cd_sector_size);
             if (ret < 0) {
-                ide_transfer_stop(s);
                 ide_atapi_io_error(s, ret);
                 return;
             }
@@ -253,7 +255,8 @@ static void ide_atapi_cmd_reply(IDEState *s, int size, int max_size)
     s->io_buffer_index = 0;
 
     if (s->atapi_dma) {
-        bdrv_acct_start(s->bs, &s->acct, size, BDRV_ACCT_READ);
+        block_acct_start(blk_get_stats(s->blk), &s->acct, size,
+                         BLOCK_ACCT_READ);
         s->status = READY_STAT | SEEK_STAT | DRQ_STAT;
         ide_start_dma(s, ide_atapi_cmd_read_dma_cb);
     } else {
@@ -348,13 +351,13 @@ static void ide_atapi_cmd_read_dma_cb(void *opaque, int ret)
     s->bus->dma->iov.iov_len = n * 4 * 512;
     qemu_iovec_init_external(&s->bus->dma->qiov, &s->bus->dma->iov, 1);
 
-    s->bus->dma->aiocb = bdrv_aio_readv(s->bs, (int64_t)s->lba << 2,
+    s->bus->dma->aiocb = blk_aio_readv(s->blk, (int64_t)s->lba << 2,
                                        &s->bus->dma->qiov, n * 4,
                                        ide_atapi_cmd_read_dma_cb, s);
     return;
 
 eot:
-    bdrv_acct_done(s->bs, &s->acct);
+    block_acct_done(blk_get_stats(s->blk), &s->acct);
     ide_set_inactive(s, false);
 }
 
@@ -369,7 +372,8 @@ static void ide_atapi_cmd_read_dma(IDEState *s, int lba, int nb_sectors,
     s->io_buffer_size = 0;
     s->cd_sector_size = sector_size;
 
-    bdrv_acct_start(s->bs, &s->acct, s->packet_transfer_size, BDRV_ACCT_READ);
+    block_acct_start(blk_get_stats(s->blk), &s->acct, s->packet_transfer_size,
+                     BLOCK_ACCT_READ);
 
     /* XXX: check if BUSY_STAT should be set */
     s->status = READY_STAT | SEEK_STAT | DRQ_STAT | BUSY_STAT;
@@ -501,7 +505,7 @@ static unsigned int event_status_media(IDEState *s,
     media_status = 0;
     if (s->tray_open) {
         media_status = MS_TRAY_OPEN;
-    } else if (bdrv_is_inserted(s->bs)) {
+    } else if (blk_is_inserted(s->blk)) {
         media_status = MS_MEDIA_PRESENT;
     }
 
@@ -797,7 +801,7 @@ static void cmd_test_unit_ready(IDEState *s, uint8_t *buf)
 static void cmd_prevent_allow_medium_removal(IDEState *s, uint8_t* buf)
 {
     s->tray_locked = buf[4] & 1;
-    bdrv_lock_medium(s->bs, buf[4] & 1);
+    blk_lock_medium(s->blk, buf[4] & 1);
     ide_atapi_cmd_ok(s);
 }
 
@@ -881,14 +885,14 @@ static void cmd_start_stop_unit(IDEState *s, uint8_t* buf)
 
     if (loej) {
         if (!start && !s->tray_open && s->tray_locked) {
-            sense = bdrv_is_inserted(s->bs)
+            sense = blk_is_inserted(s->blk)
                 ? NOT_READY : ILLEGAL_REQUEST;
             ide_atapi_cmd_error(s, sense, ASC_MEDIA_REMOVAL_PREVENTED);
             return;
         }
 
         if (s->tray_open != !start) {
-            bdrv_eject(s->bs, !start);
+            blk_eject(s->blk, !start);
             s->tray_open = !start;
         }
     }
@@ -1122,7 +1126,7 @@ void ide_atapi_cmd(IDEState *s)
      * states rely on this behavior.
      */
     if (!(atapi_cmd_table[s->io_buffer[0]].flags & ALLOW_UA) &&
-        !s->tray_open && bdrv_is_inserted(s->bs) && s->cdrom_changed) {
+        !s->tray_open && blk_is_inserted(s->blk) && s->cdrom_changed) {
 
         if (s->cdrom_changed == 1) {
             ide_atapi_cmd_error(s, NOT_READY, ASC_MEDIUM_NOT_PRESENT);
@@ -1137,7 +1141,7 @@ void ide_atapi_cmd(IDEState *s)
 
     /* Report a Not Ready condition if appropriate for the command */
     if ((atapi_cmd_table[s->io_buffer[0]].flags & CHECK_READY) &&
-        (!media_present(s) || !bdrv_is_inserted(s->bs)))
+        (!media_present(s) || !blk_is_inserted(s->blk)))
     {
         ide_atapi_cmd_error(s, NOT_READY, ASC_MEDIUM_NOT_PRESENT);
         return;

@@ -148,6 +148,7 @@ typedef struct ARMCPU {
     uint64_t id_aa64isar1;
     uint64_t id_aa64mmfr0;
     uint64_t id_aa64mmfr1;
+    uint32_t dbgdidr;
     uint32_t clidr;
     /* The elements of this array are the CCSIDR values for each cache,
      * in the order L1DCache, L1ICache, L2DCache, L2ICache, etc.
@@ -191,6 +192,7 @@ void init_cpreg_list(ARMCPU *cpu);
 
 void arm_cpu_do_interrupt(CPUState *cpu);
 void arm_v7m_cpu_do_interrupt(CPUState *cpu);
+bool arm_cpu_exec_interrupt(CPUState *cpu, int int_req);
 
 void arm_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
                         int flags);

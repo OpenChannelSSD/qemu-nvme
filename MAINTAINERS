@@ -161,6 +161,12 @@ S: Maintained
 F: target-xtensa/
 F: hw/xtensa/
 
+TriCore
+M: Bastian Koppelmann <kbastian@mail.uni-paderborn.de>
+S: Maintained
+F: target-tricore/
+F: hw/tricore/
+
 Guest CPU Cores (KVM):
 ----------------------
 
@@ -192,7 +198,9 @@ M: Cornelia Huck <cornelia.huck@de.ibm.com>
 M: Alexander Graf <agraf@suse.de>
 S: Maintained
 F: target-s390x/kvm.c
-F: hw/intc/s390_flic.[hc]
+F: hw/intc/s390_flic.c
+F: hw/intc/s390_flic_kvm.c
+F: include/hw/s390x/s390_flic.h
 
 X86
 M: Marcelo Tosatti <mtosatti@redhat.com>
@@ -515,6 +523,8 @@ F: hw/s390x/s390-virtio-ccw.c
 F: hw/s390x/css.[hc]
 F: hw/s390x/sclp*.[hc]
 F: hw/s390x/ipl*.[hc]
+F: include/hw/s390x/
+F: pc-bios/s390-ccw/
 T: git git://github.com/cohuck/qemu virtio-ccw-upstr
 
 UniCore32 Machines
@@ -614,7 +624,7 @@ USB
 M: Gerd Hoffmann <kraxel@redhat.com>
 S: Maintained
 F: hw/usb/*
-F: tests/usb-hcd-ehci-test.c
+F: tests/usb-*-test.c
 
 VFIO
 M: Alex Williamson <alex.williamson@redhat.com>
@@ -677,6 +687,12 @@ M: Edgar E. Iglesias <edgar.iglesias@gmail.com>
 S: Maintained
 F: hw/*/xilinx_*
 F: include/hw/xilinx.h
+
+Vmware
+M: Dmitry Fleytman <dmitry@daynix.com>
+S: Maintained
+F: hw/net/vmxnet*
+F: hw/scsi/vmw_pvscsi*
 
 Subsystems
 ----------
@@ -968,7 +984,7 @@ S: Supported
 F: block/rbd.c
 
 Sheepdog
-M: MORITA Kazutaka <morita.kazutaka@lab.ntt.co.jp>
+M: Hitoshi Mitake <mitake.hitoshi@lab.ntt.co.jp>
 M: Liu Yuan <namei.unix@gmail.com>
 L: sheepdog@lists.wpkg.org
 S: Supported

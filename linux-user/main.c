@@ -309,7 +309,6 @@ void cpu_loop(CPUX86State *env)
                                           env->regs[8],
                                           env->regs[9],
                                           0, 0);
-            env->eip = env->exception_next_eip;
             break;
 #endif
         case EXCP0B_NOSEG:
@@ -3459,8 +3458,7 @@ CPUArchState *cpu_copy(CPUArchState *env)
         cpu_breakpoint_insert(new_cpu, bp->pc, bp->flags, NULL);
     }
     QTAILQ_FOREACH(wp, &cpu->watchpoints, entry) {
-        cpu_watchpoint_insert(new_cpu, wp->vaddr, (~wp->len_mask) + 1,
-                              wp->flags, NULL);
+        cpu_watchpoint_insert(new_cpu, wp->vaddr, wp->len, wp->flags, NULL);
     }
 #endif
 

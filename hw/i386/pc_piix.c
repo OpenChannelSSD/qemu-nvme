@@ -41,7 +41,7 @@
 #include "hw/sysbus.h"
 #include "hw/cpu/icc_bus.h"
 #include "sysemu/arch_init.h"
-#include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "hw/i2c/smbus.h"
 #include "hw/xen/xen.h"
 #include "exec/memory.h"
@@ -239,7 +239,7 @@ static void pc_init1(MachineState *machine,
 
     pc_nic_init(isa_bus, pci_bus);
 
-    ide_drive_get(hd, MAX_IDE_BUS);
+    ide_drive_get(hd, ARRAY_SIZE(hd));
     if (pci_enabled) {
         PCIDevice *dev;
         if (xen_enabled()) {
@@ -323,6 +323,7 @@ static void pc_compat_2_0(MachineState *machine)
     legacy_acpi_table_size = 6652;
     smbios_legacy_mode = true;
     has_reserved_memory = false;
+    pc_set_legacy_acpi_data_size();
 }
 
 static void pc_compat_1_7(MachineState *machine)

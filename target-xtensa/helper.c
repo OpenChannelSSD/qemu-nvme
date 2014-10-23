@@ -79,9 +79,10 @@ static uint32_t check_hw_breakpoints(CPUXtensaState *env)
     return 0;
 }
 
-void xtensa_breakpoint_handler(CPUXtensaState *env)
+void xtensa_breakpoint_handler(CPUState *cs)
 {
-    CPUState *cs = CPU(xtensa_env_get_cpu(env));
+    XtensaCPU *cpu = XTENSA_CPU(cs);
+    CPUXtensaState *env = &cpu->env;
 
     if (cs->watchpoint_hit) {
         if (cs->watchpoint_hit->flags & BP_CPU) {
@@ -253,6 +254,16 @@ void xtensa_cpu_do_interrupt(CPUState *cs)
         break;
     }
     check_interrupts(env);
+}
+
+bool xtensa_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
+{
+    if (interrupt_request & CPU_INTERRUPT_HARD) {
+        cs->exception_index = EXC_IRQ;
+        xtensa_cpu_do_interrupt(cs);
+        return true;
+    }
+    return false;
 }
 
 static void reset_tlb_mmu_all_ways(CPUXtensaState *env,

@@ -40,6 +40,8 @@
 #include "hw/loader.h"
 #include "hw/isa/isa.h"
 #include "hw/acpi/memory_hotplug.h"
+#include "sysemu/tpm.h"
+#include "hw/acpi/tpm.h"
 
 /* Supported chipsets: */
 #include "hw/acpi/piix4.h"
@@ -47,6 +49,7 @@
 #include "hw/i386/ich9.h"
 #include "hw/pci/pci_bus.h"
 #include "hw/pci-host/q35.h"
+#include "hw/i386/intel_iommu.h"
 
 #include "hw/i386/q35-acpi-dsdt.hex"
 #include "hw/i386/acpi-dsdt.hex"
@@ -88,6 +91,7 @@ typedef struct AcpiPmInfo {
 
 typedef struct AcpiMiscInfo {
     bool has_hpet;
+    bool has_tpm;
     DECLARE_BITMAP(slot_hotplug_enable, PCI_SLOT_MAX);
     const unsigned char *dsdt_code;
     unsigned dsdt_size;
@@ -210,6 +214,7 @@ static void acpi_get_pm_info(AcpiPmInfo *pm)
 static void acpi_get_misc_info(AcpiMiscInfo *info)
 {
     info->has_hpet = hpet_find();
+    info->has_tpm = tpm_find();
     info->pvpanic_port = pvpanic_port();
 }
 
@@ -546,6 +551,12 @@ static void fadt_setup(AcpiFadtDescriptorRev1 *fadt, AcpiPmInfo *pm)
                               (1 << ACPI_FADT_F_SLP_BUTTON) |
                               (1 << ACPI_FADT_F_RTC_S4));
     fadt->flags |= cpu_to_le32(1 << ACPI_FADT_F_USE_PLATFORM_CLOCK);
+    /* APIC destination mode ("Flat Logical") has an upper limit of 8 CPUs
+     * For more than 8 CPUs, "Clustered Logical" mode has to be used
+     */
+    if (max_cpus > 8) {
+        fadt->flags |= cpu_to_le32(1 << ACPI_FADT_F_FORCE_APIC_CLUSTER_MODEL);
+    }
 }
 
 
@@ -698,6 +709,7 @@ static inline char acpi_get_hex(uint32_t val)
 
 #include "hw/i386/ssdt-misc.hex"
 #include "hw/i386/ssdt-pcihp.hex"
+#include "hw/i386/ssdt-tpm.hex"
 
 static void
 build_append_notify_method(GArray *device, const char *name,
@@ -762,7 +774,7 @@ static void *acpi_set_bsel(PCIBus *bus, void *opaque)
     unsigned *bsel_alloc = opaque;
     unsigned *bus_bsel;
 
-    if (bus->qbus.allow_hotplug) {
+    if (qbus_is_hotpluggable(BUS(bus))) {
         bus_bsel = g_malloc(sizeof *bus_bsel);
 
         *bus_bsel = (*bsel_alloc)++;
@@ -1201,6 +1213,39 @@ build_hpet(GArray *table_data, GArray *linker)
                  (void *)hpet, "HPET", sizeof(*hpet), 1);
 }
 
+static void
+build_tpm_tcpa(GArray *table_data, GArray *linker)
+{
+    Acpi20Tcpa *tcpa = acpi_data_push(table_data, sizeof *tcpa);
+    /* the log area will come right after the TCPA table */
+    uint64_t log_area_start_address = acpi_data_len(table_data);
+
+    tcpa->platform_class = cpu_to_le16(TPM_TCPA_ACPI_CLASS_CLIENT);
+    tcpa->log_area_minimum_length = cpu_to_le32(TPM_LOG_AREA_MINIMUM_SIZE);
+    tcpa->log_area_start_address = cpu_to_le64(log_area_start_address);
+
+    /* log area start address to be filled by Guest linker */
+    bios_linker_loader_add_pointer(linker, ACPI_BUILD_TABLE_FILE,
+                                   ACPI_BUILD_TABLE_FILE,
+                                   table_data, &tcpa->log_area_start_address,
+                                   sizeof(tcpa->log_area_start_address));
+
+    build_header(linker, table_data,
+                 (void *)tcpa, "TCPA", sizeof(*tcpa), 2);
+
+    /* now only get the log area and with that modify table_data */
+    acpi_data_push(table_data, TPM_LOG_AREA_MINIMUM_SIZE);
+}
+
+static void
+build_tpm_ssdt(GArray *table_data, GArray *linker)
+{
+    void *tpm_ptr;
+
+    tpm_ptr = acpi_data_push(table_data, sizeof(ssdt_tpm_aml));
+    memcpy(tpm_ptr, ssdt_tpm_aml, sizeof(ssdt_tpm_aml));
+}
+
 typedef enum {
     MEM_AFFINITY_NOFLAGS      = 0,
     MEM_AFFINITY_ENABLED      = (1 << 0),
@@ -1350,6 +1395,30 @@ build_mcfg_q35(GArray *table_data, GArray *linker, AcpiMcfgInfo *info)
 }
 
 static void
+build_dmar_q35(GArray *table_data, GArray *linker)
+{
+    int dmar_start = table_data->len;
+
+    AcpiTableDmar *dmar;
+    AcpiDmarHardwareUnit *drhd;
+
+    dmar = acpi_data_push(table_data, sizeof(*dmar));
+    dmar->host_address_width = VTD_HOST_ADDRESS_WIDTH - 1;
+    dmar->flags = 0;    /* No intr_remap for now */
+
+    /* DMAR Remapping Hardware Unit Definition structure */
+    drhd = acpi_data_push(table_data, sizeof(*drhd));
+    drhd->type = cpu_to_le16(ACPI_DMAR_TYPE_HARDWARE_UNIT);
+    drhd->length = cpu_to_le16(sizeof(*drhd));   /* No device scope now */
+    drhd->flags = ACPI_DMAR_INCLUDE_PCI_ALL;
+    drhd->pci_segment = cpu_to_le16(0);
+    drhd->address = cpu_to_le64(Q35_HOST_BRIDGE_IOMMU_ADDR);
+
+    build_header(linker, table_data, (void *)(table_data->data + dmar_start),
+                 "DMAR", table_data->len - dmar_start, 1);
+}
+
+static void
 build_dsdt(GArray *table_data, GArray *linker, AcpiMiscInfo *misc)
 {
     AcpiTableHeader *dsdt;
@@ -1470,6 +1539,16 @@ static bool acpi_get_mcfg(AcpiMcfgInfo *mcfg)
     return true;
 }
 
+static bool acpi_has_iommu(void)
+{
+    bool ambiguous;
+    Object *intel_iommu;
+
+    intel_iommu = object_resolve_path_type("", TYPE_INTEL_IOMMU_DEVICE,
+                                           &ambiguous);
+    return intel_iommu && !ambiguous;
+}
+
 static
 void acpi_build(PcGuestInfo *guest_info, AcpiBuildTables *tables)
 {
@@ -1531,6 +1610,13 @@ void acpi_build(PcGuestInfo *guest_info, AcpiBuildTables *tables)
         acpi_add_table(table_offsets, tables->table_data);
         build_hpet(tables->table_data, tables->linker);
     }
+    if (misc.has_tpm) {
+        acpi_add_table(table_offsets, tables->table_data);
+        build_tpm_tcpa(tables->table_data, tables->linker);
+
+        acpi_add_table(table_offsets, tables->table_data);
+        build_tpm_ssdt(tables->table_data, tables->linker);
+    }
     if (guest_info->numa_nodes) {
         acpi_add_table(table_offsets, tables->table_data);
         build_srat(tables->table_data, tables->linker, &cpu, guest_info);
@@ -1538,6 +1624,10 @@ void acpi_build(PcGuestInfo *guest_info, AcpiBuildTables *tables)
     if (acpi_get_mcfg(&mcfg)) {
         acpi_add_table(table_offsets, tables->table_data);
         build_mcfg_q35(tables->table_data, tables->linker, &mcfg);
+    }
+    if (acpi_has_iommu()) {
+        acpi_add_table(table_offsets, tables->table_data);
+        build_dmar_q35(tables->table_data, tables->linker);
     }
 
     /* Add tables supplied by user (if any) */

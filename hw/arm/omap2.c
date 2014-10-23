@@ -18,6 +18,7 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "sysemu/block-backend.h"
 #include "sysemu/blockdev.h"
 #include "hw/hw.h"
 #include "hw/arm/arm.h"
@@ -2266,10 +2267,12 @@ struct omap_mpu_state_s *omap2420_mpu_init(MemoryRegion *sysmem,
     omap_clk_init(s);
 
     /* Memory-mapped stuff */
-    memory_region_init_ram(&s->sdram, NULL, "omap2.dram", s->sdram_size);
+    memory_region_init_ram(&s->sdram, NULL, "omap2.dram", s->sdram_size,
+                           &error_abort);
     vmstate_register_ram_global(&s->sdram);
     memory_region_add_subregion(sysmem, OMAP2_Q2_BASE, &s->sdram);
-    memory_region_init_ram(&s->sram, NULL, "omap2.sram", s->sram_size);
+    memory_region_init_ram(&s->sram, NULL, "omap2.sram", s->sram_size,
+                           &error_abort);
     vmstate_register_ram_global(&s->sram);
     memory_region_add_subregion(sysmem, OMAP2_SRAM_BASE, &s->sram);
 
@@ -2459,7 +2462,8 @@ struct omap_mpu_state_s *omap2420_mpu_init(MemoryRegion *sysmem,
         fprintf(stderr, "qemu: missing SecureDigital device\n");
         exit(1);
     }
-    s->mmc = omap2_mmc_init(omap_l4tao(s->l4, 9), dinfo->bdrv,
+    s->mmc = omap2_mmc_init(omap_l4tao(s->l4, 9),
+                    blk_by_legacy_dinfo(dinfo),
                     qdev_get_gpio_in(s->ih[0], OMAP_INT_24XX_MMC_IRQ),
                     &s->drq[OMAP24XX_DMA_MMC1_TX],
                     omap_findclk(s, "mmc_fclk"), omap_findclk(s, "mmc_iclk"));

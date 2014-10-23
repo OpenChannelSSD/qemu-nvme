@@ -26,6 +26,10 @@
 #include "qemu/config-file.h"
 #include "block/block_int.h"
 #include "qemu/module.h"
+#include "qapi/qmp/qbool.h"
+#include "qapi/qmp/qdict.h"
+#include "qapi/qmp/qint.h"
+#include "qapi/qmp/qstring.h"
 
 typedef struct BDRVBlkdebugState {
     int state;
@@ -37,7 +41,7 @@ typedef struct BDRVBlkdebugState {
 } BDRVBlkdebugState;
 
 typedef struct BlkdebugAIOCB {
-    BlockDriverAIOCB common;
+    BlockAIOCB common;
     QEMUBH *bh;
     int ret;
 } BlkdebugAIOCB;
@@ -48,11 +52,8 @@ typedef struct BlkdebugSuspendedReq {
     QLIST_ENTRY(BlkdebugSuspendedReq) next;
 } BlkdebugSuspendedReq;
 
-static void blkdebug_aio_cancel(BlockDriverAIOCB *blockacb);
-
 static const AIOCBInfo blkdebug_aiocb_info = {
-    .aiocb_size = sizeof(BlkdebugAIOCB),
-    .cancel     = blkdebug_aio_cancel,
+    .aiocb_size    = sizeof(BlkdebugAIOCB),
 };
 
 enum {
@@ -213,6 +214,7 @@ static int get_event_by_name(const char *name, BlkDebugEvent *event)
 struct add_rule_data {
     BDRVBlkdebugState *s;
     int action;
+    Error **errp;
 };
 
 static int add_rule(QemuOpts *opts, void *opaque)
@@ -225,7 +227,11 @@ static int add_rule(QemuOpts *opts, void *opaque)
 
     /* Find the right event for the rule */
     event_name = qemu_opt_get(opts, "event");
-    if (!event_name || get_event_by_name(event_name, &event) < 0) {
+    if (!event_name) {
+        error_setg(d->errp, "Missing event name for rule");
+        return -1;
+    } else if (get_event_by_name(event_name, &event) < 0) {
+        error_setg(d->errp, "Invalid event name \"%s\"", event_name);
         return -1;
     }
 
@@ -311,10 +317,21 @@ static int read_config(BDRVBlkdebugState *s, const char *filename,
 
     d.s = s;
     d.action = ACTION_INJECT_ERROR;
-    qemu_opts_foreach(&inject_error_opts, add_rule, &d, 0);
+    d.errp = &local_err;
+    qemu_opts_foreach(&inject_error_opts, add_rule, &d, 1);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        ret = -EINVAL;
+        goto fail;
+    }
 
     d.action = ACTION_SET_STATE;
-    qemu_opts_foreach(&set_state_opts, add_rule, &d, 0);
+    qemu_opts_foreach(&set_state_opts, add_rule, &d, 1);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        ret = -EINVAL;
+        goto fail;
+    }
 
     ret = 0;
 fail:
@@ -443,17 +460,11 @@ static void error_callback_bh(void *opaque)
     struct BlkdebugAIOCB *acb = opaque;
     qemu_bh_delete(acb->bh);
     acb->common.cb(acb->common.opaque, acb->ret);
-    qemu_aio_release(acb);
+    qemu_aio_unref(acb);
 }
 
-static void blkdebug_aio_cancel(BlockDriverAIOCB *blockacb)
-{
-    BlkdebugAIOCB *acb = container_of(blockacb, BlkdebugAIOCB, common);
-    qemu_aio_release(acb);
-}
-
-static BlockDriverAIOCB *inject_error(BlockDriverState *bs,
-    BlockDriverCompletionFunc *cb, void *opaque, BlkdebugRule *rule)
+static BlockAIOCB *inject_error(BlockDriverState *bs,
+    BlockCompletionFunc *cb, void *opaque, BlkdebugRule *rule)
 {
     BDRVBlkdebugState *s = bs->opaque;
     int error = rule->options.inject.error;
@@ -478,9 +489,9 @@ static BlockDriverAIOCB *inject_error(BlockDriverState *bs,
     return &acb->common;
 }
 
-static BlockDriverAIOCB *blkdebug_aio_readv(BlockDriverState *bs,
+static BlockAIOCB *blkdebug_aio_readv(BlockDriverState *bs,
     int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
-    BlockDriverCompletionFunc *cb, void *opaque)
+    BlockCompletionFunc *cb, void *opaque)
 {
     BDRVBlkdebugState *s = bs->opaque;
     BlkdebugRule *rule = NULL;
@@ -500,9 +511,9 @@ static BlockDriverAIOCB *blkdebug_aio_readv(BlockDriverState *bs,
     return bdrv_aio_readv(bs->file, sector_num, qiov, nb_sectors, cb, opaque);
 }
 
-static BlockDriverAIOCB *blkdebug_aio_writev(BlockDriverState *bs,
+static BlockAIOCB *blkdebug_aio_writev(BlockDriverState *bs,
     int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
-    BlockDriverCompletionFunc *cb, void *opaque)
+    BlockCompletionFunc *cb, void *opaque)
 {
     BDRVBlkdebugState *s = bs->opaque;
     BlkdebugRule *rule = NULL;
@@ -522,8 +533,8 @@ static BlockDriverAIOCB *blkdebug_aio_writev(BlockDriverState *bs,
     return bdrv_aio_writev(bs->file, sector_num, qiov, nb_sectors, cb, opaque);
 }
 
-static BlockDriverAIOCB *blkdebug_aio_flush(BlockDriverState *bs,
-    BlockDriverCompletionFunc *cb, void *opaque)
+static BlockAIOCB *blkdebug_aio_flush(BlockDriverState *bs,
+    BlockCompletionFunc *cb, void *opaque)
 {
     BDRVBlkdebugState *s = bs->opaque;
     BlkdebugRule *rule = NULL;
@@ -706,6 +717,98 @@ static int64_t blkdebug_getlength(BlockDriverState *bs)
     return bdrv_getlength(bs->file);
 }
 
+static void blkdebug_refresh_filename(BlockDriverState *bs)
+{
+    BDRVBlkdebugState *s = bs->opaque;
+    struct BlkdebugRule *rule;
+    QDict *opts;
+    QList *inject_error_list = NULL, *set_state_list = NULL;
+    QList *suspend_list = NULL;
+    int event;
+
+    if (!bs->file->full_open_options) {
+        /* The config file cannot be recreated, so creating a plain filename
+         * is impossible */
+        return;
+    }
+
+    opts = qdict_new();
+    qdict_put_obj(opts, "driver", QOBJECT(qstring_from_str("blkdebug")));
+
+    QINCREF(bs->file->full_open_options);
+    qdict_put_obj(opts, "image", QOBJECT(bs->file->full_open_options));
+
+    for (event = 0; event < BLKDBG_EVENT_MAX; event++) {
+        QLIST_FOREACH(rule, &s->rules[event], next) {
+            if (rule->action == ACTION_INJECT_ERROR) {
+                QDict *inject_error = qdict_new();
+
+                qdict_put_obj(inject_error, "event", QOBJECT(qstring_from_str(
+                              BlkdebugEvent_lookup[rule->event])));
+                qdict_put_obj(inject_error, "state",
+                              QOBJECT(qint_from_int(rule->state)));
+                qdict_put_obj(inject_error, "errno", QOBJECT(qint_from_int(
+                              rule->options.inject.error)));
+                qdict_put_obj(inject_error, "sector", QOBJECT(qint_from_int(
+                              rule->options.inject.sector)));
+                qdict_put_obj(inject_error, "once", QOBJECT(qbool_from_int(
+                              rule->options.inject.once)));
+                qdict_put_obj(inject_error, "immediately",
+                              QOBJECT(qbool_from_int(
+                              rule->options.inject.immediately)));
+
+                if (!inject_error_list) {
+                    inject_error_list = qlist_new();
+                }
+
+                qlist_append_obj(inject_error_list, QOBJECT(inject_error));
+            } else if (rule->action == ACTION_SET_STATE) {
+                QDict *set_state = qdict_new();
+
+                qdict_put_obj(set_state, "event", QOBJECT(qstring_from_str(
+                              BlkdebugEvent_lookup[rule->event])));
+                qdict_put_obj(set_state, "state",
+                              QOBJECT(qint_from_int(rule->state)));
+                qdict_put_obj(set_state, "new_state", QOBJECT(qint_from_int(
+                              rule->options.set_state.new_state)));
+
+                if (!set_state_list) {
+                    set_state_list = qlist_new();
+                }
+
+                qlist_append_obj(set_state_list, QOBJECT(set_state));
+            } else if (rule->action == ACTION_SUSPEND) {
+                QDict *suspend = qdict_new();
+
+                qdict_put_obj(suspend, "event", QOBJECT(qstring_from_str(
+                              BlkdebugEvent_lookup[rule->event])));
+                qdict_put_obj(suspend, "state",
+                              QOBJECT(qint_from_int(rule->state)));
+                qdict_put_obj(suspend, "tag", QOBJECT(qstring_from_str(
+                              rule->options.suspend.tag)));
+
+                if (!suspend_list) {
+                    suspend_list = qlist_new();
+                }
+
+                qlist_append_obj(suspend_list, QOBJECT(suspend));
+            }
+        }
+    }
+
+    if (inject_error_list) {
+        qdict_put_obj(opts, "inject-error", QOBJECT(inject_error_list));
+    }
+    if (set_state_list) {
+        qdict_put_obj(opts, "set-state", QOBJECT(set_state_list));
+    }
+    if (suspend_list) {
+        qdict_put_obj(opts, "suspend", QOBJECT(suspend_list));
+    }
+
+    bs->full_open_options = opts;
+}
+
 static BlockDriver bdrv_blkdebug = {
     .format_name            = "blkdebug",
     .protocol_name          = "blkdebug",
@@ -715,6 +818,7 @@ static BlockDriver bdrv_blkdebug = {
     .bdrv_file_open         = blkdebug_open,
     .bdrv_close             = blkdebug_close,
     .bdrv_getlength         = blkdebug_getlength,
+    .bdrv_refresh_filename  = blkdebug_refresh_filename,
 
     .bdrv_aio_readv         = blkdebug_aio_readv,
     .bdrv_aio_writev        = blkdebug_aio_writev,

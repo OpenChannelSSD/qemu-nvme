@@ -40,6 +40,7 @@
 #include "qemu/bitmap.h"
 #include "qemu/seqlock.h"
 #include "qapi-event.h"
+#include "hw/nmi.h"
 
 #ifndef _WIN32
 #include "qemu/compatfd.h"
@@ -492,13 +493,17 @@ static const VMStateDescription vmstate_timers = {
     }
 };
 
+void cpu_ticks_init(void)
+{
+    seqlock_init(&timers_state.vm_clock_seqlock, NULL);
+    vmstate_register(NULL, 0, &vmstate_timers, &timers_state);
+}
+
 void configure_icount(QemuOpts *opts, Error **errp)
 {
     const char *option;
     char *rem_str = NULL;
 
-    seqlock_init(&timers_state.vm_clock_seqlock, NULL);
-    vmstate_register(NULL, 0, &vmstate_timers, &timers_state);
     option = qemu_opt_get(opts, "shift");
     if (!option) {
         if (qemu_opt_get(opts, "align") != NULL) {
@@ -585,6 +590,15 @@ void cpu_synchronize_all_post_init(void)
 
     CPU_FOREACH(cpu) {
         cpu_synchronize_post_init(cpu);
+    }
+}
+
+void cpu_clean_all_dirty(void)
+{
+    CPUState *cpu;
+
+    CPU_FOREACH(cpu) {
+        cpu_clean_state(cpu);
     }
 }
 
@@ -1409,6 +1423,9 @@ CpuInfoList *qmp_query_cpus(Error **errp)
 #elif defined(TARGET_MIPS)
         MIPSCPU *mips_cpu = MIPS_CPU(cpu);
         CPUMIPSState *env = &mips_cpu->env;
+#elif defined(TARGET_TRICORE)
+        TriCoreCPU *tricore_cpu = TRICORE_CPU(cpu);
+        CPUTriCoreState *env = &tricore_cpu->env;
 #endif
 
         cpu_synchronize_state(cpu);
@@ -1433,6 +1450,9 @@ CpuInfoList *qmp_query_cpus(Error **errp)
 #elif defined(TARGET_MIPS)
         info->value->has_PC = true;
         info->value->PC = env->active_tc.PC;
+#elif defined(TARGET_TRICORE)
+        info->value->has_PC = true;
+        info->value->PC = env->PC;
 #endif
 
         /* XXX: waiting for the qapi to support GSList */
@@ -1536,22 +1556,8 @@ void qmp_inject_nmi(Error **errp)
             apic_deliver_nmi(cpu->apic_state);
         }
     }
-#elif defined(TARGET_S390X)
-    CPUState *cs;
-    S390CPU *cpu;
-
-    CPU_FOREACH(cs) {
-        cpu = S390_CPU(cs);
-        if (cpu->env.cpu_num == monitor_get_cpu_index()) {
-            if (s390_cpu_restart(S390_CPU(cs)) == -1) {
-                error_set(errp, QERR_UNSUPPORTED);
-                return;
-            }
-            break;
-        }
-    }
 #else
-    error_set(errp, QERR_UNSUPPORTED);
+    nmi_monitor_handle(monitor_get_cpu_index(), errp);
 #endif
 }
 

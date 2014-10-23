@@ -163,8 +163,6 @@ extern KVMState *kvm_state;
 
 /* external API */
 
-int kvm_init(MachineClass *mc);
-
 int kvm_has_sync_mmu(void);
 int kvm_has_vcpu_events(void);
 int kvm_has_robust_singlestep(void);
@@ -303,6 +301,8 @@ bool kvm_arch_stop_on_emulation_error(CPUState *cpu);
 
 int kvm_check_extension(KVMState *s, unsigned int extension);
 
+int kvm_vm_check_extension(KVMState *s, unsigned int extension);
+
 #define kvm_vm_enable_cap(s, capability, cap_flags, ...)             \
     ({                                                               \
         struct kvm_enable_cap cap = {                                \
@@ -348,6 +348,7 @@ int kvm_physical_memory_addr_from_host(KVMState *s, void *ram_addr,
 void kvm_cpu_synchronize_state(CPUState *cpu);
 void kvm_cpu_synchronize_post_reset(CPUState *cpu);
 void kvm_cpu_synchronize_post_init(CPUState *cpu);
+void kvm_cpu_clean_state(CPUState *cpu);
 
 /* generic hooks - to be moved/refactored once there are more users */
 
@@ -369,6 +370,13 @@ static inline void cpu_synchronize_post_init(CPUState *cpu)
 {
     if (kvm_enabled()) {
         kvm_cpu_synchronize_post_init(cpu);
+    }
+}
+
+static inline void cpu_clean_state(CPUState *cpu)
+{
+    if (kvm_enabled()) {
+        kvm_cpu_clean_state(cpu);
     }
 }
 

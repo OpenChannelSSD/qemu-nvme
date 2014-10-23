@@ -44,7 +44,7 @@
 #include "sysemu/kvm.h"
 #include "kvm_i386.h"
 #include "hw/xen/xen.h"
-#include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "hw/block/block.h"
 #include "ui/qemu-spice.h"
 #include "exec/memory.h"
@@ -72,8 +72,15 @@
 #define DPRINTF(fmt, ...)
 #endif
 
-/* Leave a chunk of memory at the top of RAM for the BIOS ACPI tables.  */
-#define ACPI_DATA_SIZE       0x10000
+/* Leave a chunk of memory at the top of RAM for the BIOS ACPI tables
+ * (128K) and other BIOS datastructures (less than 4K reported to be used at
+ * the moment, 32K should be enough for a while).  */
+static unsigned acpi_data_size = 0x20000 + 0x8000;
+void pc_set_legacy_acpi_data_size(void)
+{
+    acpi_data_size = 0x10000;
+}
+
 #define BIOS_CFG_IOPORT 0x510
 #define FW_CFG_ACPI_TABLES (FW_CFG_ARCH_LOCAL + 0)
 #define FW_CFG_SMBIOS_ENTRIES (FW_CFG_ARCH_LOCAL + 1)
@@ -476,7 +483,7 @@ static void port92_write(void *opaque, hwaddr addr, uint64_t val,
     Port92State *s = opaque;
     int oldval = s->outport;
 
-    DPRINTF("port92: write 0x%02x\n", val);
+    DPRINTF("port92: write 0x%02" PRIx64 "\n", val);
     s->outport = val;
     qemu_set_irq(*s->a20_out, (val >> 1) & 1);
     if ((val & 1) && !(oldval & 1)) {
@@ -811,8 +818,9 @@ static void load_linux(FWCfgState *fw_cfg,
         initrd_max = 0x37ffffff;
     }
 
-    if (initrd_max >= max_ram_size-ACPI_DATA_SIZE)
-    	initrd_max = max_ram_size-ACPI_DATA_SIZE-1;
+    if (initrd_max >= max_ram_size - acpi_data_size) {
+        initrd_max = max_ram_size - acpi_data_size - 1;
+    }
 
     fw_cfg_add_i32(fw_cfg, FW_CFG_CMDLINE_ADDR, cmdline_addr);
     fw_cfg_add_i32(fw_cfg, FW_CFG_CMDLINE_SIZE, strlen(kernel_cmdline)+1);
@@ -1267,7 +1275,8 @@ FWCfgState *pc_memory_init(MachineState *machine,
     pc_system_firmware_init(rom_memory, guest_info->isapc_ram_fw);
 
     option_rom_mr = g_malloc(sizeof(*option_rom_mr));
-    memory_region_init_ram(option_rom_mr, NULL, "pc.rom", PC_ROM_SIZE);
+    memory_region_init_ram(option_rom_mr, NULL, "pc.rom", PC_ROM_SIZE,
+                           &error_abort);
     vmstate_register_ram_global(option_rom_mr);
     memory_region_add_subregion_overlap(rom_memory,
                                         PC_ROM_MIN_VGA,
@@ -1515,6 +1524,7 @@ static void pc_generic_machine_class_init(ObjectClass *oc, void *data)
     mc->hot_add_cpu = qm->hot_add_cpu;
     mc->kvm_type = qm->kvm_type;
     mc->block_default_type = qm->block_default_type;
+    mc->units_per_default_bus = qm->units_per_default_bus;
     mc->max_cpus = qm->max_cpus;
     mc->no_serial = qm->no_serial;
     mc->no_parallel = qm->no_parallel;

@@ -14,7 +14,9 @@
  */
 
 #include "qemu-common.h"
-#include "block/block_int.h"
+#include "block/block.h"
+#include "qemu/error-report.h"
+#include "qemu/main-loop.h"
 #include "hw/hw.h"
 #include "qemu/queue.h"
 #include "qemu/timer.h"
@@ -70,7 +72,7 @@ typedef struct BlkMigBlock {
     int nr_sectors;
     struct iovec iov;
     QEMUIOVector qiov;
-    BlockDriverAIOCB *aiocb;
+    BlockAIOCB *aiocb;
 
     /* Protected by block migration lock.  */
     int ret;
@@ -130,9 +132,9 @@ static void blk_send(QEMUFile *f, BlkMigBlock * blk)
                      | flags);
 
     /* device name */
-    len = strlen(blk->bmds->bs->device_name);
+    len = strlen(bdrv_get_device_name(blk->bmds->bs));
     qemu_put_byte(f, len);
-    qemu_put_buffer(f, (uint8_t *)blk->bmds->bs->device_name, len);
+    qemu_put_buffer(f, (uint8_t *)bdrv_get_device_name(blk->bmds->bs), len);
 
     /* if a block is zero we need to flush here since the network
      * bandwidth is now a lot higher than the storage device bandwidth.
@@ -283,7 +285,7 @@ static int mig_save_device_bulk(QEMUFile *f, BlkMigDevState *bmds)
         nr_sectors = total_sectors - cur_sector;
     }
 
-    blk = g_malloc(sizeof(BlkMigBlock));
+    blk = g_new(BlkMigBlock, 1);
     blk->buf = g_malloc(BLOCK_SIZE);
     blk->bmds = bmds;
     blk->sector = cur_sector;
@@ -343,18 +345,31 @@ static void unset_dirty_tracking(void)
     }
 }
 
-static void init_blk_migration_it(void *opaque, BlockDriverState *bs)
+static void init_blk_migration(QEMUFile *f)
 {
+    BlockDriverState *bs;
     BlkMigDevState *bmds;
     int64_t sectors;
 
-    if (!bdrv_is_read_only(bs)) {
+    block_mig_state.submitted = 0;
+    block_mig_state.read_done = 0;
+    block_mig_state.transferred = 0;
+    block_mig_state.total_sector_sum = 0;
+    block_mig_state.prev_progress = -1;
+    block_mig_state.bulk_completed = 0;
+    block_mig_state.zero_blocks = migrate_zero_blocks();
+
+    for (bs = bdrv_next(NULL); bs; bs = bdrv_next(bs)) {
+        if (bdrv_is_read_only(bs)) {
+            continue;
+        }
+
         sectors = bdrv_nb_sectors(bs);
         if (sectors <= 0) {
             return;
         }
 
-        bmds = g_malloc0(sizeof(BlkMigDevState));
+        bmds = g_new0(BlkMigDevState, 1);
         bmds->bs = bs;
         bmds->bulk_completed = 0;
         bmds->total_sectors = sectors;
@@ -369,26 +384,13 @@ static void init_blk_migration_it(void *opaque, BlockDriverState *bs)
 
         if (bmds->shared_base) {
             DPRINTF("Start migration for %s with shared base image\n",
-                    bs->device_name);
+                    bdrv_get_device_name(bs));
         } else {
-            DPRINTF("Start full migration for %s\n", bs->device_name);
+            DPRINTF("Start full migration for %s\n", bdrv_get_device_name(bs));
         }
 
         QSIMPLEQ_INSERT_TAIL(&block_mig_state.bmds_list, bmds, entry);
     }
-}
-
-static void init_blk_migration(QEMUFile *f)
-{
-    block_mig_state.submitted = 0;
-    block_mig_state.read_done = 0;
-    block_mig_state.transferred = 0;
-    block_mig_state.total_sector_sum = 0;
-    block_mig_state.prev_progress = -1;
-    block_mig_state.bulk_completed = 0;
-    block_mig_state.zero_blocks = migrate_zero_blocks();
-
-    bdrv_iterate(init_blk_migration_it, NULL);
 }
 
 /* Called with no lock taken.  */
@@ -465,7 +467,7 @@ static int mig_save_device_dirty(QEMUFile *f, BlkMigDevState *bmds,
             } else {
                 nr_sectors = BDRV_SECTORS_PER_DIRTY_CHUNK;
             }
-            blk = g_malloc(sizeof(BlkMigBlock));
+            blk = g_new(BlkMigBlock, 1);
             blk->buf = g_malloc(BLOCK_SIZE);
             blk->bmds = bmds;
             blk->sector = sector;

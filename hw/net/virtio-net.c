@@ -125,10 +125,23 @@ static void virtio_net_vhost_status(VirtIONet *n, uint8_t status)
         return;
     }
     if (!n->vhost_started) {
-        int r;
+        int r, i;
+
         if (!vhost_net_query(get_vhost_net(nc->peer), vdev)) {
             return;
         }
+
+        /* Any packets outstanding? Purge them to avoid touching rings
+         * when vhost is running.
+         */
+        for (i = 0;  i < queues; i++) {
+            NetClientState *qnc = qemu_get_subqueue(n->nic, i);
+
+            /* Purge both directions: TX and RX. */
+            qemu_net_queue_purge(qnc->peer->incoming_queue, qnc);
+            qemu_net_queue_purge(qnc->incoming_queue, qnc->peer);
+        }
+
         n->vhost_started = 1;
         r = vhost_net_start(vdev, n->nic->ncs, queues);
         if (r < 0) {
@@ -1112,8 +1125,6 @@ static int32_t virtio_net_flush_tx(VirtIONetQueue *q)
         return num_packets;
     }
 
-    assert(vdev->vm_running);
-
     if (q->async_tx.elem.out_num) {
         virtio_queue_set_notification(q->tx_vq, 0);
         return num_packets;
@@ -1224,7 +1235,12 @@ static void virtio_net_tx_timer(void *opaque)
     VirtIONetQueue *q = opaque;
     VirtIONet *n = q->n;
     VirtIODevice *vdev = VIRTIO_DEVICE(n);
-    assert(vdev->vm_running);
+    /* This happens when device was stopped but BH wasn't. */
+    if (!vdev->vm_running) {
+        /* Make sure tx waiting is set, so we'll run when restarted. */
+        assert(q->tx_waiting);
+        return;
+    }
 
     q->tx_waiting = 0;
 
@@ -1244,7 +1260,12 @@ static void virtio_net_tx_bh(void *opaque)
     VirtIODevice *vdev = VIRTIO_DEVICE(n);
     int32_t ret;
 
-    assert(vdev->vm_running);
+    /* This happens when device was stopped but BH wasn't. */
+    if (!vdev->vm_running) {
+        /* Make sure tx waiting is set, so we'll run when restarted. */
+        assert(q->tx_waiting);
+        return;
+    }
 
     q->tx_waiting = 0;
 
@@ -1640,8 +1661,6 @@ static void virtio_net_device_realize(DeviceState *dev, Error **errp)
     n->qdev = dev;
     register_savevm(dev, "virtio-net", -1, VIRTIO_NET_VM_VERSION,
                     virtio_net_save, virtio_net_load, n);
-
-    add_boot_device_path(n->nic_conf.bootindex, dev, "/ethernet-phy@0");
 }
 
 static void virtio_net_device_unrealize(DeviceState *dev, Error **errp)
@@ -1693,6 +1712,9 @@ static void virtio_net_instance_init(Object *obj)
      * Can be overriden with virtio_net_set_config_size.
      */
     n->config_size = sizeof(struct virtio_net_config);
+    device_add_bootindex_property(obj, &n->nic_conf.bootindex,
+                                  "bootindex", "/ethernet-phy@0",
+                                  DEVICE(n), NULL);
 }
 
 static Property virtio_net_properties[] = {

@@ -38,12 +38,16 @@
 #
 # @lazy-refcounts: #optional on or off; only valid for compat >= 1.1
 #
+# @corrupt: #optional true if the image has been marked corrupt; only valid for
+#           compat >= 1.1 (since 2.2)
+#
 # Since: 1.7
 ##
 { 'type': 'ImageInfoSpecificQCow2',
   'data': {
       'compat': 'str',
-      '*lazy-refcounts': 'bool'
+      '*lazy-refcounts': 'bool',
+      '*corrupt': 'bool'
   } }
 
 ##
@@ -197,7 +201,7 @@
 #       'file', 'file', 'ftp', 'ftps', 'host_cdrom', 'host_device',
 #       'host_floppy', 'http', 'https', 'nbd', 'parallels', 'qcow',
 #       'qcow2', 'raw', 'tftp', 'vdi', 'vmdk', 'vpc', 'vvfat'
-#       2.2: 'archipelago'
+#       2.2: 'archipelago' added, 'cow' dropped
 #
 # @backing_file: #optional the name of the backing file (for copy-on-write)
 #
@@ -336,6 +340,7 @@
 #
 # @io-status: #optional @BlockDeviceIoStatus. Only present if the device
 #             supports it and the VM is configured to stop on errors
+#             (supported device models: virtio-blk, ide, scsi-disk)
 #
 # @inserted: #optional @BlockDeviceInfo describing the device if media is
 #            present
@@ -1147,10 +1152,11 @@
 # Since: 2.0
 ##
 { 'enum': 'BlockdevDriver',
-  'data': [ 'archipelago', 'file', 'host_device', 'host_cdrom', 'host_floppy',
-            'http', 'https', 'ftp', 'ftps', 'tftp', 'vvfat', 'blkdebug',
-            'blkverify', 'bochs', 'cloop', 'cow', 'dmg', 'parallels', 'qcow',
-            'qcow2', 'qed', 'raw', 'vdi', 'vhdx', 'vmdk', 'vpc', 'quorum' ] }
+  'data': [ 'archipelago', 'blkdebug', 'blkverify', 'bochs', 'cloop',
+            'dmg', 'file', 'ftp', 'ftps', 'host_cdrom', 'host_device',
+            'host_floppy', 'http', 'https', 'null-aio', 'null-co', 'parallels',
+            'qcow', 'qcow2', 'qed', 'quorum', 'raw', 'tftp', 'vdi', 'vhdx',
+            'vmdk', 'vpc', 'vvfat' ] }
 
 ##
 # @BlockdevOptionsBase
@@ -1203,6 +1209,18 @@
   'data': { 'filename': 'str' } }
 
 ##
+# @BlockdevOptionsNull
+#
+# Driver specific block device options for the null backend.
+#
+# @size:    #optional size of the device in bytes.
+#
+# Since: 2.2
+##
+{ 'type': 'BlockdevOptionsNull',
+  'data': { '*size': 'int' } }
+
+##
 # @BlockdevOptionsVVFAT
 #
 # Driver specific block device options for the vvfat protocol.
@@ -1250,6 +1268,67 @@
   'data': { '*backing': 'BlockdevRef' } }
 
 ##
+# @Qcow2OverlapCheckMode
+#
+# General overlap check modes.
+#
+# @none:        Do not perform any checks
+#
+# @constant:    Perform only checks which can be done in constant time and
+#               without reading anything from disk
+#
+# @cached:      Perform only checks which can be done without reading anything
+#               from disk
+#
+# @all:         Perform all available overlap checks
+#
+# Since: 2.2
+##
+{ 'enum': 'Qcow2OverlapCheckMode',
+  'data': [ 'none', 'constant', 'cached', 'all' ] }
+
+##
+# @Qcow2OverlapCheckFlags
+#
+# Structure of flags for each metadata structure. Setting a field to 'true'
+# makes qemu guard that structure against unintended overwriting. The default
+# value is chosen according to the template given.
+#
+# @template: Specifies a template mode which can be adjusted using the other
+#            flags, defaults to 'cached'
+#
+# Since: 2.2
+##
+{ 'type': 'Qcow2OverlapCheckFlags',
+  'data': { '*template':       'Qcow2OverlapCheckMode',
+            '*main-header':    'bool',
+            '*active-l1':      'bool',
+            '*active-l2':      'bool',
+            '*refcount-table': 'bool',
+            '*refcount-block': 'bool',
+            '*snapshot-table': 'bool',
+            '*inactive-l1':    'bool',
+            '*inactive-l2':    'bool' } }
+
+##
+# @Qcow2OverlapChecks
+#
+# Specifies which metadata structures should be guarded against unintended
+# overwriting.
+#
+# @flags:   set of flags for separate specification of each metadata structure
+#           type
+#
+# @mode:    named mode which chooses a specific set of flags
+#
+# Since: 2.2
+##
+{ 'union': 'Qcow2OverlapChecks',
+  'discriminator': {},
+  'data': { 'flags': 'Qcow2OverlapCheckFlags',
+            'mode':  'Qcow2OverlapCheckMode' } }
+
+##
 # @BlockdevOptionsQcow2
 #
 # Driver specific block device options for qcow2.
@@ -1268,6 +1347,18 @@
 #                         should be issued on other occasions where a cluster
 #                         gets freed
 #
+# @overlap-check:         #optional which overlap checks to perform for writes
+#                         to the image, defaults to 'cached' (since 2.2)
+#
+# @cache-size:            #optional the maximum total size of the L2 table and
+#                         refcount block caches in bytes (since 2.2)
+#
+# @l2-cache-size:         #optional the maximum size of the L2 table cache in
+#                         bytes (since 2.2)
+#
+# @refcount-cache-size:   #optional the maximum size of the refcount block cache
+#                         in bytes (since 2.2)
+#
 # Since: 1.7
 ##
 { 'type': 'BlockdevOptionsQcow2',
@@ -1275,7 +1366,11 @@
   'data': { '*lazy-refcounts': 'bool',
             '*pass-discard-request': 'bool',
             '*pass-discard-snapshot': 'bool',
-            '*pass-discard-other': 'bool' } }
+            '*pass-discard-other': 'bool',
+            '*overlap-check': 'Qcow2OverlapChecks',
+            '*cache-size': 'int',
+            '*l2-cache-size': 'int',
+            '*refcount-cache-size': 'int' } }
 
 
 ##
@@ -1419,6 +1514,19 @@
             'raw': 'BlockdevRef' } }
 
 ##
+# @QuorumReadPattern
+#
+# An enumeration of quorum read patterns.
+#
+# @quorum: read all the children and do a quorum vote on reads
+#
+# @fifo: read only from the first child that has not failed
+#
+# Since: 2.2
+##
+{ 'enum': 'QuorumReadPattern', 'data': [ 'quorum', 'fifo' ] }
+
+##
 # @BlockdevOptionsQuorum
 #
 # Driver specific block device options for Quorum
@@ -1433,12 +1541,17 @@
 # @rewrite-corrupted: #optional rewrite corrupted data when quorum is reached
 #                     (Since 2.1)
 #
+# @read-pattern: #optional choose read pattern and set to quorum by default
+#                (Since 2.2)
+#
 # Since: 2.0
 ##
 { 'type': 'BlockdevOptionsQuorum',
   'data': { '*blkverify': 'bool',
             'children': [ 'BlockdevRef' ],
-            'vote-threshold': 'int', '*rewrite-corrupted': 'bool' } }
+            'vote-threshold': 'int',
+            '*rewrite-corrupted': 'bool',
+            '*read-pattern': 'QuorumReadPattern' } }
 
 ##
 # @BlockdevOptions
@@ -1452,39 +1565,40 @@
   'discriminator': 'driver',
   'data': {
       'archipelago':'BlockdevOptionsArchipelago',
-      'file':       'BlockdevOptionsFile',
-      'host_device':'BlockdevOptionsFile',
-      'host_cdrom': 'BlockdevOptionsFile',
-      'host_floppy':'BlockdevOptionsFile',
-      'http':       'BlockdevOptionsFile',
-      'https':      'BlockdevOptionsFile',
-      'ftp':        'BlockdevOptionsFile',
-      'ftps':       'BlockdevOptionsFile',
-      'tftp':       'BlockdevOptionsFile',
-# TODO gluster: Wait for structured options
-# TODO iscsi: Wait for structured options
-# TODO nbd: Should take InetSocketAddress for 'host'?
-# TODO nfs: Wait for structured options
-# TODO rbd: Wait for structured options
-# TODO sheepdog: Wait for structured options
-# TODO ssh: Should take InetSocketAddress for 'host'?
-      'vvfat':      'BlockdevOptionsVVFAT',
       'blkdebug':   'BlockdevOptionsBlkdebug',
       'blkverify':  'BlockdevOptionsBlkverify',
       'bochs':      'BlockdevOptionsGenericFormat',
       'cloop':      'BlockdevOptionsGenericFormat',
-      'cow':        'BlockdevOptionsGenericCOWFormat',
       'dmg':        'BlockdevOptionsGenericFormat',
+      'file':       'BlockdevOptionsFile',
+      'ftp':        'BlockdevOptionsFile',
+      'ftps':       'BlockdevOptionsFile',
+# TODO gluster: Wait for structured options
+      'host_cdrom': 'BlockdevOptionsFile',
+      'host_device':'BlockdevOptionsFile',
+      'host_floppy':'BlockdevOptionsFile',
+      'http':       'BlockdevOptionsFile',
+      'https':      'BlockdevOptionsFile',
+# TODO iscsi: Wait for structured options
+# TODO nbd: Should take InetSocketAddress for 'host'?
+# TODO nfs: Wait for structured options
+      'null-aio':   'BlockdevOptionsNull',
+      'null-co':    'BlockdevOptionsNull',
       'parallels':  'BlockdevOptionsGenericFormat',
-      'qcow':       'BlockdevOptionsGenericCOWFormat',
       'qcow2':      'BlockdevOptionsQcow2',
+      'qcow':       'BlockdevOptionsGenericCOWFormat',
       'qed':        'BlockdevOptionsGenericCOWFormat',
+      'quorum':     'BlockdevOptionsQuorum',
       'raw':        'BlockdevOptionsGenericFormat',
+# TODO rbd: Wait for structured options
+# TODO sheepdog: Wait for structured options
+# TODO ssh: Should take InetSocketAddress for 'host'?
+      'tftp':       'BlockdevOptionsFile',
       'vdi':        'BlockdevOptionsGenericFormat',
       'vhdx':       'BlockdevOptionsGenericFormat',
       'vmdk':       'BlockdevOptionsGenericCOWFormat',
       'vpc':        'BlockdevOptionsGenericFormat',
-      'quorum':     'BlockdevOptionsQuorum'
+      'vvfat':      'BlockdevOptionsVVFAT'
   } }
 
 ##
@@ -1536,7 +1650,7 @@
 ##
 # @BLOCK_IMAGE_CORRUPTED
 #
-# Emitted when a disk image is being marked corrupt
+# Emitted when a corruption has been detected in a disk image
 #
 # @device: device name
 #
@@ -1550,13 +1664,18 @@
 # @size: #optional, if the corruption resulted from an image access, this is
 #        the access size
 #
+# fatal: if set, the image is marked corrupt and therefore unusable after this
+#        event and must be repaired (Since 2.2; before, every
+#        BLOCK_IMAGE_CORRUPTED event was fatal)
+#
 # Since: 1.7
 ##
 { 'event': 'BLOCK_IMAGE_CORRUPTED',
   'data': { 'device' : 'str',
             'msg'    : 'str',
             '*offset': 'int',
-            '*size'  : 'int' } }
+            '*size'  : 'int',
+            'fatal'  : 'bool' } }
 
 ##
 # @BLOCK_IO_ERROR
@@ -1569,6 +1688,15 @@
 #
 # @action: action that has been taken
 #
+# @nospace: #optional true if I/O error was caused due to a no-space
+#           condition. This key is only present if query-block's
+#           io-status is present, please see query-block documentation
+#           for more information (since: 2.2)
+#
+# @reason: human readable string describing the error cause.
+#          (This field is a debugging aid for humans, it should not
+#           be parsed by applications) (since: 2.2)
+#
 # Note: If action is "stop", a STOP event will eventually follow the
 # BLOCK_IO_ERROR event
 #
@@ -1576,7 +1704,8 @@
 ##
 { 'event': 'BLOCK_IO_ERROR',
   'data': { 'device': 'str', 'operation': 'IoOperationType',
-            'action': 'BlockErrorAction' } }
+            'action': 'BlockErrorAction', '*nospace': 'bool',
+            'reason': 'str' } }
 
 ##
 # @BLOCK_JOB_COMPLETED
@@ -1679,3 +1808,20 @@
             'len'   : 'int',
             'offset': 'int',
             'speed' : 'int' } }
+
+# @PreallocMode
+#
+# Preallocation mode of QEMU image file
+#
+# @off: no preallocation
+# @metadata: preallocate only for metadata
+# @falloc: like @full preallocation but allocate disk space by
+#          posix_fallocate() rather than writing zeros.
+# @full: preallocate all data by writing zeros to device to ensure disk
+#        space is really available. @full preallocation also sets up
+#        metadata correctly.
+#
+# Since 2.2
+##
+{ 'enum': 'PreallocMode',
+  'data': [ 'off', 'metadata', 'falloc', 'full' ] }

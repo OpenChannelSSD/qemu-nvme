@@ -315,13 +315,13 @@ static int cpu_post_load(void *opaque, int version_id)
     env->hflags &= ~HF_CPL_MASK;
     env->hflags |= (env->segs[R_SS].flags >> DESC_DPL_SHIFT) & HF_CPL_MASK;
 
-    /* XXX: restore FPU round state */
     env->fpstt = (env->fpus_vmstate >> 11) & 7;
     env->fpus = env->fpus_vmstate & ~0x3800;
     env->fptag_vmstate ^= 0xff;
     for(i = 0; i < 8; i++) {
         env->fptags[i] = (env->fptag_vmstate >> i) & 1;
     }
+    update_fp_status(env);
 
     cpu_breakpoint_remove_all(cs, BP_CPU);
     cpu_watchpoint_remove_all(cs, BP_CPU);
@@ -677,7 +677,7 @@ VMStateDescription vmstate_x86_cpu = {
         /* MTRRs */
         VMSTATE_UINT64_ARRAY_V(env.mtrr_fixed, X86CPU, 11, 8),
         VMSTATE_UINT64_V(env.mtrr_deftype, X86CPU, 8),
-        VMSTATE_MTRR_VARS(env.mtrr_var, X86CPU, 8, 8),
+        VMSTATE_MTRR_VARS(env.mtrr_var, X86CPU, MSR_MTRRcap_VCNT, 8),
         /* KVM-related states */
         VMSTATE_INT32_V(env.interrupt_injected, X86CPU, 9),
         VMSTATE_UINT32_V(env.mp_state, X86CPU, 9),

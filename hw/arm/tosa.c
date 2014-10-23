@@ -17,11 +17,10 @@
 #include "hw/devices.h"
 #include "hw/arm/sharpsl.h"
 #include "hw/pcmcia.h"
-#include "block/block.h"
 #include "hw/boards.h"
 #include "hw/i2c/i2c.h"
 #include "hw/ssi.h"
-#include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "hw/sysbus.h"
 #include "exec/address-spaces.h"
 
@@ -228,7 +227,7 @@ static void tosa_init(MachineState *machine)
 
     mpu = pxa255_init(address_space_mem, tosa_binfo.ram_size);
 
-    memory_region_init_ram(rom, NULL, "tosa.rom", TOSA_ROM);
+    memory_region_init_ram(rom, NULL, "tosa.rom", TOSA_ROM, &error_abort);
     vmstate_register_ram_global(rom);
     memory_region_set_readonly(rom, true);
     memory_region_add_subregion(address_space_mem, 0, rom);

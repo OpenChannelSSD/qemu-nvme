@@ -58,7 +58,7 @@ check-unit-y += tests/test-int128$(EXESUF)
 # all code tested by test-int128 is inside int128.h
 gcov-files-test-int128-y =
 check-unit-y += tests/test-bitops$(EXESUF)
-check-unit-y += tests/test-qdev-global-props$(EXESUF)
+check-unit-$(CONFIG_HAS_GLIB_SUBPROCESS_TESTS) += tests/test-qdev-global-props$(EXESUF)
 check-unit-y += tests/check-qom-interface$(EXESUF)
 gcov-files-check-qom-interface-y = qom/object.c
 check-unit-$(CONFIG_POSIX) += tests/test-vmstate$(EXESUF)
@@ -132,6 +132,7 @@ check-qtest-i386-y = tests/endianness-test$(EXESUF)
 check-qtest-i386-y += tests/fdc-test$(EXESUF)
 gcov-files-i386-y = hw/block/fdc.c
 check-qtest-i386-y += tests/ide-test$(EXESUF)
+check-qtest-i386-y += tests/ahci-test$(EXESUF)
 check-qtest-i386-y += tests/hd-geo-test$(EXESUF)
 gcov-files-i386-y += hw/block/hd-geometry.c
 check-qtest-i386-y += tests/boot-order-test$(EXESUF)
@@ -139,8 +140,7 @@ check-qtest-i386-y += tests/bios-tables-test$(EXESUF)
 check-qtest-i386-y += tests/rtc-test$(EXESUF)
 check-qtest-i386-y += tests/i440fx-test$(EXESUF)
 check-qtest-i386-y += tests/fw_cfg-test$(EXESUF)
-check-qtest-i386-y += tests/blockdev-test$(EXESUF)
-check-qtest-i386-y += tests/qdev-monitor-test$(EXESUF)
+check-qtest-i386-y += tests/drive_del-test$(EXESUF)
 check-qtest-i386-y += tests/wdt_ib700-test$(EXESUF)
 gcov-files-i386-y += hw/watchdog/watchdog.c hw/watchdog/wdt_ib700.c
 check-qtest-i386-y += $(check-qtest-pci-y)
@@ -155,11 +155,16 @@ check-qtest-i386-y += tests/i82801b11-test$(EXESUF)
 gcov-files-i386-y += hw/pci-bridge/i82801b11.c
 check-qtest-i386-y += tests/ioh3420-test$(EXESUF)
 gcov-files-i386-y += hw/pci-bridge/ioh3420.c
+check-qtest-i386-y += tests/usb-hcd-ohci-test$(EXESUF)
+gcov-files-i386-y += hw/usb/hcd-ohci.c
+check-qtest-i386-y += tests/usb-hcd-uhci-test$(EXESUF)
+gcov-files-i386-y += hw/usb/hcd-uhci.c
 check-qtest-i386-y += tests/usb-hcd-ehci-test$(EXESUF)
 gcov-files-i386-y += hw/usb/hcd-ehci.c
-gcov-files-i386-y += hw/usb/hcd-uhci.c
 gcov-files-i386-y += hw/usb/dev-hid.c
 gcov-files-i386-y += hw/usb/dev-storage.c
+check-qtest-i386-y += tests/usb-hcd-xhci-test$(EXESUF)
+gcov-files-i386-y += hw/usb/hcd-xhci.c
 check-qtest-i386-$(CONFIG_LINUX) += tests/vhost-user-test$(EXESUF)
 check-qtest-x86_64-y = $(check-qtest-i386-y)
 gcov-files-i386-y += i386-softmmu/hw/timer/mc146818rtc.c
@@ -187,26 +192,27 @@ check-qtest-xtensaeb-y = $(check-qtest-xtensa-y)
 
 # qom-test works for all sysemu architectures:
 $(foreach target,$(SYSEMU_TARGET_LIST), \
-    $(eval check-qtest-$(target)-y += tests/qom-test$(EXESUF)))
+	$(if $(findstring tests/qom-test$(EXESUF), $(check-qtest-$(target)-y)),, \
+		$(eval check-qtest-$(target)-y += tests/qom-test$(EXESUF))))
 
 check-qapi-schema-y := $(addprefix tests/qapi-schema/, \
-        comments.json empty.json funny-char.json indented-expr.json \
-        missing-colon.json missing-comma-list.json \
-        missing-comma-object.json non-objects.json \
-        qapi-schema-test.json quoted-structural-chars.json \
-        trailing-comma-list.json trailing-comma-object.json \
-        unclosed-list.json unclosed-object.json unclosed-string.json \
-        duplicate-key.json union-invalid-base.json flat-union-no-base.json \
-        flat-union-invalid-discriminator.json \
-        flat-union-invalid-branch-key.json flat-union-reverse-define.json \
-        flat-union-string-discriminator.json \
-        include-simple.json include-relpath.json include-format-err.json \
-        include-non-file.json include-no-file.json include-before-err.json \
-        include-nested-err.json include-self-cycle.json include-cycle.json \
-        include-repetition.json event-nest-struct.json)
+	comments.json empty.json funny-char.json indented-expr.json \
+	missing-colon.json missing-comma-list.json \
+	missing-comma-object.json non-objects.json \
+	qapi-schema-test.json quoted-structural-chars.json \
+	trailing-comma-list.json trailing-comma-object.json \
+	unclosed-list.json unclosed-object.json unclosed-string.json \
+	duplicate-key.json union-invalid-base.json flat-union-no-base.json \
+	flat-union-invalid-discriminator.json \
+	flat-union-invalid-branch-key.json flat-union-reverse-define.json \
+	flat-union-string-discriminator.json \
+	include-simple.json include-relpath.json include-format-err.json \
+	include-non-file.json include-no-file.json include-before-err.json \
+	include-nested-err.json include-self-cycle.json include-cycle.json \
+	include-repetition.json event-nest-struct.json)
 
 GENERATED_HEADERS += tests/test-qapi-types.h tests/test-qapi-visit.h \
-                     tests/test-qmp-commands.h tests/test-qapi-event.h
+		     tests/test-qmp-commands.h tests/test-qapi-event.h
 
 test-obj-y = tests/check-qint.o tests/check-qstring.o tests/check-qdict.o \
 	tests/check-qlist.o tests/check-qfloat.o tests/check-qjson.o \
@@ -218,7 +224,7 @@ test-obj-y = tests/check-qint.o tests/check-qstring.o tests/check-qdict.o \
 	tests/test-opts-visitor.o tests/test-qmp-event.o
 
 test-qapi-obj-y = tests/test-qapi-visit.o tests/test-qapi-types.o \
-                  tests/test-qapi-event.o
+		  tests/test-qapi-event.o
 
 $(test-obj-y): QEMU_INCLUDES += -Itests
 QEMU_CFLAGS += -I$(SRC_PATH)/tests
@@ -252,8 +258,8 @@ tests/test-qdev-global-props$(EXESUF): tests/test-qdev-global-props.o \
 	$(test-qapi-obj-y) \
 	libqemuutil.a libqemustub.a
 tests/test-vmstate$(EXESUF): tests/test-vmstate.o \
-	vmstate.o qemu-file.o \
-	libqemuutil.a
+	vmstate.o qemu-file.o qemu-file-unix.o \
+	libqemuutil.a libqemustub.a
 
 tests/test-qapi-types.c tests/test-qapi-types.h :\
 $(SRC_PATH)/tests/qapi-schema/qapi-schema-test.json $(SRC_PATH)/scripts/qapi-types.py
@@ -294,6 +300,8 @@ libqos-obj-y += tests/libqos/i2c.o
 libqos-pc-obj-y = $(libqos-obj-y) tests/libqos/pci-pc.o
 libqos-pc-obj-y += tests/libqos/malloc-pc.o
 libqos-omap-obj-y = $(libqos-obj-y) tests/libqos/i2c-omap.o
+libqos-virtio-obj-y = $(libqos-obj-y) $(libqos-pc-obj-y) tests/libqos/virtio.o tests/libqos/virtio-pci.o
+libqos-usb-obj-y = $(libqos-pc-obj-y) tests/libqos/usb.o
 
 tests/rtc-test$(EXESUF): tests/rtc-test.o
 tests/m48t59-test$(EXESUF): tests/m48t59-test.o
@@ -301,6 +309,7 @@ tests/endianness-test$(EXESUF): tests/endianness-test.o
 tests/spapr-phb-test$(EXESUF): tests/spapr-phb-test.o $(libqos-obj-y)
 tests/fdc-test$(EXESUF): tests/fdc-test.o
 tests/ide-test$(EXESUF): tests/ide-test.o $(libqos-pc-obj-y)
+tests/ahci-test$(EXESUF): tests/ahci-test.o $(libqos-pc-obj-y)
 tests/hd-geo-test$(EXESUF): tests/hd-geo-test.o
 tests/boot-order-test$(EXESUF): tests/boot-order-test.o $(libqos-obj-y)
 tests/bios-tables-test$(EXESUF): tests/bios-tables-test.o $(libqos-obj-y)
@@ -315,9 +324,9 @@ tests/vmxnet3-test$(EXESUF): tests/vmxnet3-test.o
 tests/ne2000-test$(EXESUF): tests/ne2000-test.o
 tests/wdt_ib700-test$(EXESUF): tests/wdt_ib700-test.o
 tests/virtio-balloon-test$(EXESUF): tests/virtio-balloon-test.o
-tests/virtio-blk-test$(EXESUF): tests/virtio-blk-test.o
-tests/virtio-net-test$(EXESUF): tests/virtio-net-test.o
-tests/virtio-rng-test$(EXESUF): tests/virtio-rng-test.o
+tests/virtio-blk-test$(EXESUF): tests/virtio-blk-test.o $(libqos-virtio-obj-y)
+tests/virtio-net-test$(EXESUF): tests/virtio-net-test.o $(libqos-pc-obj-y)
+tests/virtio-rng-test$(EXESUF): tests/virtio-rng-test.o $(libqos-pc-obj-y)
 tests/virtio-scsi-test$(EXESUF): tests/virtio-scsi-test.o
 tests/virtio-9p-test$(EXESUF): tests/virtio-9p-test.o
 tests/virtio-serial-test$(EXESUF): tests/virtio-serial-test.o
@@ -326,7 +335,7 @@ tests/tpci200-test$(EXESUF): tests/tpci200-test.o
 tests/display-vga-test$(EXESUF): tests/display-vga-test.o
 tests/ipoctal232-test$(EXESUF): tests/ipoctal232-test.o
 tests/qom-test$(EXESUF): tests/qom-test.o
-tests/blockdev-test$(EXESUF): tests/blockdev-test.o $(libqos-pc-obj-y)
+tests/drive_del-test$(EXESUF): tests/drive_del-test.o $(libqos-pc-obj-y)
 tests/qdev-monitor-test$(EXESUF): tests/qdev-monitor-test.o $(libqos-pc-obj-y)
 tests/nvme-test$(EXESUF): tests/nvme-test.o
 tests/pvpanic-test$(EXESUF): tests/pvpanic-test.o
@@ -335,7 +344,10 @@ tests/ac97-test$(EXESUF): tests/ac97-test.o
 tests/es1370-test$(EXESUF): tests/es1370-test.o
 tests/intel-hda-test$(EXESUF): tests/intel-hda-test.o
 tests/ioh3420-test$(EXESUF): tests/ioh3420-test.o
-tests/usb-hcd-ehci-test$(EXESUF): tests/usb-hcd-ehci-test.o $(libqos-pc-obj-y)
+tests/usb-hcd-ohci-test$(EXESUF): tests/usb-hcd-ohci-test.o $(libqos-usb-obj-y)
+tests/usb-hcd-uhci-test$(EXESUF): tests/usb-hcd-uhci-test.o $(libqos-usb-obj-y)
+tests/usb-hcd-ehci-test$(EXESUF): tests/usb-hcd-ehci-test.o $(libqos-usb-obj-y)
+tests/usb-hcd-xhci-test$(EXESUF): tests/usb-hcd-xhci-test.o $(libqos-usb-obj-y)
 tests/vhost-user-test$(EXESUF): tests/vhost-user-test.o qemu-char.o qemu-timer.o $(qtest-obj-y)
 tests/qemu-iotests/socket_scm_helper$(EXESUF): tests/qemu-iotests/socket_scm_helper.o
 tests/test-qemu-opts$(EXESUF): tests/test-qemu-opts.o libqemuutil.a libqemustub.a

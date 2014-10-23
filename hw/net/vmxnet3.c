@@ -34,6 +34,7 @@
 
 #define PCI_DEVICE_ID_VMWARE_VMXNET3_REVISION 0x1
 #define VMXNET3_MSIX_BAR_SIZE 0x2000
+#define MIN_BUF_SIZE 60
 
 #define VMXNET3_BAR0_IDX      (0)
 #define VMXNET3_BAR1_IDX      (1)
@@ -1871,10 +1872,19 @@ vmxnet3_receive(NetClientState *nc, const uint8_t *buf, size_t size)
 {
     VMXNET3State *s = qemu_get_nic_opaque(nc);
     size_t bytes_indicated;
+    uint8_t min_buf[MIN_BUF_SIZE];
 
     if (!vmxnet3_can_receive(nc)) {
         VMW_PKPRN("Cannot receive now");
         return -1;
+    }
+
+    /* Pad to minimum Ethernet frame length */
+    if (size < sizeof(min_buf)) {
+        memcpy(min_buf, buf, size);
+        memset(&min_buf[size], 0, sizeof(min_buf) - size);
+        buf = min_buf;
+        size = sizeof(min_buf);
     }
 
     if (s->peer_has_vhdr) {
@@ -2162,11 +2172,16 @@ static int vmxnet3_pci_init(PCIDevice *pci_dev)
     register_savevm(dev, "vmxnet3-msix", -1, 1,
                     vmxnet3_msix_save, vmxnet3_msix_load, s);
 
-    add_boot_device_path(s->conf.bootindex, dev, "/ethernet-phy@0");
-
     return 0;
 }
 
+static void vmxnet3_instance_init(Object *obj)
+{
+    VMXNET3State *s = VMXNET3(obj);
+    device_add_bootindex_property(obj, &s->conf.bootindex,
+                                  "bootindex", "/ethernet-phy@0",
+                                  DEVICE(obj), NULL);
+}
 
 static void vmxnet3_pci_uninit(PCIDevice *pci_dev)
 {
@@ -2182,10 +2197,6 @@ static void vmxnet3_pci_uninit(PCIDevice *pci_dev)
     vmxnet3_cleanup_msix(s);
 
     vmxnet3_cleanup_msi(s);
-
-    memory_region_destroy(&s->bar0);
-    memory_region_destroy(&s->bar1);
-    memory_region_destroy(&s->msix_bar);
 }
 
 static void vmxnet3_qdev_reset(DeviceState *dev)
@@ -2518,6 +2529,7 @@ static const TypeInfo vmxnet3_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(VMXNET3State),
     .class_init    = vmxnet3_class_init,
+    .instance_init = vmxnet3_instance_init,
 };
 
 static void vmxnet3_register_types(void)

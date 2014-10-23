@@ -103,6 +103,9 @@
 #define SD_INODE_SIZE (sizeof(SheepdogInode))
 #define CURRENT_VDI_ID 0
 
+#define LOCK_TYPE_NORMAL 0
+#define LOCK_TYPE_SHARED 1      /* for iSCSI multipath */
+
 typedef struct SheepdogReq {
     uint8_t proto_ver;
     uint8_t opcode;
@@ -166,7 +169,8 @@ typedef struct SheepdogVdiReq {
     uint8_t copy_policy;
     uint8_t reserved[2];
     uint32_t snapid;
-    uint32_t pad[3];
+    uint32_t type;
+    uint32_t pad[2];
 } SheepdogVdiReq;
 
 typedef struct SheepdogVdiRsp {
@@ -297,7 +301,7 @@ enum AIOCBState {
 };
 
 struct SheepdogAIOCB {
-    BlockDriverAIOCB common;
+    BlockAIOCB common;
 
     QEMUIOVector *qiov;
 
@@ -311,7 +315,6 @@ struct SheepdogAIOCB {
     void (*aio_done_func)(SheepdogAIOCB *);
 
     bool cancelable;
-    bool *finished;
     int nr_pending;
 };
 
@@ -442,10 +445,7 @@ static inline void free_aio_req(BDRVSheepdogState *s, AIOReq *aio_req)
 static void coroutine_fn sd_finish_aiocb(SheepdogAIOCB *acb)
 {
     qemu_coroutine_enter(acb->coroutine, NULL);
-    if (acb->finished) {
-        *acb->finished = true;
-    }
-    qemu_aio_release(acb);
+    qemu_aio_unref(acb);
 }
 
 /*
@@ -473,41 +473,38 @@ static bool sd_acb_cancelable(const SheepdogAIOCB *acb)
     return true;
 }
 
-static void sd_aio_cancel(BlockDriverAIOCB *blockacb)
+static void sd_aio_cancel(BlockAIOCB *blockacb)
 {
     SheepdogAIOCB *acb = (SheepdogAIOCB *)blockacb;
     BDRVSheepdogState *s = acb->common.bs->opaque;
     AIOReq *aioreq, *next;
-    bool finished = false;
 
-    acb->finished = &finished;
-    while (!finished) {
-        if (sd_acb_cancelable(acb)) {
-            /* Remove outstanding requests from pending and failed queues.  */
-            QLIST_FOREACH_SAFE(aioreq, &s->pending_aio_head, aio_siblings,
-                               next) {
-                if (aioreq->aiocb == acb) {
-                    free_aio_req(s, aioreq);
-                }
+    if (sd_acb_cancelable(acb)) {
+        /* Remove outstanding requests from pending and failed queues.  */
+        QLIST_FOREACH_SAFE(aioreq, &s->pending_aio_head, aio_siblings,
+                           next) {
+            if (aioreq->aiocb == acb) {
+                free_aio_req(s, aioreq);
             }
-            QLIST_FOREACH_SAFE(aioreq, &s->failed_aio_head, aio_siblings,
-                               next) {
-                if (aioreq->aiocb == acb) {
-                    free_aio_req(s, aioreq);
-                }
-            }
-
-            assert(acb->nr_pending == 0);
-            sd_finish_aiocb(acb);
-            return;
         }
-        aio_poll(s->aio_context, true);
+        QLIST_FOREACH_SAFE(aioreq, &s->failed_aio_head, aio_siblings,
+                           next) {
+            if (aioreq->aiocb == acb) {
+                free_aio_req(s, aioreq);
+            }
+        }
+
+        assert(acb->nr_pending == 0);
+        if (acb->common.cb) {
+            acb->common.cb(acb->common.opaque, -ECANCELED);
+        }
+        sd_finish_aiocb(acb);
     }
 }
 
 static const AIOCBInfo sd_aiocb_info = {
-    .aiocb_size = sizeof(SheepdogAIOCB),
-    .cancel = sd_aio_cancel,
+    .aiocb_size     = sizeof(SheepdogAIOCB),
+    .cancel_async   = sd_aio_cancel,
 };
 
 static SheepdogAIOCB *sd_aio_setup(BlockDriverState *bs, QEMUIOVector *qiov,
@@ -524,7 +521,6 @@ static SheepdogAIOCB *sd_aio_setup(BlockDriverState *bs, QEMUIOVector *qiov,
 
     acb->aio_done_func = NULL;
     acb->cancelable = true;
-    acb->finished = NULL;
     acb->coroutine = qemu_coroutine_self();
     acb->ret = 0;
     acb->nr_pending = 0;
@@ -712,7 +708,6 @@ static void coroutine_fn send_pending_req(BDRVSheepdogState *s, uint64_t oid)
 
 static coroutine_fn void reconnect_to_sdog(void *opaque)
 {
-    Error *local_err = NULL;
     BDRVSheepdogState *s = opaque;
     AIOReq *aio_req, *next;
 
@@ -727,6 +722,7 @@ static coroutine_fn void reconnect_to_sdog(void *opaque)
 
     /* Try to reconnect the sheepdog server every one second. */
     while (s->fd < 0) {
+        Error *local_err = NULL;
         s->fd = get_sheep_fd(s, &local_err);
         if (s->fd < 0) {
             DPRINTF("Wait for connection to be established\n");
@@ -1090,6 +1086,7 @@ static int find_vdi_name(BDRVSheepdogState *s, const char *filename,
     memset(&hdr, 0, sizeof(hdr));
     if (lock) {
         hdr.opcode = SD_OP_LOCK_VDI;
+        hdr.type = LOCK_TYPE_NORMAL;
     } else {
         hdr.opcode = SD_OP_GET_VDI_INFO;
     }
@@ -1110,6 +1107,8 @@ static int find_vdi_name(BDRVSheepdogState *s, const char *filename,
                    sd_strerror(rsp->result), filename, snapid, tag);
         if (rsp->result == SD_RES_NO_VDI) {
             ret = -ENOENT;
+        } else if (rsp->result == SD_RES_VDI_LOCKED) {
+            ret = -EBUSY;
         } else {
             ret = -EIO;
         }
@@ -1682,7 +1681,7 @@ static int sd_create(const char *filename, QemuOpts *opts,
     uint32_t snapid;
     bool prealloc = false;
 
-    s = g_malloc0(sizeof(BDRVSheepdogState));
+    s = g_new0(BDRVSheepdogState, 1);
 
     memset(tag, 0, sizeof(tag));
     if (strstr(filename, "://")) {
@@ -1695,7 +1694,8 @@ static int sd_create(const char *filename, QemuOpts *opts,
         goto out;
     }
 
-    s->inode.vdi_size = qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0);
+    s->inode.vdi_size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
+                                 BDRV_SECTOR_SIZE);
     backing_file = qemu_opt_get_del(opts, BLOCK_OPT_BACKING_FILE);
     buf = qemu_opt_get_del(opts, BLOCK_OPT_PREALLOC);
     if (!buf || !strcmp(buf, "off")) {
@@ -1793,6 +1793,7 @@ static void sd_close(BlockDriverState *bs)
     memset(&hdr, 0, sizeof(hdr));
 
     hdr.opcode = SD_OP_RELEASE_VDI;
+    hdr.type = LOCK_TYPE_NORMAL;
     hdr.base_vdi_id = s->inode.vdi_id;
     wlen = strlen(s->name) + 1;
     hdr.data_length = wlen;
@@ -2129,7 +2130,7 @@ static coroutine_fn int sd_co_writev(BlockDriverState *bs, int64_t sector_num,
 
     ret = sd_co_rw_vector(acb);
     if (ret <= 0) {
-        qemu_aio_release(acb);
+        qemu_aio_unref(acb);
         return ret;
     }
 
@@ -2150,7 +2151,7 @@ static coroutine_fn int sd_co_readv(BlockDriverState *bs, int64_t sector_num,
 
     ret = sd_co_rw_vector(acb);
     if (ret <= 0) {
-        qemu_aio_release(acb);
+        qemu_aio_unref(acb);
         return ret;
     }
 
@@ -2273,7 +2274,7 @@ static int sd_snapshot_goto(BlockDriverState *bs, const char *snapshot_id)
     uint32_t snapid = 0;
     int ret = 0;
 
-    old_s = g_malloc(sizeof(BDRVSheepdogState));
+    old_s = g_new(BDRVSheepdogState, 1);
 
     memcpy(old_s, s, sizeof(BDRVSheepdogState));
 
@@ -2357,7 +2358,7 @@ static int sd_snapshot_list(BlockDriverState *bs, QEMUSnapshotInfo **psn_tab)
         goto out;
     }
 
-    sn_tab = g_malloc0(nr * sizeof(*sn_tab));
+    sn_tab = g_new0(QEMUSnapshotInfo, nr);
 
     /* calculate a vdi id with hash function */
     hval = fnv_64a_buf(s->name, strlen(s->name), FNV1A_64_INIT);
@@ -2509,7 +2510,7 @@ static coroutine_fn int sd_co_discard(BlockDriverState *bs, int64_t sector_num,
 
     ret = sd_co_rw_vector(acb);
     if (ret <= 0) {
-        qemu_aio_release(acb);
+        qemu_aio_unref(acb);
         return ret;
     }
 

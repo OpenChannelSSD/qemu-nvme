@@ -233,7 +233,7 @@ static void vmdk_free_last_extent(BlockDriverState *bs)
         return;
     }
     s->num_extents--;
-    s->extents = g_realloc(s->extents, s->num_extents * sizeof(VmdkExtent));
+    s->extents = g_renew(VmdkExtent, s->extents, s->num_extents);
 }
 
 static uint32_t vmdk_read_cid(BlockDriverState *bs, int parent)
@@ -397,7 +397,7 @@ static int vmdk_add_extent(BlockDriverState *bs,
 {
     VmdkExtent *extent;
     BDRVVmdkState *s = bs->opaque;
-    int64_t length;
+    int64_t nb_sectors;
 
     if (cluster_sectors > 0x200000) {
         /* 0x200000 * 512Bytes = 1GB for one cluster is unrealistic */
@@ -413,13 +413,12 @@ static int vmdk_add_extent(BlockDriverState *bs,
         return -EFBIG;
     }
 
-    length = bdrv_getlength(file);
-    if (length < 0) {
-        return length;
+    nb_sectors = bdrv_nb_sectors(file);
+    if (nb_sectors < 0) {
+        return nb_sectors;
     }
 
-    s->extents = g_realloc(s->extents,
-                              (s->num_extents + 1) * sizeof(VmdkExtent));
+    s->extents = g_renew(VmdkExtent, s->extents, s->num_extents + 1);
     extent = &s->extents[s->num_extents];
     s->num_extents++;
 
@@ -433,8 +432,7 @@ static int vmdk_add_extent(BlockDriverState *bs,
     extent->l1_entry_sectors = l2_size * cluster_sectors;
     extent->l2_size = l2_size;
     extent->cluster_sectors = flat ? sectors : cluster_sectors;
-    extent->next_cluster_sector =
-        ROUND_UP(DIV_ROUND_UP(length, BDRV_SECTOR_SIZE), cluster_sectors);
+    extent->next_cluster_sector = ROUND_UP(nb_sectors, cluster_sectors);
 
     if (s->num_extents > 1) {
         extent->end_sector = (*(extent - 1)).end_sector + extent->sectors;
@@ -497,7 +495,7 @@ static int vmdk_init_tables(BlockDriverState *bs, VmdkExtent *extent,
     }
 
     extent->l2_cache =
-        g_malloc(extent->l2_size * L2_CACHE_SIZE * sizeof(uint32_t));
+        g_new(uint32_t, extent->l2_size * L2_CACHE_SIZE);
     return 0;
  fail_l1b:
     g_free(extent->l1_backup_table);
@@ -659,7 +657,7 @@ static int vmdk_open_vmdk4(BlockDriverState *bs,
         snprintf(buf, sizeof(buf), "VMDK version %" PRId32,
                  le32_to_cpu(header.version));
         error_set(errp, QERR_UNKNOWN_BLOCK_FORMAT_FEATURE,
-                  bs->device_name, "vmdk", buf);
+                  bdrv_get_device_name(bs), "vmdk", buf);
         return -ENOTSUP;
     } else if (le32_to_cpu(header.version) == 3 && (flags & BDRV_O_RDWR)) {
         /* VMware KB 2064959 explains that version 3 added support for
@@ -836,6 +834,7 @@ static int vmdk_parse_extents(const char *desc, BlockDriverState *bs,
             ret = vmdk_add_extent(bs, extent_file, true, sectors,
                             0, 0, 0, 0, 0, &extent, errp);
             if (ret < 0) {
+                bdrv_unref(extent_file);
                 return ret;
             }
             extent->flat_start_offset = flat_offset << 9;
@@ -847,14 +846,15 @@ static int vmdk_parse_extents(const char *desc, BlockDriverState *bs,
             } else {
                 ret = vmdk_open_sparse(bs, extent_file, bs->open_flags, buf, errp);
             }
+            g_free(buf);
             if (ret) {
-                g_free(buf);
                 bdrv_unref(extent_file);
                 return ret;
             }
             extent = &s->extents[s->num_extents - 1];
         } else {
             error_setg(errp, "Unsupported extent type '%s'", type);
+            bdrv_unref(extent_file);
             return -ENOTSUP;
         }
         extent->type = g_strdup(type);
@@ -939,7 +939,7 @@ static int vmdk_open(BlockDriverState *bs, QDict *options, int flags,
     /* Disable migration when VMDK images are used */
     error_set(&s->migration_blocker,
               QERR_BLOCK_FORMAT_FEATURE_NOT_SUPPORTED,
-              "vmdk", bs->device_name, "live migration");
+              "vmdk", bdrv_get_device_name(bs), "live migration");
     migrate_add_blocker(s->migration_blocker);
     g_free(buf);
     return 0;
@@ -1113,7 +1113,7 @@ static int get_cluster_offset(BlockDriverState *bs,
     uint32_t min_count, *l2_table;
     bool zeroed = false;
     int64_t ret;
-    int32_t cluster_sector;
+    int64_t cluster_sector;
 
     if (m_data) {
         m_data->valid = 0;
@@ -1807,7 +1807,8 @@ static int vmdk_create(const char *filename, QemuOpts *opts, Error **errp)
         goto exit;
     }
     /* Read out options */
-    total_size = qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0);
+    total_size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
+                          BDRV_SECTOR_SIZE);
     adapter_type = qemu_opt_get_del(opts, BLOCK_OPT_ADAPTER_TYPE);
     backing_file = qemu_opt_get_del(opts, BLOCK_OPT_BACKING_FILE);
     if (qemu_opt_get_bool_del(opts, BLOCK_OPT_COMPAT6, false)) {

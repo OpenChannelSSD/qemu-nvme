@@ -205,6 +205,33 @@ static void gen_exception(int excp, uint32_t syndrome)
     tcg_temp_free_i32(tcg_excp);
 }
 
+static void gen_ss_advance(DisasContext *s)
+{
+    /* If the singlestep state is Active-not-pending, advance to
+     * Active-pending.
+     */
+    if (s->ss_active) {
+        s->pstate_ss = 0;
+        gen_helper_clear_pstate_ss(cpu_env);
+    }
+}
+
+static void gen_step_complete_exception(DisasContext *s)
+{
+    /* We just completed step of an insn. Move from Active-not-pending
+     * to Active-pending, and then also take the swstep exception.
+     * This corresponds to making the (IMPDEF) choice to prioritize
+     * swstep exceptions over asynchronous exceptions taken to an exception
+     * level where debug is disabled. This choice has the advantage that
+     * we do not need to maintain internal state corresponding to the
+     * ISV/EX syndrome bits between completion of the step and generation
+     * of the exception, and our syndrome information is always correct.
+     */
+    gen_ss_advance(s);
+    gen_exception(EXCP_UDEF, syn_swstep(s->ss_same_el, 1, s->is_ldex));
+    s->is_jmp = DISAS_EXC;
+}
+
 static void gen_smul_dual(TCGv_i32 a, TCGv_i32 b)
 {
     TCGv_i32 tmp1 = tcg_temp_new_i32();
@@ -3860,7 +3887,7 @@ static inline void gen_goto_tb(DisasContext *s, int n, target_ulong dest)
 
 static inline void gen_jmp (DisasContext *s, uint32_t dest)
 {
-    if (unlikely(s->singlestep_enabled)) {
+    if (unlikely(s->singlestep_enabled || s->ss_active)) {
         /* An indirect jump so that we still trigger the debug exception.  */
         if (s->thumb)
             dest |= 1;
@@ -3908,9 +3935,10 @@ static uint32_t msr_mask(CPUARMState *env, DisasContext *s, int flags, int spsr)
         mask &= ~(CPSR_E | CPSR_GE);
     if (!arm_feature(env, ARM_FEATURE_THUMB2))
         mask &= ~CPSR_IT;
-    /* Mask out execution state bits.  */
-    if (!spsr)
-        mask &= ~CPSR_EXEC;
+    /* Mask out execution state and reserved bits.  */
+    if (!spsr) {
+        mask &= ~(CPSR_EXEC | CPSR_RESERVED);
+    }
     /* Mask out privileged bits.  */
     if (IS_USER(s))
         mask &= CPSR_USER;
@@ -3954,7 +3982,7 @@ static void gen_exception_return(DisasContext *s, TCGv_i32 pc)
     TCGv_i32 tmp;
     store_reg(s, 15, pc);
     tmp = load_cpu_field(spsr);
-    gen_set_cpsr(tmp, 0xffffffff);
+    gen_set_cpsr(tmp, CPSR_ERET_MASK);
     tcg_temp_free_i32(tmp);
     s->is_jmp = DISAS_UPDATE;
 }
@@ -3962,7 +3990,7 @@ static void gen_exception_return(DisasContext *s, TCGv_i32 pc)
 /* Generate a v6 exception return.  Marks both values as dead.  */
 static void gen_rfe(DisasContext *s, TCGv_i32 pc, TCGv_i32 cpsr)
 {
-    gen_set_cpsr(cpsr, 0xffffffff);
+    gen_set_cpsr(cpsr, CPSR_ERET_MASK);
     tcg_temp_free_i32(cpsr);
     store_reg(s, 15, pc);
     s->is_jmp = DISAS_UPDATE;
@@ -6973,22 +7001,18 @@ static int disas_coproc_insn(CPUARMState * env, DisasContext *s, uint32_t insn)
     const ARMCPRegInfo *ri;
 
     cpnum = (insn >> 8) & 0xf;
-    if (arm_feature(env, ARM_FEATURE_XSCALE)
-	    && ((env->cp15.c15_cpar ^ 0x3fff) & (1 << cpnum)))
-	return 1;
 
-    /* First check for coprocessor space used for actual instructions */
-    switch (cpnum) {
-      case 0:
-      case 1:
-	if (arm_feature(env, ARM_FEATURE_IWMMXT)) {
-	    return disas_iwmmxt_insn(env, s, insn);
-	} else if (arm_feature(env, ARM_FEATURE_XSCALE)) {
-	    return disas_dsp_insn(env, s, insn);
-	}
-	return 1;
-    default:
-        break;
+    /* First check for coprocessor space used for XScale/iwMMXt insns */
+    if (arm_feature(env, ARM_FEATURE_XSCALE) && (cpnum < 2)) {
+        if (extract32(s->c15_cpar, cpnum, 1) == 0) {
+            return 1;
+        }
+        if (arm_feature(env, ARM_FEATURE_IWMMXT)) {
+            return disas_iwmmxt_insn(env, s, insn);
+        } else if (arm_feature(env, ARM_FEATURE_XSCALE)) {
+            return disas_dsp_insn(env, s, insn);
+        }
+        return 1;
     }
 
     /* Otherwise treat as a generic register access */
@@ -7021,9 +7045,12 @@ static int disas_coproc_insn(CPUARMState * env, DisasContext *s, uint32_t insn)
             return 1;
         }
 
-        if (ri->accessfn) {
+        if (ri->accessfn ||
+            (arm_feature(env, ARM_FEATURE_XSCALE) && cpnum < 14)) {
             /* Emit code to perform further access permissions checks at
              * runtime; this may result in an exception.
+             * Note that on XScale all cp0..c13 registers do an access check
+             * call in order to handle c15_cpar.
              */
             TCGv_ptr tmpptr;
             TCGv_i32 tcg_syn;
@@ -7279,6 +7306,8 @@ static void gen_load_exclusive(DisasContext *s, int rt, int rt2,
                                TCGv_i32 addr, int size)
 {
     TCGv_i32 tmp = tcg_temp_new_i32();
+
+    s->is_ldex = true;
 
     switch (size) {
     case 0:
@@ -7645,9 +7674,11 @@ static void disas_arm_insn(CPUARMState * env, DisasContext *s)
         } else if ((insn & 0x0e000f00) == 0x0c000100) {
             if (arm_feature(env, ARM_FEATURE_IWMMXT)) {
                 /* iWMMXt register transfer.  */
-                if (env->cp15.c15_cpar & (1 << 1))
-                    if (!disas_iwmmxt_insn(env, s, insn))
+                if (extract32(s->c15_cpar, 1, 1)) {
+                    if (!disas_iwmmxt_insn(env, s, insn)) {
                         return;
+                    }
+                }
             }
         } else if ((insn & 0x0fe00000) == 0x0c400000) {
             /* Coprocessor double register transfer.  */
@@ -8836,7 +8867,7 @@ static void disas_arm_insn(CPUARMState * env, DisasContext *s)
                 if ((insn & (1 << 22)) && !user) {
                     /* Restore CPSR from SPSR.  */
                     tmp = load_cpu_field(spsr);
-                    gen_set_cpsr(tmp, 0xffffffff);
+                    gen_set_cpsr(tmp, CPSR_ERET_MASK);
                     tcg_temp_free_i32(tmp);
                     s->is_jmp = DISAS_UPDATE;
                 }
@@ -10912,9 +10943,30 @@ static inline void gen_intermediate_code_internal(ARMCPU *cpu,
     dc->vfp_enabled = ARM_TBFLAG_VFPEN(tb->flags);
     dc->vec_len = ARM_TBFLAG_VECLEN(tb->flags);
     dc->vec_stride = ARM_TBFLAG_VECSTRIDE(tb->flags);
+    dc->c15_cpar = ARM_TBFLAG_XSCALE_CPAR(tb->flags);
     dc->cp_regs = cpu->cp_regs;
     dc->current_pl = arm_current_pl(env);
     dc->features = env->features;
+
+    /* Single step state. The code-generation logic here is:
+     *  SS_ACTIVE == 0:
+     *   generate code with no special handling for single-stepping (except
+     *   that anything that can make us go to SS_ACTIVE == 1 must end the TB;
+     *   this happens anyway because those changes are all system register or
+     *   PSTATE writes).
+     *  SS_ACTIVE == 1, PSTATE.SS == 1: (active-not-pending)
+     *   emit code for one insn
+     *   emit code to clear PSTATE.SS
+     *   emit code to generate software step exception for completed step
+     *   end TB (as usual for having generated an exception)
+     *  SS_ACTIVE == 1, PSTATE.SS == 0: (active-pending)
+     *   emit code to generate a software step exception
+     *   end the TB
+     */
+    dc->ss_active = ARM_TBFLAG_SS_ACTIVE(tb->flags);
+    dc->pstate_ss = ARM_TBFLAG_PSTATE_SS(tb->flags);
+    dc->is_ldex = false;
+    dc->ss_same_el = false; /* Can't be true since EL_d must be AArch64 */
 
     cpu_F0s = tcg_temp_new_i32();
     cpu_F1s = tcg_temp_new_i32();
@@ -11025,6 +11077,22 @@ static inline void gen_intermediate_code_internal(ARMCPU *cpu,
             tcg_gen_debug_insn_start(dc->pc);
         }
 
+        if (dc->ss_active && !dc->pstate_ss) {
+            /* Singlestep state is Active-pending.
+             * If we're in this state at the start of a TB then either
+             *  a) we just took an exception to an EL which is being debugged
+             *     and this is the first insn in the exception handler
+             *  b) debug exceptions were masked and we just unmasked them
+             *     without changing EL (eg by clearing PSTATE.D)
+             * In either case we're going to take a swstep exception in the
+             * "did not step an insn" case, and so the syndrome ISV and EX
+             * bits should be zero.
+             */
+            assert(num_insns == 0);
+            gen_exception(EXCP_UDEF, syn_swstep(dc->ss_same_el, 0, 0));
+            goto done_generating;
+        }
+
         if (dc->thumb) {
             disas_thumb_insn(env, dc);
             if (dc->condexec_mask) {
@@ -11057,6 +11125,7 @@ static inline void gen_intermediate_code_internal(ARMCPU *cpu,
     } while (!dc->is_jmp && tcg_ctx.gen_opc_ptr < gen_opc_end &&
              !cs->singlestep_enabled &&
              !singlestep &&
+             !dc->ss_active &&
              dc->pc < next_page_start &&
              num_insns < max_insns);
 
@@ -11072,12 +11141,15 @@ static inline void gen_intermediate_code_internal(ARMCPU *cpu,
     /* At this stage dc->condjmp will only be set when the skipped
        instruction was a conditional branch or trap, and the PC has
        already been written.  */
-    if (unlikely(cs->singlestep_enabled)) {
+    if (unlikely(cs->singlestep_enabled || dc->ss_active)) {
         /* Make sure the pc is updated, and raise a debug exception.  */
         if (dc->condjmp) {
             gen_set_condexec(dc);
             if (dc->is_jmp == DISAS_SWI) {
+                gen_ss_advance(dc);
                 gen_exception(EXCP_SWI, syn_aa32_svc(dc->svc_imm, dc->thumb));
+            } else if (dc->ss_active) {
+                gen_step_complete_exception(dc);
             } else {
                 gen_exception_internal(EXCP_DEBUG);
             }
@@ -11089,7 +11161,10 @@ static inline void gen_intermediate_code_internal(ARMCPU *cpu,
         }
         gen_set_condexec(dc);
         if (dc->is_jmp == DISAS_SWI && !dc->condjmp) {
+            gen_ss_advance(dc);
             gen_exception(EXCP_SWI, syn_aa32_svc(dc->svc_imm, dc->thumb));
+        } else if (dc->ss_active) {
+            gen_step_complete_exception(dc);
         } else {
             /* FIXME: Single stepping a WFI insn will not halt
                the CPU.  */

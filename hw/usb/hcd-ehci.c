@@ -2347,8 +2347,11 @@ static USBPortOps ehci_port_ops = {
     .complete = ehci_async_complete_packet,
 };
 
-static USBBusOps ehci_bus_ops = {
+static USBBusOps ehci_bus_ops_companion = {
     .register_companion = ehci_register_companion,
+    .wakeup_endpoint = ehci_wakeup_endpoint,
+};
+static USBBusOps ehci_bus_ops_standalone = {
     .wakeup_endpoint = ehci_wakeup_endpoint,
 };
 
@@ -2456,7 +2459,8 @@ void usb_ehci_realize(EHCIState *s, DeviceState *dev, Error **errp)
         return;
     }
 
-    usb_bus_new(&s->bus, sizeof(s->bus), &ehci_bus_ops, dev);
+    usb_bus_new(&s->bus, sizeof(s->bus), s->companion_enable ?
+                &ehci_bus_ops_companion : &ehci_bus_ops_standalone, dev);
     for (i = 0; i < s->portnr; i++) {
         usb_register_port(&s->bus, &s->ports[i], s, i, &ehci_port_ops,
                           USB_SPEED_MASK_HIGH);
@@ -2468,7 +2472,34 @@ void usb_ehci_realize(EHCIState *s, DeviceState *dev, Error **errp)
     s->device = dev;
 
     qemu_register_reset(ehci_reset, s);
-    qemu_add_vm_change_state_handler(usb_ehci_vm_state_change, s);
+    s->vmstate = qemu_add_vm_change_state_handler(usb_ehci_vm_state_change, s);
+}
+
+void usb_ehci_unrealize(EHCIState *s, DeviceState *dev, Error **errp)
+{
+    trace_usb_ehci_unrealize();
+
+    if (s->frame_timer) {
+        timer_del(s->frame_timer);
+        timer_free(s->frame_timer);
+        s->frame_timer = NULL;
+    }
+    if (s->async_bh) {
+        qemu_bh_delete(s->async_bh);
+    }
+
+    ehci_queues_rip_all(s, 0);
+    ehci_queues_rip_all(s, 1);
+
+    memory_region_del_subregion(&s->mem, &s->mem_caps);
+    memory_region_del_subregion(&s->mem, &s->mem_opreg);
+    memory_region_del_subregion(&s->mem, &s->mem_ports);
+
+    usb_bus_release(&s->bus);
+
+    if (s->vmstate) {
+        qemu_del_vm_change_state_handler(s->vmstate);
+    }
 }
 
 void usb_ehci_init(EHCIState *s, DeviceState *dev)

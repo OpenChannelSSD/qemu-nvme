@@ -50,7 +50,7 @@ common-obj-$(CONFIG_LINUX) += fsdev/
 
 common-obj-y += migration.o migration-tcp.o
 common-obj-y += vmstate.o
-common-obj-y += qemu-file.o
+common-obj-y += qemu-file.o qemu-file-unix.o qemu-file-stdio.o
 common-obj-$(CONFIG_RDMA) += migration-rdma.o
 common-obj-y += qemu-char.o #aio.o
 common-obj-y += block-migration.o
@@ -62,6 +62,7 @@ common-obj-$(CONFIG_SPICE) += spice-qemu-char.o
 
 common-obj-y += audio/
 common-obj-y += hw/
+common-obj-y += accel.o
 
 common-obj-y += ui/
 common-obj-y += bt-host.o bt-vhci.o

@@ -258,7 +258,7 @@ void HELPER(exception_with_syndrome)(CPUARMState *env, uint32_t excp,
 
 uint32_t HELPER(cpsr_read)(CPUARMState *env)
 {
-    return cpsr_read(env) & ~CPSR_EXEC;
+    return cpsr_read(env) & ~(CPSR_EXEC | CPSR_RESERVED);
 }
 
 void HELPER(cpsr_write)(CPUARMState *env, uint32_t val, uint32_t mask)
@@ -301,6 +301,17 @@ void HELPER(set_user_reg)(CPUARMState *env, uint32_t regno, uint32_t val)
 void HELPER(access_check_cp_reg)(CPUARMState *env, void *rip, uint32_t syndrome)
 {
     const ARMCPRegInfo *ri = rip;
+
+    if (arm_feature(env, ARM_FEATURE_XSCALE) && ri->cp < 14
+        && extract32(env->cp15.c15_cpar, ri->cp, 1) == 0) {
+        env->exception.syndrome = syndrome;
+        raise_exception(env, EXCP_UDEF);
+    }
+
+    if (!ri->accessfn) {
+        return;
+    }
+
     switch (ri->accessfn(env, ri)) {
     case CP_ACCESS_OK:
         return;
@@ -369,6 +380,68 @@ void HELPER(msr_i_pstate)(CPUARMState *env, uint32_t op, uint32_t imm)
     }
 }
 
+void HELPER(clear_pstate_ss)(CPUARMState *env)
+{
+    env->pstate &= ~PSTATE_SS;
+}
+
+void HELPER(pre_hvc)(CPUARMState *env)
+{
+    int cur_el = arm_current_pl(env);
+    /* FIXME: Use actual secure state.  */
+    bool secure = false;
+    bool undef;
+
+    /* We've already checked that EL2 exists at translation time.
+     * EL3.HCE has priority over EL2.HCD.
+     */
+    if (arm_feature(env, ARM_FEATURE_EL3)) {
+        undef = !(env->cp15.scr_el3 & SCR_HCE);
+    } else {
+        undef = env->cp15.hcr_el2 & HCR_HCD;
+    }
+
+    /* In ARMv7 and ARMv8/AArch32, HVC is undef in secure state.
+     * For ARMv8/AArch64, HVC is allowed in EL3.
+     * Note that we've already trapped HVC from EL0 at translation
+     * time.
+     */
+    if (secure && (!is_a64(env) || cur_el == 1)) {
+        undef = true;
+    }
+
+    if (undef) {
+        env->exception.syndrome = syn_uncategorized();
+        raise_exception(env, EXCP_UDEF);
+    }
+}
+
+void HELPER(pre_smc)(CPUARMState *env, uint32_t syndrome)
+{
+    int cur_el = arm_current_pl(env);
+    /* FIXME: Use real secure state.  */
+    bool secure = false;
+    bool smd = env->cp15.scr_el3 & SCR_SMD;
+    /* On ARMv8 AArch32, SMD only applies to NS state.
+     * On ARMv7 SMD only applies to NS state and only if EL2 is available.
+     * For ARMv7 non EL2, we force SMD to zero so we don't need to re-check
+     * the EL2 condition here.
+     */
+    bool undef = is_a64(env) ? smd : (!secure && smd);
+
+    /* In NS EL1, HCR controlled routing to EL2 has priority over SMD.  */
+    if (!secure && cur_el == 1 && (env->cp15.hcr_el2 & HCR_TSC)) {
+        env->exception.syndrome = syndrome;
+        raise_exception(env, EXCP_HYP_TRAP);
+    }
+
+    /* We've already checked that EL3 exists at translation time.  */
+    if (undef) {
+        env->exception.syndrome = syn_uncategorized();
+        raise_exception(env, EXCP_UDEF);
+    }
+}
+
 void HELPER(exception_return)(CPUARMState *env)
 {
     int cur_el = arm_current_pl(env);
@@ -380,12 +453,26 @@ void HELPER(exception_return)(CPUARMState *env)
 
     env->exclusive_addr = -1;
 
+    /* We must squash the PSTATE.SS bit to zero unless both of the
+     * following hold:
+     *  1. debug exceptions are currently disabled
+     *  2. singlestep will be active in the EL we return to
+     * We check 1 here and 2 after we've done the pstate/cpsr write() to
+     * transition to the EL we're going to.
+     */
+    if (arm_generate_debug_exceptions(env)) {
+        spsr &= ~PSTATE_SS;
+    }
+
     if (spsr & PSTATE_nRW) {
         /* TODO: We currently assume EL1/2/3 are running in AArch64.  */
         env->aarch64 = 0;
         new_el = 0;
         env->uncached_cpsr = 0x10;
         cpsr_write(env, spsr, ~0);
+        if (!arm_singlestep_active(env)) {
+            env->uncached_cpsr &= ~PSTATE_SS;
+        }
         for (i = 0; i < 15; i++) {
             env->regs[i] = env->xregs[i];
         }
@@ -410,6 +497,9 @@ void HELPER(exception_return)(CPUARMState *env)
         }
         env->aarch64 = 1;
         pstate_write(env, spsr);
+        if (!arm_singlestep_active(env)) {
+            env->pstate &= ~PSTATE_SS;
+        }
         aarch64_restore_sp(env, new_el);
         env->pc = env->elr_el[cur_el];
     }
@@ -429,6 +519,242 @@ illegal_return:
     spsr &= PSTATE_NZCV | PSTATE_DAIF;
     spsr |= pstate_read(env) & ~(PSTATE_NZCV | PSTATE_DAIF);
     pstate_write(env, spsr);
+    if (!arm_singlestep_active(env)) {
+        env->pstate &= ~PSTATE_SS;
+    }
+}
+
+/* Return true if the linked breakpoint entry lbn passes its checks */
+static bool linked_bp_matches(ARMCPU *cpu, int lbn)
+{
+    CPUARMState *env = &cpu->env;
+    uint64_t bcr = env->cp15.dbgbcr[lbn];
+    int brps = extract32(cpu->dbgdidr, 24, 4);
+    int ctx_cmps = extract32(cpu->dbgdidr, 20, 4);
+    int bt;
+    uint32_t contextidr;
+
+    /* Links to unimplemented or non-context aware breakpoints are
+     * CONSTRAINED UNPREDICTABLE: either behave as if disabled, or
+     * as if linked to an UNKNOWN context-aware breakpoint (in which
+     * case DBGWCR<n>_EL1.LBN must indicate that breakpoint).
+     * We choose the former.
+     */
+    if (lbn > brps || lbn < (brps - ctx_cmps)) {
+        return false;
+    }
+
+    bcr = env->cp15.dbgbcr[lbn];
+
+    if (extract64(bcr, 0, 1) == 0) {
+        /* Linked breakpoint disabled : generate no events */
+        return false;
+    }
+
+    bt = extract64(bcr, 20, 4);
+
+    /* We match the whole register even if this is AArch32 using the
+     * short descriptor format (in which case it holds both PROCID and ASID),
+     * since we don't implement the optional v7 context ID masking.
+     */
+    contextidr = extract64(env->cp15.contextidr_el1, 0, 32);
+
+    switch (bt) {
+    case 3: /* linked context ID match */
+        if (arm_current_pl(env) > 1) {
+            /* Context matches never fire in EL2 or (AArch64) EL3 */
+            return false;
+        }
+        return (contextidr == extract64(env->cp15.dbgbvr[lbn], 0, 32));
+    case 5: /* linked address mismatch (reserved in AArch64) */
+    case 9: /* linked VMID match (reserved if no EL2) */
+    case 11: /* linked context ID and VMID match (reserved if no EL2) */
+    default:
+        /* Links to Unlinked context breakpoints must generate no
+         * events; we choose to do the same for reserved values too.
+         */
+        return false;
+    }
+
+    return false;
+}
+
+static bool bp_wp_matches(ARMCPU *cpu, int n, bool is_wp)
+{
+    CPUARMState *env = &cpu->env;
+    uint64_t cr;
+    int pac, hmc, ssc, wt, lbn;
+    /* TODO: check against CPU security state when we implement TrustZone */
+    bool is_secure = false;
+
+    if (is_wp) {
+        if (!env->cpu_watchpoint[n]
+            || !(env->cpu_watchpoint[n]->flags & BP_WATCHPOINT_HIT)) {
+            return false;
+        }
+        cr = env->cp15.dbgwcr[n];
+    } else {
+        uint64_t pc = is_a64(env) ? env->pc : env->regs[15];
+
+        if (!env->cpu_breakpoint[n] || env->cpu_breakpoint[n]->pc != pc) {
+            return false;
+        }
+        cr = env->cp15.dbgbcr[n];
+    }
+    /* The WATCHPOINT_HIT flag guarantees us that the watchpoint is
+     * enabled and that the address and access type match; for breakpoints
+     * we know the address matched; check the remaining fields, including
+     * linked breakpoints. We rely on WCR and BCR having the same layout
+     * for the LBN, SSC, HMC, PAC/PMC and is-linked fields.
+     * Note that some combinations of {PAC, HMC, SSC} are reserved and
+     * must act either like some valid combination or as if the watchpoint
+     * were disabled. We choose the former, and use this together with
+     * the fact that EL3 must always be Secure and EL2 must always be
+     * Non-Secure to simplify the code slightly compared to the full
+     * table in the ARM ARM.
+     */
+    pac = extract64(cr, 1, 2);
+    hmc = extract64(cr, 13, 1);
+    ssc = extract64(cr, 14, 2);
+
+    switch (ssc) {
+    case 0:
+        break;
+    case 1:
+    case 3:
+        if (is_secure) {
+            return false;
+        }
+        break;
+    case 2:
+        if (!is_secure) {
+            return false;
+        }
+        break;
+    }
+
+    /* TODO: this is not strictly correct because the LDRT/STRT/LDT/STT
+     * "unprivileged access" instructions should match watchpoints as if
+     * they were accesses done at EL0, even if the CPU is at EL1 or higher.
+     * Implementing this would require reworking the core watchpoint code
+     * to plumb the mmu_idx through to this point. Luckily Linux does not
+     * rely on this behaviour currently.
+     * For breakpoints we do want to use the current CPU state.
+     */
+    switch (arm_current_pl(env)) {
+    case 3:
+    case 2:
+        if (!hmc) {
+            return false;
+        }
+        break;
+    case 1:
+        if (extract32(pac, 0, 1) == 0) {
+            return false;
+        }
+        break;
+    case 0:
+        if (extract32(pac, 1, 1) == 0) {
+            return false;
+        }
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    wt = extract64(cr, 20, 1);
+    lbn = extract64(cr, 16, 4);
+
+    if (wt && !linked_bp_matches(cpu, lbn)) {
+        return false;
+    }
+
+    return true;
+}
+
+static bool check_watchpoints(ARMCPU *cpu)
+{
+    CPUARMState *env = &cpu->env;
+    int n;
+
+    /* If watchpoints are disabled globally or we can't take debug
+     * exceptions here then watchpoint firings are ignored.
+     */
+    if (extract32(env->cp15.mdscr_el1, 15, 1) == 0
+        || !arm_generate_debug_exceptions(env)) {
+        return false;
+    }
+
+    for (n = 0; n < ARRAY_SIZE(env->cpu_watchpoint); n++) {
+        if (bp_wp_matches(cpu, n, true)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool check_breakpoints(ARMCPU *cpu)
+{
+    CPUARMState *env = &cpu->env;
+    int n;
+
+    /* If breakpoints are disabled globally or we can't take debug
+     * exceptions here then breakpoint firings are ignored.
+     */
+    if (extract32(env->cp15.mdscr_el1, 15, 1) == 0
+        || !arm_generate_debug_exceptions(env)) {
+        return false;
+    }
+
+    for (n = 0; n < ARRAY_SIZE(env->cpu_breakpoint); n++) {
+        if (bp_wp_matches(cpu, n, false)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void arm_debug_excp_handler(CPUState *cs)
+{
+    /* Called by core code when a watchpoint or breakpoint fires;
+     * need to check which one and raise the appropriate exception.
+     */
+    ARMCPU *cpu = ARM_CPU(cs);
+    CPUARMState *env = &cpu->env;
+    CPUWatchpoint *wp_hit = cs->watchpoint_hit;
+
+    if (wp_hit) {
+        if (wp_hit->flags & BP_CPU) {
+            cs->watchpoint_hit = NULL;
+            if (check_watchpoints(cpu)) {
+                bool wnr = (wp_hit->flags & BP_WATCHPOINT_HIT_WRITE) != 0;
+                bool same_el = arm_debug_target_el(env) == arm_current_pl(env);
+
+                env->exception.syndrome = syn_watchpoint(same_el, 0, wnr);
+                if (extended_addresses_enabled(env)) {
+                    env->exception.fsr = (1 << 9) | 0x22;
+                } else {
+                    env->exception.fsr = 0x2;
+                }
+                env->exception.vaddress = wp_hit->hitaddr;
+                raise_exception(env, EXCP_DATA_ABORT);
+            } else {
+                cpu_resume_from_signal(cs, NULL);
+            }
+        }
+    } else {
+        if (check_breakpoints(cpu)) {
+            bool same_el = (arm_debug_target_el(env) == arm_current_pl(env));
+            env->exception.syndrome = syn_breakpoint(same_el);
+            if (extended_addresses_enabled(env)) {
+                env->exception.fsr = (1 << 9) | 0x22;
+            } else {
+                env->exception.fsr = 0x2;
+            }
+            /* FAR is UNKNOWN, so doesn't need setting */
+            raise_exception(env, EXCP_PREFETCH_ABORT);
+        }
+    }
 }
 
 /* ??? Flag setting arithmetic is awkward because we need to do comparisons.

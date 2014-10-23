@@ -51,6 +51,11 @@
 #define EXCP_EXCEPTION_EXIT  8   /* Return from v7M exception.  */
 #define EXCP_KERNEL_TRAP     9   /* Jumped to kernel code page.  */
 #define EXCP_STREX          10
+#define EXCP_HVC            11   /* HyperVisor Call */
+#define EXCP_HYP_TRAP       12
+#define EXCP_SMC            13   /* Secure Monitor Call */
+#define EXCP_VIRQ           14
+#define EXCP_VFIQ           15
 
 #define ARMV7M_EXCP_RESET   1
 #define ARMV7M_EXCP_NMI     2
@@ -65,6 +70,8 @@
 
 /* ARM-specific interrupt pending bits.  */
 #define CPU_INTERRUPT_FIQ   CPU_INTERRUPT_TGT_EXT_1
+#define CPU_INTERRUPT_VIRQ  CPU_INTERRUPT_TGT_EXT_2
+#define CPU_INTERRUPT_VFIQ  CPU_INTERRUPT_TGT_EXT_3
 
 /* The usual mapping for an AArch64 system register to its AArch32
  * counterpart is for the 32 bit world to have access to the lower
@@ -80,9 +87,11 @@
 #define offsetofhigh32(S, M) (offsetof(S, M) + sizeof(uint32_t))
 #endif
 
-/* Meanings of the ARMCPU object's two inbound GPIO lines */
+/* Meanings of the ARMCPU object's four inbound GPIO lines */
 #define ARM_CPU_IRQ 0
 #define ARM_CPU_FIQ 1
+#define ARM_CPU_VIRQ 2
+#define ARM_CPU_VFIQ 3
 
 typedef void ARMWriteCPFunc(void *opaque, int cp_info,
                             int srcreg, int operand, uint32_t value);
@@ -172,7 +181,6 @@ typedef struct CPUARMState {
         uint64_t c1_sys; /* System control register.  */
         uint64_t c1_coproc; /* Coprocessor access register.  */
         uint32_t c1_xscaleauxcr; /* XScale auxiliary control register.  */
-        uint32_t c1_scr; /* secure config register.  */
         uint64_t ttbr0_el1; /* MMU translation table base 0. */
         uint64_t ttbr1_el1; /* MMU translation table base 1. */
         uint64_t c2_control; /* MMU translation table base control.  */
@@ -184,6 +192,8 @@ typedef struct CPUARMState {
                         MPU write buffer control.  */
         uint32_t pmsav5_data_ap; /* PMSAv5 MPU data access permissions */
         uint32_t pmsav5_insn_ap; /* PMSAv5 MPU insn access permissions */
+        uint64_t hcr_el2; /* Hypervisor configuration register */
+        uint64_t scr_el3; /* Secure configuration register.  */
         uint32_t ifsr_el2; /* Fault status registers.  */
         uint64_t esr_el[4];
         uint32_t c6_region[8]; /* MPU base/size registers.  */
@@ -191,8 +201,8 @@ typedef struct CPUARMState {
         uint64_t par_el1;  /* Translation result. */
         uint32_t c9_insn; /* Cache lockdown registers.  */
         uint32_t c9_data;
-        uint32_t c9_pmcr; /* performance monitor control register */
-        uint32_t c9_pmcnten; /* perf monitor counter enables */
+        uint64_t c9_pmcr; /* performance monitor control register */
+        uint64_t c9_pmcnten; /* perf monitor counter enables */
         uint32_t c9_pmovsr; /* perf monitor overflow status */
         uint32_t c9_pmxevtyper; /* perf monitor event type */
         uint32_t c9_pmuserenr; /* perf monitor user enable */
@@ -220,10 +230,12 @@ typedef struct CPUARMState {
         uint64_t dbgbcr[16]; /* breakpoint control registers */
         uint64_t dbgwvr[16]; /* watchpoint value registers */
         uint64_t dbgwcr[16]; /* watchpoint control registers */
+        uint64_t mdscr_el1;
         /* If the counter is enabled, this stores the last time the counter
          * was reset. Otherwise it stores the counter value
          */
-        uint32_t c15_ccnt;
+        uint64_t c15_ccnt;
+        uint64_t pmccfiltr_el0; /* Performance Monitor Filter Register */
     } cp15;
 
     struct {
@@ -321,6 +333,9 @@ typedef struct CPUARMState {
     int eabi;
 #endif
 
+    struct CPUBreakpoint *cpu_breakpoint[16];
+    struct CPUWatchpoint *cpu_watchpoint[16];
+
     CPU_COMMON
 
     /* These fields after the common ones so they are preserved on reset.  */
@@ -350,6 +365,17 @@ int cpu_arm_signal_handler(int host_signum, void *pinfo,
                            void *puc);
 int arm_cpu_handle_mmu_fault(CPUState *cpu, vaddr address, int rw,
                              int mmu_idx);
+
+/**
+ * pmccntr_sync
+ * @env: CPUARMState
+ *
+ * Synchronises the counter in the PMCCNTR. This must always be called twice,
+ * once before any action that might affect the timer and again afterwards.
+ * The function is used to swap the state of the register if required.
+ * This only happens when not in user mode (!CONFIG_USER_ONLY)
+ */
+void pmccntr_sync(CPUARMState *env);
 
 /* SCTLR bit meanings. Several bits have been reused in newer
  * versions of the architecture; in that case we define constants
@@ -411,7 +437,13 @@ int arm_cpu_handle_mmu_fault(CPUState *cpu, vaddr address, int rw,
 #define CPSR_E (1U << 9)
 #define CPSR_IT_2_7 (0xfc00U)
 #define CPSR_GE (0xfU << 16)
-#define CPSR_RESERVED (0xfU << 20)
+#define CPSR_IL (1U << 20)
+/* Note that the RESERVED bits include bit 21, which is PSTATE_SS in
+ * an AArch64 SPSR but RES0 in AArch32 SPSR and CPSR. In QEMU we use
+ * env->uncached_cpsr bit 21 to store PSTATE.SS when executing in AArch32,
+ * where it is live state but not accessible to the AArch32 code.
+ */
+#define CPSR_RESERVED (0x7U << 21)
 #define CPSR_J (1U << 24)
 #define CPSR_IT_0_1 (3U << 25)
 #define CPSR_Q (1U << 27)
@@ -428,7 +460,9 @@ int arm_cpu_handle_mmu_fault(CPUState *cpu, vaddr address, int rw,
 /* Bits writable in user mode.  */
 #define CPSR_USER (CPSR_NZCV | CPSR_Q | CPSR_GE)
 /* Execution state bits.  MRS read as zero, MSR writes ignored.  */
-#define CPSR_EXEC (CPSR_T | CPSR_IT | CPSR_J)
+#define CPSR_EXEC (CPSR_T | CPSR_IT | CPSR_J | CPSR_IL)
+/* Mask of bits which may be set by exception return copying them from SPSR */
+#define CPSR_ERET_MASK (~CPSR_RESERVED)
 
 #define TTBCR_N      (7U << 0) /* TTBCR.EAE==0 */
 #define TTBCR_T0SZ   (7U << 0) /* TTBCR.EAE==1 */
@@ -474,6 +508,12 @@ int arm_cpu_handle_mmu_fault(CPUState *cpu, vaddr address, int rw,
 #define PSTATE_MODE_EL1h 5
 #define PSTATE_MODE_EL1t 4
 #define PSTATE_MODE_EL0t 0
+
+/* Map EL and handler into a PSTATE_MODE.  */
+static inline unsigned int aarch64_pstate_mode(unsigned int el, bool handler)
+{
+    return (el << 2) | handler;
+}
 
 /* Return the current PSTATE value. For the moment we don't support 32<->64 bit
  * interprocessing, so we don't attempt to sync with the cpsr state used by
@@ -541,6 +581,58 @@ static inline void xpsr_write(CPUARMState *env, uint32_t val, uint32_t mask)
         env->v7m.exception = val & 0x1ff;
     }
 }
+
+#define HCR_VM        (1ULL << 0)
+#define HCR_SWIO      (1ULL << 1)
+#define HCR_PTW       (1ULL << 2)
+#define HCR_FMO       (1ULL << 3)
+#define HCR_IMO       (1ULL << 4)
+#define HCR_AMO       (1ULL << 5)
+#define HCR_VF        (1ULL << 6)
+#define HCR_VI        (1ULL << 7)
+#define HCR_VSE       (1ULL << 8)
+#define HCR_FB        (1ULL << 9)
+#define HCR_BSU_MASK  (3ULL << 10)
+#define HCR_DC        (1ULL << 12)
+#define HCR_TWI       (1ULL << 13)
+#define HCR_TWE       (1ULL << 14)
+#define HCR_TID0      (1ULL << 15)
+#define HCR_TID1      (1ULL << 16)
+#define HCR_TID2      (1ULL << 17)
+#define HCR_TID3      (1ULL << 18)
+#define HCR_TSC       (1ULL << 19)
+#define HCR_TIDCP     (1ULL << 20)
+#define HCR_TACR      (1ULL << 21)
+#define HCR_TSW       (1ULL << 22)
+#define HCR_TPC       (1ULL << 23)
+#define HCR_TPU       (1ULL << 24)
+#define HCR_TTLB      (1ULL << 25)
+#define HCR_TVM       (1ULL << 26)
+#define HCR_TGE       (1ULL << 27)
+#define HCR_TDZ       (1ULL << 28)
+#define HCR_HCD       (1ULL << 29)
+#define HCR_TRVM      (1ULL << 30)
+#define HCR_RW        (1ULL << 31)
+#define HCR_CD        (1ULL << 32)
+#define HCR_ID        (1ULL << 33)
+#define HCR_MASK      ((1ULL << 34) - 1)
+
+#define SCR_NS                (1U << 0)
+#define SCR_IRQ               (1U << 1)
+#define SCR_FIQ               (1U << 2)
+#define SCR_EA                (1U << 3)
+#define SCR_FW                (1U << 4)
+#define SCR_AW                (1U << 5)
+#define SCR_NET               (1U << 6)
+#define SCR_SMD               (1U << 7)
+#define SCR_HCE               (1U << 8)
+#define SCR_SIF               (1U << 9)
+#define SCR_RW                (1U << 10)
+#define SCR_ST                (1U << 11)
+#define SCR_TWI               (1U << 12)
+#define SCR_TWE               (1U << 13)
+#define SCR_AARCH32_MASK      (0x3fff & ~(SCR_RW | SCR_ST))
+#define SCR_AARCH64_MASK      (0x3fff & ~SCR_NET)
 
 /* Return the current FPSCR value.  */
 uint32_t vfp_get_fpscr(CPUARMState *env);
@@ -678,6 +770,7 @@ static inline bool arm_el_is_aa64(CPUARMState *env, int el)
 }
 
 void arm_cpu_list(FILE *f, fprintf_function cpu_fprintf);
+unsigned int arm_excp_target_el(CPUState *cs, unsigned int excp_idx);
 
 /* Interface between CPU and Interrupt controller.  */
 void armv7m_nvic_set_pending(void *opaque, int irq);
@@ -1088,6 +1181,61 @@ bool write_cpustate_to_list(ARMCPU *cpu);
 #  define TARGET_VIRT_ADDR_SPACE_BITS 32
 #endif
 
+static inline bool arm_excp_unmasked(CPUState *cs, unsigned int excp_idx)
+{
+    CPUARMState *env = cs->env_ptr;
+    unsigned int cur_el = arm_current_pl(env);
+    unsigned int target_el = arm_excp_target_el(cs, excp_idx);
+    /* FIXME: Use actual secure state.  */
+    bool secure = false;
+    /* If in EL1/0, Physical IRQ routing to EL2 only happens from NS state.  */
+    bool irq_can_hyp = !secure && cur_el < 2 && target_el == 2;
+    /* ARMv7-M interrupt return works by loading a magic value
+     * into the PC.  On real hardware the load causes the
+     * return to occur.  The qemu implementation performs the
+     * jump normally, then does the exception return when the
+     * CPU tries to execute code at the magic address.
+     * This will cause the magic PC value to be pushed to
+     * the stack if an interrupt occurred at the wrong time.
+     * We avoid this by disabling interrupts when
+     * pc contains a magic address.
+     */
+    bool irq_unmasked = !(env->daif & PSTATE_I)
+                        && (!IS_M(env) || env->regs[15] < 0xfffffff0);
+
+    /* Don't take exceptions if they target a lower EL.  */
+    if (cur_el > target_el) {
+        return false;
+    }
+
+    switch (excp_idx) {
+    case EXCP_FIQ:
+        if (irq_can_hyp && (env->cp15.hcr_el2 & HCR_FMO)) {
+            return true;
+        }
+        return !(env->daif & PSTATE_F);
+    case EXCP_IRQ:
+        if (irq_can_hyp && (env->cp15.hcr_el2 & HCR_IMO)) {
+            return true;
+        }
+        return irq_unmasked;
+    case EXCP_VFIQ:
+        if (!secure && !(env->cp15.hcr_el2 & HCR_FMO)) {
+            /* VFIQs are only taken when hypervized and non-secure.  */
+            return false;
+        }
+        return !(env->daif & PSTATE_F);
+    case EXCP_VIRQ:
+        if (!secure && !(env->cp15.hcr_el2 & HCR_IMO)) {
+            /* VIRQs are only taken when hypervized and non-secure.  */
+            return false;
+        }
+        return irq_unmasked;
+    default:
+        g_assert_not_reached();
+    }
+}
+
 static inline CPUARMState *cpu_init(const char *cpu_model)
 {
     ARMCPU *cpu = cpu_arm_init(cpu_model);
@@ -1109,6 +1257,66 @@ static inline CPUARMState *cpu_init(const char *cpu_model)
 static inline int cpu_mmu_index (CPUARMState *env)
 {
     return arm_current_pl(env);
+}
+
+/* Return the Exception Level targeted by debug exceptions;
+ * currently always EL1 since we don't implement EL2 or EL3.
+ */
+static inline int arm_debug_target_el(CPUARMState *env)
+{
+    return 1;
+}
+
+static inline bool aa64_generate_debug_exceptions(CPUARMState *env)
+{
+    if (arm_current_pl(env) == arm_debug_target_el(env)) {
+        if ((extract32(env->cp15.mdscr_el1, 13, 1) == 0)
+            || (env->daif & PSTATE_D)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static inline bool aa32_generate_debug_exceptions(CPUARMState *env)
+{
+    if (arm_current_pl(env) == 0 && arm_el_is_aa64(env, 1)) {
+        return aa64_generate_debug_exceptions(env);
+    }
+    return arm_current_pl(env) != 2;
+}
+
+/* Return true if debugging exceptions are currently enabled.
+ * This corresponds to what in ARM ARM pseudocode would be
+ *    if UsingAArch32() then
+ *        return AArch32.GenerateDebugExceptions()
+ *    else
+ *        return AArch64.GenerateDebugExceptions()
+ * We choose to push the if() down into this function for clarity,
+ * since the pseudocode has it at all callsites except for the one in
+ * CheckSoftwareStep(), where it is elided because both branches would
+ * always return the same value.
+ *
+ * Parts of the pseudocode relating to EL2 and EL3 are omitted because we
+ * don't yet implement those exception levels or their associated trap bits.
+ */
+static inline bool arm_generate_debug_exceptions(CPUARMState *env)
+{
+    if (env->aarch64) {
+        return aa64_generate_debug_exceptions(env);
+    } else {
+        return aa32_generate_debug_exceptions(env);
+    }
+}
+
+/* Is single-stepping active? (Note that the "is EL_D AArch64?" check
+ * implicitly means this always returns false in pre-v8 CPUs.)
+ */
+static inline bool arm_singlestep_active(CPUARMState *env)
+{
+    return extract32(env->cp15.mdscr_el1, 0, 1)
+        && arm_el_is_aa64(env, arm_debug_target_el(env))
+        && arm_generate_debug_exceptions(env);
 }
 
 #include "exec/cpu-all.h"
@@ -1136,12 +1344,25 @@ static inline int cpu_mmu_index (CPUARMState *env)
 #define ARM_TBFLAG_BSWAP_CODE_MASK  (1 << ARM_TBFLAG_BSWAP_CODE_SHIFT)
 #define ARM_TBFLAG_CPACR_FPEN_SHIFT 17
 #define ARM_TBFLAG_CPACR_FPEN_MASK  (1 << ARM_TBFLAG_CPACR_FPEN_SHIFT)
+#define ARM_TBFLAG_SS_ACTIVE_SHIFT 18
+#define ARM_TBFLAG_SS_ACTIVE_MASK (1 << ARM_TBFLAG_SS_ACTIVE_SHIFT)
+#define ARM_TBFLAG_PSTATE_SS_SHIFT 19
+#define ARM_TBFLAG_PSTATE_SS_MASK (1 << ARM_TBFLAG_PSTATE_SS_SHIFT)
+/* We store the bottom two bits of the CPAR as TB flags and handle
+ * checks on the other bits at runtime
+ */
+#define ARM_TBFLAG_XSCALE_CPAR_SHIFT 20
+#define ARM_TBFLAG_XSCALE_CPAR_MASK (3 << ARM_TBFLAG_XSCALE_CPAR_SHIFT)
 
 /* Bit usage when in AArch64 state */
 #define ARM_TBFLAG_AA64_EL_SHIFT    0
 #define ARM_TBFLAG_AA64_EL_MASK     (0x3 << ARM_TBFLAG_AA64_EL_SHIFT)
 #define ARM_TBFLAG_AA64_FPEN_SHIFT  2
 #define ARM_TBFLAG_AA64_FPEN_MASK   (1 << ARM_TBFLAG_AA64_FPEN_SHIFT)
+#define ARM_TBFLAG_AA64_SS_ACTIVE_SHIFT 3
+#define ARM_TBFLAG_AA64_SS_ACTIVE_MASK (1 << ARM_TBFLAG_AA64_SS_ACTIVE_SHIFT)
+#define ARM_TBFLAG_AA64_PSTATE_SS_SHIFT 4
+#define ARM_TBFLAG_AA64_PSTATE_SS_MASK (1 << ARM_TBFLAG_AA64_PSTATE_SS_SHIFT)
 
 /* some convenience accessor macros */
 #define ARM_TBFLAG_AARCH64_STATE(F) \
@@ -1162,15 +1383,32 @@ static inline int cpu_mmu_index (CPUARMState *env)
     (((F) & ARM_TBFLAG_BSWAP_CODE_MASK) >> ARM_TBFLAG_BSWAP_CODE_SHIFT)
 #define ARM_TBFLAG_CPACR_FPEN(F) \
     (((F) & ARM_TBFLAG_CPACR_FPEN_MASK) >> ARM_TBFLAG_CPACR_FPEN_SHIFT)
+#define ARM_TBFLAG_SS_ACTIVE(F) \
+    (((F) & ARM_TBFLAG_SS_ACTIVE_MASK) >> ARM_TBFLAG_SS_ACTIVE_SHIFT)
+#define ARM_TBFLAG_PSTATE_SS(F) \
+    (((F) & ARM_TBFLAG_PSTATE_SS_MASK) >> ARM_TBFLAG_PSTATE_SS_SHIFT)
+#define ARM_TBFLAG_XSCALE_CPAR(F) \
+    (((F) & ARM_TBFLAG_XSCALE_CPAR_MASK) >> ARM_TBFLAG_XSCALE_CPAR_SHIFT)
 #define ARM_TBFLAG_AA64_EL(F) \
     (((F) & ARM_TBFLAG_AA64_EL_MASK) >> ARM_TBFLAG_AA64_EL_SHIFT)
 #define ARM_TBFLAG_AA64_FPEN(F) \
     (((F) & ARM_TBFLAG_AA64_FPEN_MASK) >> ARM_TBFLAG_AA64_FPEN_SHIFT)
+#define ARM_TBFLAG_AA64_SS_ACTIVE(F) \
+    (((F) & ARM_TBFLAG_AA64_SS_ACTIVE_MASK) >> ARM_TBFLAG_AA64_SS_ACTIVE_SHIFT)
+#define ARM_TBFLAG_AA64_PSTATE_SS(F) \
+    (((F) & ARM_TBFLAG_AA64_PSTATE_SS_MASK) >> ARM_TBFLAG_AA64_PSTATE_SS_SHIFT)
 
 static inline void cpu_get_tb_cpu_state(CPUARMState *env, target_ulong *pc,
                                         target_ulong *cs_base, int *flags)
 {
-    int fpen = extract32(env->cp15.c1_coproc, 20, 2);
+    int fpen;
+
+    if (arm_feature(env, ARM_FEATURE_V6)) {
+        fpen = extract32(env->cp15.c1_coproc, 20, 2);
+    } else {
+        /* CPACR doesn't exist before v6, so VFP is always accessible */
+        fpen = 3;
+    }
 
     if (is_a64(env)) {
         *pc = env->pc;
@@ -1178,6 +1416,19 @@ static inline void cpu_get_tb_cpu_state(CPUARMState *env, target_ulong *pc,
             | (arm_current_pl(env) << ARM_TBFLAG_AA64_EL_SHIFT);
         if (fpen == 3 || (fpen == 1 && arm_current_pl(env) != 0)) {
             *flags |= ARM_TBFLAG_AA64_FPEN_MASK;
+        }
+        /* The SS_ACTIVE and PSTATE_SS bits correspond to the state machine
+         * states defined in the ARM ARM for software singlestep:
+         *  SS_ACTIVE   PSTATE.SS   State
+         *     0            x       Inactive (the TB flag for SS is always 0)
+         *     1            0       Active-pending
+         *     1            1       Active-not-pending
+         */
+        if (arm_singlestep_active(env)) {
+            *flags |= ARM_TBFLAG_AA64_SS_ACTIVE_MASK;
+            if (env->pstate & PSTATE_SS) {
+                *flags |= ARM_TBFLAG_AA64_PSTATE_SS_MASK;
+            }
         }
     } else {
         int privmode;
@@ -1202,6 +1453,21 @@ static inline void cpu_get_tb_cpu_state(CPUARMState *env, target_ulong *pc,
         if (fpen == 3 || (fpen == 1 && arm_current_pl(env) != 0)) {
             *flags |= ARM_TBFLAG_CPACR_FPEN_MASK;
         }
+        /* The SS_ACTIVE and PSTATE_SS bits correspond to the state machine
+         * states defined in the ARM ARM for software singlestep:
+         *  SS_ACTIVE   PSTATE.SS   State
+         *     0            x       Inactive (the TB flag for SS is always 0)
+         *     1            0       Active-pending
+         *     1            1       Active-not-pending
+         */
+        if (arm_singlestep_active(env)) {
+            *flags |= ARM_TBFLAG_SS_ACTIVE_MASK;
+            if (env->uncached_cpsr & PSTATE_SS) {
+                *flags |= ARM_TBFLAG_PSTATE_SS_MASK;
+            }
+        }
+        *flags |= (extract32(env->cp15.c15_cpar, 0, 2)
+                   << ARM_TBFLAG_XSCALE_CPAR_SHIFT);
     }
 
     *cs_base = 0;

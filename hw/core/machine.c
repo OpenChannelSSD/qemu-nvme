@@ -24,6 +24,7 @@ static void machine_set_accel(Object *obj, const char *value, Error **errp)
 {
     MachineState *ms = MACHINE(obj);
 
+    g_free(ms->accel);
     ms->accel = g_strdup(value);
 }
 
@@ -79,6 +80,7 @@ static void machine_set_kernel(Object *obj, const char *value, Error **errp)
 {
     MachineState *ms = MACHINE(obj);
 
+    g_free(ms->kernel_filename);
     ms->kernel_filename = g_strdup(value);
 }
 
@@ -93,6 +95,7 @@ static void machine_set_initrd(Object *obj, const char *value, Error **errp)
 {
     MachineState *ms = MACHINE(obj);
 
+    g_free(ms->initrd_filename);
     ms->initrd_filename = g_strdup(value);
 }
 
@@ -107,6 +110,7 @@ static void machine_set_append(Object *obj, const char *value, Error **errp)
 {
     MachineState *ms = MACHINE(obj);
 
+    g_free(ms->kernel_cmdline);
     ms->kernel_cmdline = g_strdup(value);
 }
 
@@ -121,6 +125,7 @@ static void machine_set_dtb(Object *obj, const char *value, Error **errp)
 {
     MachineState *ms = MACHINE(obj);
 
+    g_free(ms->dtb);
     ms->dtb = g_strdup(value);
 }
 
@@ -135,6 +140,7 @@ static void machine_set_dumpdtb(Object *obj, const char *value, Error **errp)
 {
     MachineState *ms = MACHINE(obj);
 
+    g_free(ms->dumpdtb);
     ms->dumpdtb = g_strdup(value);
 }
 
@@ -176,6 +182,7 @@ static void machine_set_dt_compatible(Object *obj, const char *value, Error **er
 {
     MachineState *ms = MACHINE(obj);
 
+    g_free(ms->dt_compatible);
     ms->dt_compatible = g_strdup(value);
 }
 
@@ -232,7 +239,22 @@ static void machine_set_firmware(Object *obj, const char *value, Error **errp)
 {
     MachineState *ms = MACHINE(obj);
 
+    g_free(ms->firmware);
     ms->firmware = g_strdup(value);
+}
+
+static bool machine_get_iommu(Object *obj, Error **errp)
+{
+    MachineState *ms = MACHINE(obj);
+
+    return ms->iommu;
+}
+
+static void machine_set_iommu(Object *obj, bool value, Error **errp)
+{
+    MachineState *ms = MACHINE(obj);
+
+    ms->iommu = value;
 }
 
 static void machine_initfn(Object *obj)
@@ -270,10 +292,17 @@ static void machine_initfn(Object *obj)
                              machine_set_dump_guest_core,
                              NULL);
     object_property_add_bool(obj, "mem-merge",
-                             machine_get_mem_merge, machine_set_mem_merge, NULL);
-    object_property_add_bool(obj, "usb", machine_get_usb, machine_set_usb, NULL);
+                             machine_get_mem_merge,
+                             machine_set_mem_merge, NULL);
+    object_property_add_bool(obj, "usb",
+                             machine_get_usb,
+                             machine_set_usb, NULL);
     object_property_add_str(obj, "firmware",
-                            machine_get_firmware, machine_set_firmware, NULL);
+                            machine_get_firmware,
+                            machine_set_firmware, NULL);
+    object_property_add_bool(obj, "iommu",
+                             machine_get_iommu,
+                             machine_set_iommu, NULL);
 }
 
 static void machine_finalize(Object *obj)

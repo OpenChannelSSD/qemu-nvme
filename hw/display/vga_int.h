@@ -93,8 +93,10 @@ typedef struct VGACommonState {
     MemoryRegion vram_vbe;
     uint32_t vram_size;
     uint32_t vram_size_mb; /* property */
+    uint32_t vbe_size;
     uint32_t latch;
-    MemoryRegion *chain4_alias;
+    bool has_chain4_alias;
+    MemoryRegion chain4_alias;
     uint8_t sr_index;
     uint8_t sr[256];
     uint8_t gr_index;
@@ -148,15 +150,16 @@ typedef struct VGACommonState {
     uint32_t last_width, last_height; /* in chars or pixels */
     uint32_t last_scr_width, last_scr_height; /* in pixels */
     uint32_t last_depth; /* in bits */
+    bool last_byteswap;
     uint8_t cursor_start, cursor_end;
     bool cursor_visible_phase;
     int64_t cursor_blink_time;
     uint32_t cursor_offset;
-    unsigned int (*rgb_to_pixel)(unsigned int r,
-                                 unsigned int g, unsigned b);
     const GraphicHwOps *hw_ops;
     bool full_update_text;
     bool full_update_gfx;
+    bool big_endian_fb;
+    bool default_endian_fb;
     /* hardware mouse cursor support */
     uint32_t invalidated_y_table[VGA_MAX_HEIGHT / 32];
     void (*cursor_invalidate)(struct VGACommonState *s);

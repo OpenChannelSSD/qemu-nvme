@@ -28,6 +28,7 @@
 #include <hw/sysbus.h>
 
 #include "monitor/monitor.h"
+#include "sysemu/block-backend.h"
 #include "sysemu/dma.h"
 #include "internal.h"
 #include <hw/ide/pci.h>
@@ -78,14 +79,13 @@ static uint32_t  ahci_port_read(AHCIState *s, int port, int offset)
         val = pr->cmd;
         break;
     case PORT_TFDATA:
-        val = ((uint16_t)s->dev[port].port.ifs[0].error << 8) |
-              s->dev[port].port.ifs[0].status;
+        val = pr->tfdata;
         break;
     case PORT_SIG:
         val = pr->sig;
         break;
     case PORT_SCR_STAT:
-        if (s->dev[port].port.ifs[0].bs) {
+        if (s->dev[port].port.ifs[0].blk) {
             val = SATA_SCR_SSTATUS_DET_DEV_PRESENT_PHY_UP |
                   SATA_SCR_SSTATUS_SPD_GEN1 | SATA_SCR_SSTATUS_IPM_ACTIVE;
         } else {
@@ -251,14 +251,13 @@ static void  ahci_port_write(AHCIState *s, int port, int offset, uint32_t val)
             check_cmd(s, port);
             break;
         case PORT_TFDATA:
-            s->dev[port].port.ifs[0].error = (val >> 8) & 0xff;
-            s->dev[port].port.ifs[0].status = val & 0xff;
+            /* Read Only. */
             break;
         case PORT_SIG:
-            pr->sig = val;
+            /* Read Only */
             break;
         case PORT_SCR_STAT:
-            pr->scr_stat = val;
+            /* Read Only */
             break;
         case PORT_SCR_CTL:
             if (((pr->scr_ctl & AHCI_SCR_SCTL_DET) == 1) &&
@@ -497,11 +496,13 @@ static void ahci_reset_port(AHCIState *s, int port)
     pr->scr_stat = 0;
     pr->scr_err = 0;
     pr->scr_act = 0;
+    pr->tfdata = 0x7F;
+    pr->sig = 0xFFFFFFFF;
     d->busy_slot = -1;
     d->init_d2h_sent = false;
 
     ide_state = &s->dev[port].port.ifs[0];
-    if (!ide_state->bs) {
+    if (!ide_state->blk) {
         return;
     }
 
@@ -513,11 +514,11 @@ static void ahci_reset_port(AHCIState *s, int port)
         }
 
         if (ncq_tfs->aiocb) {
-            bdrv_aio_cancel(ncq_tfs->aiocb);
+            blk_aio_cancel(ncq_tfs->aiocb);
             ncq_tfs->aiocb = NULL;
         }
 
-        /* Maybe we just finished the request thanks to bdrv_aio_cancel() */
+        /* Maybe we just finished the request thanks to blk_aio_cancel() */
         if (!ncq_tfs->used) {
             continue;
         }
@@ -527,17 +528,17 @@ static void ahci_reset_port(AHCIState *s, int port)
     }
 
     s->dev[port].port_state = STATE_RUN;
-    if (!ide_state->bs) {
-        s->dev[port].port_regs.sig = 0;
+    if (!ide_state->blk) {
+        pr->sig = 0;
         ide_state->status = SEEK_STAT | WRERR_STAT;
     } else if (ide_state->drive_kind == IDE_CD) {
-        s->dev[port].port_regs.sig = SATA_SIGNATURE_CDROM;
+        pr->sig = SATA_SIGNATURE_CDROM;
         ide_state->lcyl = 0x14;
         ide_state->hcyl = 0xeb;
         DPRINTF(port, "set lcyl = %d\n", ide_state->lcyl);
         ide_state->status = SEEK_STAT | WRERR_STAT | READY_STAT;
     } else {
-        s->dev[port].port_regs.sig = SATA_SIGNATURE_DISK;
+        pr->sig = SATA_SIGNATURE_DISK;
         ide_state->status = SEEK_STAT | WRERR_STAT;
     }
 
@@ -563,7 +564,8 @@ static void debug_print_fis(uint8_t *fis, int cmd_len)
 
 static void ahci_write_fis_sdb(AHCIState *s, int port, uint32_t finished)
 {
-    AHCIPortRegs *pr = &s->dev[port].port_regs;
+    AHCIDevice *ad = &s->dev[port];
+    AHCIPortRegs *pr = &ad->port_regs;
     IDEState *ide_state;
     uint8_t *sdb_fis;
 
@@ -572,8 +574,8 @@ static void ahci_write_fis_sdb(AHCIState *s, int port, uint32_t finished)
         return;
     }
 
-    sdb_fis = &s->dev[port].res_fis[RES_FIS_SDBFIS];
-    ide_state = &s->dev[port].port.ifs[0];
+    sdb_fis = &ad->res_fis[RES_FIS_SDBFIS];
+    ide_state = &ad->port.ifs[0];
 
     /* clear memory */
     *(uint32_t*)sdb_fis = 0;
@@ -582,9 +584,14 @@ static void ahci_write_fis_sdb(AHCIState *s, int port, uint32_t finished)
     sdb_fis[0] = ide_state->error;
     sdb_fis[2] = ide_state->status & 0x77;
     s->dev[port].finished |= finished;
-    *(uint32_t*)(sdb_fis + 4) = cpu_to_le32(s->dev[port].finished);
+    *(uint32_t*)(sdb_fis + 4) = cpu_to_le32(ad->finished);
 
-    ahci_trigger_irq(s, &s->dev[port], PORT_IRQ_SDB_FIS);
+    /* Update shadow registers (except BSY 0x80 and DRQ 0x08) */
+    pr->tfdata = (ad->port.ifs[0].error << 8) |
+        (ad->port.ifs[0].status & 0x77) |
+        (pr->tfdata & 0x88);
+
+    ahci_trigger_irq(s, ad, PORT_IRQ_SDB_FIS);
 }
 
 static void ahci_write_fis_pio(AHCIDevice *ad, uint16_t len)
@@ -642,6 +649,10 @@ static void ahci_write_fis_pio(AHCIDevice *ad, uint16_t len)
     pio_fis[18] = 0;
     pio_fis[19] = 0;
 
+    /* Update shadow registers: */
+    pr->tfdata = (ad->port.ifs[0].error << 8) |
+        ad->port.ifs[0].status;
+
     if (pio_fis[2] & ERR_STAT) {
         ahci_trigger_irq(ad->hba, ad, PORT_IRQ_TF_ERR);
     }
@@ -692,6 +703,10 @@ static void ahci_write_fis_d2h(AHCIDevice *ad, uint8_t *cmd_fis)
     for (i = 14; i < 20; i++) {
         d2h_fis[i] = 0;
     }
+
+    /* Update shadow registers: */
+    pr->tfdata = (ad->port.ifs[0].error << 8) |
+        ad->port.ifs[0].status;
 
     if (d2h_fis[2] & ERR_STAT) {
         ahci_trigger_irq(ad->hba, ad, PORT_IRQ_TF_ERR);
@@ -791,6 +806,9 @@ static void ncq_cb(void *opaque, int ret)
     NCQTransferState *ncq_tfs = (NCQTransferState *)opaque;
     IDEState *ide_state = &ncq_tfs->drive->port.ifs[0];
 
+    if (ret == -ECANCELED) {
+        return;
+    }
     /* Clear bit for this tag in SActive */
     ncq_tfs->drive->port_regs.scr_act &= ~(1 << ncq_tfs->tag);
 
@@ -809,7 +827,8 @@ static void ncq_cb(void *opaque, int ret)
     DPRINTF(ncq_tfs->drive->port_no, "NCQ transfer tag %d finished\n",
             ncq_tfs->tag);
 
-    bdrv_acct_done(ncq_tfs->drive->port.ifs[0].bs, &ncq_tfs->acct);
+    block_acct_done(blk_get_stats(ncq_tfs->drive->port.ifs[0].blk),
+                    &ncq_tfs->acct);
     qemu_sglist_destroy(&ncq_tfs->sglist);
     ncq_tfs->used = 0;
 }
@@ -859,11 +878,11 @@ static void process_ncq_command(AHCIState *s, int port, uint8_t *cmd_fis,
             DPRINTF(port, "tag %d aio read %"PRId64"\n",
                     ncq_tfs->tag, ncq_tfs->lba);
 
-            dma_acct_start(ncq_tfs->drive->port.ifs[0].bs, &ncq_tfs->acct,
-                           &ncq_tfs->sglist, BDRV_ACCT_READ);
-            ncq_tfs->aiocb = dma_bdrv_read(ncq_tfs->drive->port.ifs[0].bs,
-                                           &ncq_tfs->sglist, ncq_tfs->lba,
-                                           ncq_cb, ncq_tfs);
+            dma_acct_start(ncq_tfs->drive->port.ifs[0].blk, &ncq_tfs->acct,
+                           &ncq_tfs->sglist, BLOCK_ACCT_READ);
+            ncq_tfs->aiocb = dma_blk_read(ncq_tfs->drive->port.ifs[0].blk,
+                                          &ncq_tfs->sglist, ncq_tfs->lba,
+                                          ncq_cb, ncq_tfs);
             break;
         case WRITE_FPDMA_QUEUED:
             DPRINTF(port, "NCQ writing %d sectors to LBA %"PRId64", tag %d\n",
@@ -872,11 +891,11 @@ static void process_ncq_command(AHCIState *s, int port, uint8_t *cmd_fis,
             DPRINTF(port, "tag %d aio write %"PRId64"\n",
                     ncq_tfs->tag, ncq_tfs->lba);
 
-            dma_acct_start(ncq_tfs->drive->port.ifs[0].bs, &ncq_tfs->acct,
-                           &ncq_tfs->sglist, BDRV_ACCT_WRITE);
-            ncq_tfs->aiocb = dma_bdrv_write(ncq_tfs->drive->port.ifs[0].bs,
-                                            &ncq_tfs->sglist, ncq_tfs->lba,
-                                            ncq_cb, ncq_tfs);
+            dma_acct_start(ncq_tfs->drive->port.ifs[0].blk, &ncq_tfs->acct,
+                           &ncq_tfs->sglist, BLOCK_ACCT_WRITE);
+            ncq_tfs->aiocb = dma_blk_write(ncq_tfs->drive->port.ifs[0].blk,
+                                           &ncq_tfs->sglist, ncq_tfs->lba,
+                                           ncq_cb, ncq_tfs);
             break;
         default:
             DPRINTF(port, "error: tried to process non-NCQ command as NCQ\n");
@@ -925,7 +944,7 @@ static int handle_cmd(AHCIState *s, int port, int slot)
     /* The device we are working for */
     ide_state = &s->dev[port].port.ifs[0];
 
-    if (!ide_state->bs) {
+    if (!ide_state->blk) {
         DPRINTF(port, "error: guest accessed unused port");
         goto out;
     }
@@ -1104,7 +1123,7 @@ out:
 }
 
 static void ahci_start_dma(IDEDMA *dma, IDEState *s,
-                           BlockDriverCompletionFunc *dma_cb)
+                           BlockCompletionFunc *dma_cb)
 {
 #ifdef DEBUG_AHCI
     AHCIDevice *ad = DO_UPCAST(AHCIDevice, dma, dma);
@@ -1203,7 +1222,7 @@ void ahci_init(AHCIState *s, DeviceState *qdev, AddressSpace *as, int ports)
 
     s->as = as;
     s->ports = ports;
-    s->dev = g_malloc0(sizeof(AHCIDevice) * ports);
+    s->dev = g_new0(AHCIDevice, ports);
     ahci_reg_init(s);
     /* XXX BAR size should be 1k, but that breaks, so bump it to 4k for now */
     memory_region_init_io(&s->mem, OBJECT(qdev), &ahci_mem_ops, s,
@@ -1228,8 +1247,6 @@ void ahci_init(AHCIState *s, DeviceState *qdev, AddressSpace *as, int ports)
 
 void ahci_uninit(AHCIState *s)
 {
-    memory_region_destroy(&s->mem);
-    memory_region_destroy(&s->idp);
     g_free(s->dev);
 }
 
@@ -1403,3 +1420,18 @@ static void sysbus_ahci_register_types(void)
 }
 
 type_init(sysbus_ahci_register_types)
+
+void ahci_ide_create_devs(PCIDevice *dev, DriveInfo **hd)
+{
+    AHCIPCIState *d = ICH_AHCI(dev);
+    AHCIState *ahci = &d->ahci;
+    int i;
+
+    for (i = 0; i < ahci->ports; i++) {
+        if (hd[i] == NULL) {
+            continue;
+        }
+        ide_create_drive(&ahci->dev[i].port, 0, hd[i]);
+    }
+
+}

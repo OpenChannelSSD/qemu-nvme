@@ -369,6 +369,7 @@ static void object_property_del_all(Object *obj)
 
         g_free(prop->name);
         g_free(prop->type);
+        g_free(prop->description);
         g_free(prop);
     }
 }
@@ -387,19 +388,9 @@ static void object_property_del_child(Object *obj, Object *child, Error **errp)
 
 void object_unparent(Object *obj)
 {
-    if (!obj->parent) {
-        return;
-    }
-
-    object_ref(obj);
-    if (obj->class->unparent) {
-        (obj->class->unparent)(obj);
-    }
     if (obj->parent) {
         object_property_del_child(obj->parent, obj, NULL);
-        obj->parent = NULL;
     }
-    object_unref(obj);
 }
 
 static void object_deinit(Object *obj, TypeImpl *type)
@@ -418,8 +409,8 @@ static void object_finalize(void *data)
     Object *obj = data;
     TypeImpl *ti = obj->class->type;
 
-    object_deinit(obj, ti);
     object_property_del_all(obj);
+    object_deinit(obj, ti);
 
     g_assert(obj->ref == 0);
     if (obj->free) {
@@ -678,10 +669,10 @@ void object_class_foreach(void (*fn)(ObjectClass *klass, void *opaque),
 int object_child_foreach(Object *obj, int (*fn)(Object *child, void *opaque),
                          void *opaque)
 {
-    ObjectProperty *prop;
+    ObjectProperty *prop, *next;
     int ret = 0;
 
-    QTAILQ_FOREACH(prop, &obj->properties, node) {
+    QTAILQ_FOREACH_SAFE(prop, &obj->properties, node, next) {
         if (object_property_is_child(prop)) {
             ret = fn(prop->opaque, opaque);
             if (ret != 0) {
@@ -738,6 +729,27 @@ object_property_add(Object *obj, const char *name, const char *type,
                     void *opaque, Error **errp)
 {
     ObjectProperty *prop;
+    size_t name_len = strlen(name);
+
+    if (name_len >= 3 && !memcmp(name + name_len - 3, "[*]", 4)) {
+        int i;
+        ObjectProperty *ret;
+        char *name_no_array = g_strdup(name);
+
+        name_no_array[name_len - 3] = '\0';
+        for (i = 0; ; ++i) {
+            char *full_name = g_strdup_printf("%s[%d]", name_no_array, i);
+
+            ret = object_property_add(obj, full_name, type, get, set,
+                                      release, opaque, NULL);
+            g_free(full_name);
+            if (ret) {
+                break;
+            }
+        }
+        g_free(name_no_array);
+        return ret;
+    }
 
     QTAILQ_FOREACH(prop, &obj->properties, node) {
         if (strcmp(prop->name, name) == 0) {
@@ -792,6 +804,7 @@ void object_property_del(Object *obj, const char *name, Error **errp)
 
     g_free(prop->name);
     g_free(prop->type);
+    g_free(prop->description);
     g_free(prop);
 }
 
@@ -948,14 +961,18 @@ int object_property_get_enum(Object *obj, const char *name,
 {
     StringOutputVisitor *sov;
     StringInputVisitor *siv;
+    char *str;
     int ret;
 
     sov = string_output_visitor_new(false);
     object_property_get(obj, string_output_get_visitor(sov), name, errp);
-    siv = string_input_visitor_new(string_output_get_string(sov));
+    str = string_output_get_string(sov);
+    siv = string_input_visitor_new(str);
     string_output_visitor_cleanup(sov);
     visit_type_enum(string_input_get_visitor(siv),
                     &ret, strings, NULL, name, errp);
+
+    g_free(str);
     string_input_visitor_cleanup(siv);
 
     return ret;
@@ -966,13 +983,17 @@ void object_property_get_uint16List(Object *obj, const char *name,
 {
     StringOutputVisitor *ov;
     StringInputVisitor *iv;
+    char *str;
 
     ov = string_output_visitor_new(false);
     object_property_get(obj, string_output_get_visitor(ov),
                         name, errp);
-    iv = string_input_visitor_new(string_output_get_string(ov));
+    str = string_output_get_string(ov);
+    iv = string_input_visitor_new(str);
     visit_type_uint16List(string_input_get_visitor(iv),
                           list, NULL, errp);
+
+    g_free(str);
     string_output_visitor_cleanup(ov);
     string_input_visitor_cleanup(iv);
 }
@@ -991,11 +1012,19 @@ char *object_property_print(Object *obj, const char *name, bool human,
                             Error **errp)
 {
     StringOutputVisitor *mo;
-    char *string;
+    char *string = NULL;
+    Error *local_err = NULL;
 
     mo = string_output_visitor_new(human);
-    object_property_get(obj, string_output_get_visitor(mo), name, errp);
+    object_property_get(obj, string_output_get_visitor(mo), name, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        goto out;
+    }
+
     string = string_output_get_string(mo);
+
+out:
     string_output_visitor_cleanup(mo);
     return string;
 }
@@ -1042,6 +1071,10 @@ static void object_finalize_child_property(Object *obj, const char *name,
 {
     Object *child = opaque;
 
+    if (child->class->unparent) {
+        (child->class->unparent)(child);
+    }
+    child->parent = NULL;
     object_unref(child);
 }
 
@@ -1611,6 +1644,7 @@ void object_property_add_alias(Object *obj, const char *name,
     ObjectProperty *op;
     ObjectProperty *target_prop;
     gchar *prop_type;
+    Error *local_err = NULL;
 
     target_prop = object_property_find(target_obj, target_name, errp);
     if (!target_prop) {
@@ -1632,10 +1666,34 @@ void object_property_add_alias(Object *obj, const char *name,
                              property_get_alias,
                              property_set_alias,
                              property_release_alias,
-                             prop, errp);
+                             prop, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        g_free(prop);
+        goto out;
+    }
     op->resolve = property_resolve_alias;
 
+    object_property_set_description(obj, name,
+                                    target_prop->description,
+                                    &error_abort);
+
+out:
     g_free(prop_type);
+}
+
+void object_property_set_description(Object *obj, const char *name,
+                                     const char *description, Error **errp)
+{
+    ObjectProperty *op;
+
+    op = object_property_find(obj, name, errp);
+    if (!op) {
+        return;
+    }
+
+    g_free(op->description);
+    op->description = g_strdup(description);
 }
 
 static void object_instance_init(Object *obj)

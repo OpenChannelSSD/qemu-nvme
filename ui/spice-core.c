@@ -733,7 +733,7 @@ void qemu_spice_init(void)
                              tls_ciphers);
     }
     if (password) {
-        spice_server_set_ticket(spice_server, password, 0, 0, 0);
+        qemu_spice_set_passwd(password, false, false);
     }
     if (qemu_opt_get_bool(opts, "sasl", 0)) {
         if (spice_server_set_sasl_appname(spice_server, "qemu") == -1 ||
@@ -853,7 +853,6 @@ int qemu_spice_add_interface(SpiceBaseInstance *sin)
 }
 
 static GSList *spice_consoles;
-static int display_id;
 
 bool qemu_spice_have_display_interface(QemuConsole *con)
 {
@@ -868,7 +867,7 @@ int qemu_spice_add_display_interface(QXLInstance *qxlin, QemuConsole *con)
     if (g_slist_find(spice_consoles, con)) {
         return -1;
     }
-    qxlin->id = display_id++;
+    qxlin->id = qemu_console_get_index(con);
     spice_consoles = g_slist_append(spice_consoles, con);
     return qemu_spice_add_interface(&qxlin->base);
 }

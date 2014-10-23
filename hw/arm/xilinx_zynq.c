@@ -22,7 +22,7 @@
 #include "sysemu/sysemu.h"
 #include "hw/boards.h"
 #include "hw/block/flash.h"
-#include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "hw/loader.h"
 #include "hw/ssi.h"
 #include "qemu/error-report.h"
@@ -149,12 +149,14 @@ static void zynq_init(MachineState *machine)
     }
 
     /* DDR remapped to address zero.  */
-    memory_region_init_ram(ext_ram, NULL, "zynq.ext_ram", ram_size);
+    memory_region_init_ram(ext_ram, NULL, "zynq.ext_ram", ram_size,
+                           &error_abort);
     vmstate_register_ram_global(ext_ram);
     memory_region_add_subregion(address_space_mem, 0, ext_ram);
 
     /* 256K of on-chip memory */
-    memory_region_init_ram(ocm_ram, NULL, "zynq.ocm_ram", 256 << 10);
+    memory_region_init_ram(ocm_ram, NULL, "zynq.ocm_ram", 256 << 10,
+                           &error_abort);
     vmstate_register_ram_global(ocm_ram);
     memory_region_add_subregion(address_space_mem, 0xFFFC0000, ocm_ram);
 
@@ -162,7 +164,8 @@ static void zynq_init(MachineState *machine)
 
     /* AMD */
     pflash_cfi02_register(0xe2000000, NULL, "zynq.pflash", FLASH_SIZE,
-                          dinfo ? dinfo->bdrv : NULL, FLASH_SECTOR_SIZE,
+                          dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
+                          FLASH_SECTOR_SIZE,
                           FLASH_SIZE/FLASH_SECTOR_SIZE, 1,
                           1, 0x0066, 0x0022, 0x0000, 0x0000, 0x0555, 0x2aa,
                               0);

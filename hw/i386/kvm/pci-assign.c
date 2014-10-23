@@ -697,8 +697,6 @@ static void free_assigned_device(AssignedDevice *dev)
             if (region->u.r_baseport) {
                 memory_region_del_subregion(&region->container,
                                             &region->real_iomem);
-                memory_region_destroy(&region->real_iomem);
-                memory_region_destroy(&region->container);
             }
         } else if (pci_region->type & IORESOURCE_MEM) {
             if (region->u.r_virtbase) {
@@ -712,9 +710,6 @@ static void free_assigned_device(AssignedDevice *dev)
                     memory_region_del_subregion(&region->container,
                                                 &dev->mmio);
                 }
-
-                memory_region_destroy(&region->real_iomem);
-                memory_region_destroy(&region->container);
                 if (munmap(region->u.r_virtbase,
                            (pci_region->size + 0xFFF) & 0xFFFFF000)) {
                     error_report("Failed to unmap assigned device region: %s",
@@ -1680,8 +1675,6 @@ static void assigned_dev_unregister_msix_mmio(AssignedDevice *dev)
         return;
     }
 
-    memory_region_destroy(&dev->mmio);
-
     if (munmap(dev->msix_table, MSIX_PAGE_SIZE) == -1) {
         error_report("error unmapping msix_table! %s", strerror(errno));
     }
@@ -1832,8 +1825,6 @@ static int assigned_initfn(struct PCIDevice *pci_dev)
 
     assigned_dev_load_option_rom(dev);
 
-    add_boot_device_path(dev->bootindex, &pci_dev->qdev, NULL);
-
     return 0;
 
 assigned_out:
@@ -1857,13 +1848,22 @@ static void assigned_exitfn(struct PCIDevice *pci_dev)
     free_assigned_device(dev);
 }
 
+static void assigned_dev_instance_init(Object *obj)
+{
+    PCIDevice *pci_dev = PCI_DEVICE(obj);
+    AssignedDevice *d = DO_UPCAST(AssignedDevice, dev, PCI_DEVICE(obj));
+
+    device_add_bootindex_property(obj, &d->bootindex,
+                                  "bootindex", NULL,
+                                  &pci_dev->qdev, NULL);
+}
+
 static Property assigned_dev_properties[] = {
     DEFINE_PROP_PCI_HOST_DEVADDR("host", AssignedDevice, host),
     DEFINE_PROP_BIT("prefer_msi", AssignedDevice, features,
                     ASSIGNED_DEVICE_PREFER_MSI_BIT, false),
     DEFINE_PROP_BIT("share_intx", AssignedDevice, features,
                     ASSIGNED_DEVICE_SHARE_INTX_BIT, true),
-    DEFINE_PROP_INT32("bootindex", AssignedDevice, bootindex, -1),
     DEFINE_PROP_STRING("configfd", AssignedDevice, configfd_name),
     DEFINE_PROP_END_OF_LIST(),
 };
@@ -1889,6 +1889,7 @@ static const TypeInfo assign_info = {
     .parent             = TYPE_PCI_DEVICE,
     .instance_size      = sizeof(AssignedDevice),
     .class_init         = assign_class_init,
+    .instance_init      = assigned_dev_instance_init,
 };
 
 static void assign_register_types(void)
@@ -1943,7 +1944,8 @@ static void assigned_dev_load_option_rom(AssignedDevice *dev)
 
     snprintf(name, sizeof(name), "%s.rom",
             object_get_typename(OBJECT(dev)));
-    memory_region_init_ram(&dev->dev.rom, OBJECT(dev), name, st.st_size);
+    memory_region_init_ram(&dev->dev.rom, OBJECT(dev), name, st.st_size,
+                           &error_abort);
     vmstate_register_ram(&dev->dev.rom, &dev->dev.qdev);
     ptr = memory_region_get_ram_ptr(&dev->dev.rom);
     memset(ptr, 0xff, st.st_size);
@@ -1953,7 +1955,6 @@ static void assigned_dev_load_option_rom(AssignedDevice *dev)
         error_printf("Device option ROM contents are probably invalid "
                      "(check dmesg).\nSkip option ROM probe with rombar=0, "
                      "or load from file with romfile=\n");
-        memory_region_destroy(&dev->dev.rom);
         goto close_rom;
     }
 
