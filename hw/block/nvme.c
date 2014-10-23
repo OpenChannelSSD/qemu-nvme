@@ -548,6 +548,13 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
 static void nvme_discard_cb(void *opaque, int ret)
 {
+    NvmeRequest *req = opaque;
+
+    if (!ret) {
+        req->status = NVME_SUCCESS;
+    } else {
+        req->status = NVME_INTERNAL_DEV_ERROR;
+    }
 }
 
 static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -574,6 +581,7 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
+        req->status = NVME_SUCCESS;
         for (i = 0; i < nr; i++) {
             slba = le64_to_cpu(range[i].slba);
             nlb = le32_to_cpu(range[i].nlb);
@@ -583,8 +591,13 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 return NVME_LBA_RANGE | NVME_DNR;
             }
 
-            blk_aio_discard(n->conf.blk, ns->start_block + (slba << data_shift),
-                    nlb << data_shift, nvme_discard_cb, NULL) < 0;
+            req->aiocb = blk_aio_discard(n->conf.blk,
+                    ns->start_block + (slba << data_shift),
+                    nlb << data_shift, nvme_discard_cb, req);
+            aio_poll(blk_get_aio_context(n->conf.blk), true);
+
+            if (req->status != NVME_SUCCESS)
+                return req->status;
             bitmap_clear(ns->util, slba, nlb);
         }
     }
