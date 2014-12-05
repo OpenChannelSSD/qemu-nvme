@@ -1830,7 +1830,7 @@ static void nvme_init_namespaces(NvmeCtrl *n)
         id_ns->dps = n->dps;
 
         for (j = 0; j < n->nlbaf; j++) {
-            id_ns->lbaf[j + (n->nlbaf)].ds = BDRV_SECTOR_BITS + j;
+            id_ns->lbaf[j].ds = BDRV_SECTOR_BITS + j;
         }
 
         lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
@@ -1839,7 +1839,7 @@ static void nvme_init_namespaces(NvmeCtrl *n)
 
         ns->id = i + 1;
         ns->ctrl = n;
-        ns->start_block = n->ns_size >> BDRV_SECTOR_BITS;
+        ns->start_block = i * n->ns_size >> BDRV_SECTOR_BITS;
         ns->util = bitmap_new(blks);
         ns->uncorrectable = bitmap_new(blks);
     }
