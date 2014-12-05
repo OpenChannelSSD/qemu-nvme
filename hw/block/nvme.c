@@ -56,6 +56,7 @@
  *  meta=<int>       : Meta-data size, Default:0
  *  oncs=<oncs>      : Optional NVMe command support, Default:DSM
  *  oacs=<oacs>      : Optional Admin command support, Default:Format
+ *  cmb=<cmb>        : Controller Memory Buffer, Default:0
  *
  * The logical block formats all start at 512 byte blocks and double for the
  * next index. If meta-data is non-zero, half the logical block formats will
@@ -91,6 +92,11 @@
  * interface.
  */
 
+/**
+ * Controller Memory Buffer: For now, you can only turn it on or off, but can't
+ * tune the exact settings.
+ */
+
 #include <block/block_int.h>
 #include <block/qapi.h>
 #include <exec/memory.h>
@@ -119,6 +125,27 @@
 #define NVME_OP_ABORTED         0xff
 
 static void nvme_process_sq(void *opaque);
+
+static void nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size)
+{
+    if (n->cmb && addr >= n->ctrl_mem.addr &&
+                addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size))) {
+        memcpy(buf, (void *)&n->cmbuf[addr - n->ctrl_mem.addr], size);
+    } else {
+        pci_dma_read(&n->parent_obj, addr, buf, size);
+    }
+}
+
+static void nvme_addr_write(NvmeCtrl *n, hwaddr addr, void *buf, int size)
+{
+    if (n->cmb && addr >= n->ctrl_mem.addr &&
+                addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size))) {
+        memcpy((void *)&n->cmbuf[addr - n->ctrl_mem.addr], buf, size);
+        return;
+    } else {
+        pci_dma_write(&n->parent_obj, addr, buf, size);
+    }
+}
 
 static int nvme_check_sqid(NvmeCtrl *n, uint16_t sqid)
 {
@@ -154,8 +181,7 @@ static void nvme_inc_sq_head(NvmeSQueue *sq)
 static void nvme_update_cq_head(NvmeCQueue *cq)
 {
     if (cq->db_addr) {
-        pci_dma_read(&cq->ctrl->parent_obj, cq->db_addr, &cq->head,
-            sizeof(cq->head));
+        nvme_addr_read(cq->ctrl, cq->db_addr, &cq->head, sizeof(cq->head));
     }
 }
 
@@ -203,8 +229,7 @@ static uint64_t *nvme_setup_discontig(NvmeCtrl *n, uint64_t prp_addr,
                 g_free(prp_list);
                 return NULL;
             }
-            pci_dma_write(&n->parent_obj, prp_addr, (uint8_t *)&prp,
-                sizeof(prp));
+            nvme_addr_write(n, prp_addr, (uint8_t *)&prp, sizeof(prp));
             prp_addr = le64_to_cpu(prp[prps_per_page - 1]);
         }
         prp_list[i] = le64_to_cpu(prp[i % prps_per_page]);
@@ -251,7 +276,7 @@ static uint16_t nvme_map_prp(QEMUSGList *qsg, uint64_t prp1, uint64_t prp2,
 
             nents = (len + n->page_size - 1) >> n->page_bits;
             prp_trans = MIN(n->max_prp_ents, nents) * sizeof(uint64_t);
-            pci_dma_read(&n->parent_obj, prp2, (void *)prp_list, prp_trans);
+            nvme_addr_read(n, prp2, (void *)prp_list, prp_trans);
             while (len != 0) {
                 uint64_t prp_ent = le64_to_cpu(prp_list[i]);
 
@@ -263,7 +288,7 @@ static uint16_t nvme_map_prp(QEMUSGList *qsg, uint64_t prp1, uint64_t prp2,
                     i = 0;
                     nents = (len + n->page_size - 1) >> n->page_bits;
                     prp_trans = MIN(n->max_prp_ents, nents) * sizeof(uint64_t);
-                    pci_dma_read(&n->parent_obj, prp_ent, (void *)prp_list,
+                    nvme_addr_read(n, prp_ent, (void *)prp_list,
                         prp_trans);
                     prp_ent = le64_to_cpu(prp_list[i]);
                 }
@@ -340,7 +365,7 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     cqe->status = cpu_to_le16((req->status << 1) | phase);
     cqe->sq_id = cpu_to_le16(sq->sqid);
     cqe->sq_head = cpu_to_le16(sq->head);
-    pci_dma_write(&n->parent_obj, addr, (void *)cqe, sizeof(*cqe));
+    nvme_addr_write(n, addr, (void *)cqe, sizeof(*cqe));
     nvme_inc_cq_tail(cq);
 
     QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
@@ -651,7 +676,7 @@ static uint16_t nvme_compare(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return NVME_INTERNAL_DEV_ERROR;
         }
 
-        pci_dma_read(&n->parent_obj, req->qsg.sg[i].base, tmp[1], len);
+        nvme_addr_read(n, req->qsg.sg[i].base, tmp[1], len);
         if (memcmp(tmp[0], tmp[1], len)) {
             qemu_sglist_destroy(&req->qsg);
             return NVME_CMP_FAILURE;
@@ -1305,9 +1330,7 @@ static uint16_t nvme_abort_req(NvmeCtrl *n, NvmeCmd *cmd, uint32_t *result)
             addr = nvme_discontig(sq->prp_list, (sq->head + index) % sq->size,
                 n->page_size, n->sqe_size);
         }
-
-        pci_dma_read(&n->parent_obj, addr, (void *)&abort_cmd,
-            sizeof(abort_cmd));
+        nvme_addr_read(n, addr, (void *)&abort_cmd, sizeof(abort_cmd));
         if (abort_cmd.cid == cid) {
             *result = 0;
             req = QTAILQ_FIRST(&sq->req_list);
@@ -1319,7 +1342,7 @@ static uint16_t nvme_abort_req(NvmeCtrl *n, NvmeCmd *cmd, uint32_t *result)
             req->status = NVME_CMD_ABORT_REQ;
 
             abort_cmd.opcode = NVME_OP_ABORTED;
-            pci_dma_write(&n->parent_obj, addr, (void *)&abort_cmd,
+            nvme_addr_write(n, addr, (void *)&abort_cmd,
                 sizeof(abort_cmd));
 
             nvme_enqueue_req_completion(n->cq[sq->cqid], req);
@@ -1435,13 +1458,13 @@ static uint16_t nvme_set_db_memory(NvmeCtrl *n, const NvmeCmd *cmd)
             /* Submission queue tail pointer location, 2 * QID * stride. */
             sq->db_addr = db_addr + 2 * i * (1 << (2  + n->db_stride));
             sq->eventidx_addr = eventidx_addr + 2 * i *
-						(1 << (2 + n->db_stride));
+                                    (1 << (2 + n->db_stride));
         }
         if (cq) {
             /* Completion queue head pointer location, (2 * QID + 1) * stride. */
             cq->db_addr = db_addr + (2 * i + 1) * (1 << (2 + n->db_stride));
             cq->eventidx_addr = eventidx_addr + (2 * i + 1) *
-						(1 << (2 + n->db_stride));
+                        (1 << (2 + n->db_stride));
         }
     }
     return NVME_SUCCESS;
@@ -1489,16 +1512,15 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
 {
     if (sq->eventidx_addr) {
-        pci_dma_write(&sq->ctrl->parent_obj, sq->eventidx_addr,
-                      &sq->tail, sizeof(sq->tail));
+        nvme_addr_write(sq->ctrl, sq->eventidx_addr, (void *)&sq->tail,
+            sizeof(sq->tail));
     }
 }
 
 static void nvme_update_sq_tail(NvmeSQueue *sq)
 {
     if (sq->db_addr) {
-        pci_dma_read(&sq->ctrl->parent_obj, sq->db_addr,
-                     &sq->tail, sizeof(sq->tail));
+        nvme_addr_read(sq->ctrl, sq->db_addr, &sq->tail, sizeof(sq->tail));
     }
 }
 
@@ -1523,13 +1545,12 @@ static void nvme_process_sq(void *opaque)
             addr = nvme_discontig(sq->prp_list, sq->head, n->page_size,
                 n->sqe_size);
         }
-
-        pci_dma_read(&n->parent_obj, addr, (void *)&cmd, sizeof(cmd));
+        nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd));
         nvme_inc_sq_head(sq);
+
         if (cmd.opcode == NVME_OP_ABORTED) {
             continue;
         }
-
         req = QTAILQ_FIRST(&sq->req_list);
         QTAILQ_REMOVE(&sq->req_list, req, entry);
         QTAILQ_INSERT_TAIL(&sq->out_req_list, req, entry);
@@ -1741,7 +1762,6 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
                 NVME_AER_INFO_ERR_INVALID_SQ, NVME_LOG_ERROR_INFO);
             return;
         }
-
         sq = n->sq[qid];
         if (new_val >= sq->size) {
             nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
@@ -1770,6 +1790,32 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data,
         nvme_process_db(n, addr, data);
     }
 }
+
+static void nvme_cmb_write(void *opaque, hwaddr addr, uint64_t data,
+    unsigned size)
+{
+    NvmeCtrl *n = (NvmeCtrl *)opaque;
+    memcpy(&n->cmbuf[addr], &data, size);
+}
+
+static uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
+{
+    uint64_t val;
+    NvmeCtrl *n = (NvmeCtrl *)opaque;
+
+    memcpy(&val, &n->cmbuf[addr], size);
+    return val;
+}
+
+static const MemoryRegionOps nvme_cmb_ops = {
+    .read = nvme_cmb_read,
+    .write = nvme_cmb_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = {
+        .min_access_size = 2,
+        .max_access_size = 8,
+    },
+};
 
 static const MemoryRegionOps nvme_mmio_ops = {
     .read = nvme_mmio_read,
@@ -1932,6 +1978,17 @@ static void nvme_init_pci(NvmeCtrl *n)
         &n->iomem);
     msix_init_exclusive_bar(&n->parent_obj, n->num_queues, 4);
     msi_init(&n->parent_obj, 0x50, 32, true, false);
+
+    if (n->cmb) {
+        n->cmbuf = g_malloc0(0x8000000);
+        memory_region_init_io(&n->ctrl_mem, OBJECT(n), &nvme_cmb_ops, n, "nvme-cmb", 0x8000000);
+        pci_register_bar(&n->parent_obj, 2,
+            PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64,
+            &n->ctrl_mem);
+
+        n->bar.cmbloc = 2; /* BAR 2 is exclusive for CMB */
+        n->bar.cmbsz = 0x7 | (0x8000 << 12); /* CQ, SQ, and PRP's, 4k sized units , 32k units */
+    }
 }
 
 static int nvme_init(PCIDevice *pci_dev)
@@ -1981,6 +2038,9 @@ static void nvme_exit(PCIDevice *pci_dev)
     g_free(n->sq);
     msix_uninit_exclusive_bar(pci_dev);
     memory_region_unref(&n->iomem);
+    if (n->cmb) {
+        memory_region_unref(&n->ctrl_mem);
+    }
 }
 
 static Property nvme_props[] = {
@@ -2010,6 +2070,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("dps", NvmeCtrl, dps, 0),
     DEFINE_PROP_UINT8("mc", NvmeCtrl, mc, 0),
     DEFINE_PROP_UINT8("meta", NvmeCtrl, meta, 0),
+    DEFINE_PROP_UINT8("cmb", NvmeCtrl, cmb, 0),
     DEFINE_PROP_UINT16("oacs", NvmeCtrl, oacs, NVME_OACS_FORMAT),
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, PCI_VENDOR_ID_INTEL),

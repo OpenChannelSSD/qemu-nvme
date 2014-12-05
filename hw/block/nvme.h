@@ -13,6 +13,8 @@ typedef struct NvmeBar {
     uint32_t    aqa;
     uint64_t    asq;
     uint64_t    acq;
+    uint32_t    cmbloc;
+    uint32_t    cmbsz;
 } NvmeBar;
 
 enum NvmeCapShift {
@@ -723,6 +725,7 @@ typedef struct NvmeNamespace {
 typedef struct NvmeCtrl {
     PCIDevice    parent_obj;
     MemoryRegion iomem;
+    MemoryRegion ctrl_mem;
     NvmeBar      bar;
     BlockConf    conf;
 
@@ -769,6 +772,8 @@ typedef struct NvmeCtrl {
     uint8_t     cqes_pending;
     uint16_t    vid;
     uint16_t    did;
+    uint8_t     cmb;
+    uint8_t     *cmbuf;
 
     char            *serial;
     NvmeErrorLog    *elpes;
