@@ -9,7 +9,7 @@
  */
 
 /**
- * Reference Specs: http://www.nvmexpress.org, 1.1, 1.0e
+ * Reference Specs: http://www.nvmexpress.org, 1.2, 1.1, 1.0e
  *
  *  http://www.nvmexpress.org/resources/
  */
@@ -56,7 +56,7 @@
  *  meta=<int>       : Meta-data size, Default:0
  *  oncs=<oncs>      : Optional NVMe command support, Default:DSM
  *  oacs=<oacs>      : Optional Admin command support, Default:Format
- *  cmb=<cmb>        : Controller Memory Buffer, Default:0
+ *  cmb=<cmb>        : Controller Memory Buffer, size in MB, Default:0
  *
  * The logical block formats all start at 512 byte blocks and double for the
  * next index. If meta-data is non-zero, half the logical block formats will
@@ -1984,14 +1984,24 @@ static void nvme_init_pci(NvmeCtrl *n)
     msi_init(&n->parent_obj, 0x50, 32, true, false);
 
     if (n->cmb) {
-        n->cmbuf = g_malloc0(0x8000000);
-        memory_region_init_io(&n->ctrl_mem, OBJECT(n), &nvme_cmb_ops, n, "nvme-cmb", 0x8000000);
-        pci_register_bar(&n->parent_obj, 2,
+
+        /* If CMB is requested it is setup here. Currently n->cmb
+         * determines size in MB. All other properties are hard-coded
+         * (for now) to:
+         * CMBSZ  = SQS=1, CQS=1, LISTS=1, RDS=0, WDS=0, SZU=1MB
+         * CMBLOC = BIR=2, OFST=0
+         */
+
+        n->bar.cmbloc = 2;
+        n->bar.cmbsz = 0x7 | (0x2<<8) | (n->cmb << 12);
+
+        n->cmbuf = g_malloc0(NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
+        memory_region_init_io(&n->ctrl_mem, OBJECT(n), &nvme_cmb_ops, n, "nvme-cmb",
+                              NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
+        pci_register_bar(&n->parent_obj, NVME_CMBLOC_BIR(n->bar.cmbloc),
             PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64,
             &n->ctrl_mem);
 
-        n->bar.cmbloc = 2; /* BAR 2 is exclusive for CMB */
-        n->bar.cmbsz = 0x7 | (0x8000 << 12); /* CQ, SQ, and PRP's, 4k sized units , 32k units */
     }
 }
 
@@ -2074,7 +2084,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("dps", NvmeCtrl, dps, 0),
     DEFINE_PROP_UINT8("mc", NvmeCtrl, mc, 0),
     DEFINE_PROP_UINT8("meta", NvmeCtrl, meta, 0),
-    DEFINE_PROP_UINT8("cmb", NvmeCtrl, cmb, 0),
+    DEFINE_PROP_UINT16("cmb", NvmeCtrl, cmb, 0),
     DEFINE_PROP_UINT16("oacs", NvmeCtrl, oacs, NVME_OACS_FORMAT),
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, PCI_VENDOR_ID_INTEL),

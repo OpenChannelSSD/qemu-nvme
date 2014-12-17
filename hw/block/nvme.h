@@ -139,6 +139,49 @@ enum NvmeAqaMask {
 #define NVME_AQA_ASQS(aqa) ((aqa >> AQA_ASQS_SHIFT) & AQA_ASQS_MASK)
 #define NVME_AQA_ACQS(aqa) ((aqa >> AQA_ACQS_SHIFT) & AQA_ACQS_MASK)
 
+enum NvmeCmblocShift {
+    CMBLOC_BIR_SHIFT  = 0,
+    CMBLOC_OFST_SHIFT = 12,
+};
+
+enum NvmeCmblocMask {
+    CMBLOC_BIR_MASK  = 0x7,
+    CMBLOC_OFST_MASK = 0xfffff,
+};
+
+#define NVME_CMBLOC_BIR(cmbloc) ((cmbloc >> CMBLOC_BIR_SHIFT)  & CMBLOC_BIR_MASK)
+#define NVME_CMBLOC_OFST(cmbloc)((cmbloc >> CMBLOC_OFST_SHIFT) & CMBLOC_OFST_MASK)
+
+enum NvmeCmbszShift {
+    CMBSZ_SQS_SHIFT   = 0,
+    CMBSZ_CQS_SHIFT   = 1,
+    CMBSZ_LISTS_SHIFT = 2,
+    CMBSZ_RDS_SHIFT   = 3,
+    CMBSZ_WDS_SHIFT   = 4,
+    CMBSZ_SZU_SHIFT   = 8,
+    CMBSZ_SZ_SHIFT    = 12,
+};
+
+enum NvmeCmbszMask {
+    CMBSZ_SQS_MASK   = 0x1,
+    CMBSZ_CQS_MASK   = 0x1,
+    CMBSZ_LISTS_MASK = 0x1,
+    CMBSZ_RDS_MASK   = 0x1,
+    CMBSZ_WDS_MASK   = 0x1,
+    CMBSZ_SZU_MASK   = 0xf,
+    CMBSZ_SZ_MASK    = 0xfffff,
+};
+
+#define NVME_CMBSZ_SQS(cmbsz)  ((cmbsz >> CMBSZ_SQS_SHIFT)   & CMBSZ_SQS_MASK)
+#define NVME_CMBSZ_CQS(cmbsz)  ((cmbsz >> CMBSZ_CQS_SHIFT)   & CMBSZ_CQS_MASK)
+#define NVME_CMBSZ_LISTS(cmbsz)((cmbsz >> CMBSZ_LISTS_SHIFT) & CMBSZ_LISTS_MASK)
+#define NVME_CMBSZ_RDS(cmbsz)  ((cmbsz >> CMBSZ_RDS_SHIFT)   & CMBSZ_RDS_MASK)
+#define NVME_CMBSZ_WDS(cmbsz)  ((cmbsz >> CMBSZ_WDS_SHIFT)   & CMBSZ_WDS_MASK)
+#define NVME_CMBSZ_SZU(cmbsz)  ((cmbsz >> CMBSZ_SZU_SHIFT)   & CMBSZ_SZU_MASK)
+#define NVME_CMBSZ_SZ(cmbsz)   ((cmbsz >> CMBSZ_SZ_SHIFT)    & CMBSZ_SZ_MASK)
+
+#define NVME_CMBSZ_GETSIZE(cmbsz) (NVME_CMBSZ_SZ(cmbsz) * (1<<(12+4*NVME_CMBSZ_SZU(cmbsz))))
+
 typedef struct NvmeCmd {
     uint8_t     opcode;
     uint8_t     fuse;
@@ -772,7 +815,7 @@ typedef struct NvmeCtrl {
     uint8_t     cqes_pending;
     uint16_t    vid;
     uint16_t    did;
-    uint8_t     cmb;
+    uint16_t    cmb;
     uint8_t     *cmbuf;
 
     char            *serial;
