@@ -439,8 +439,12 @@ static void nvme_set_error_page(NvmeCtrl *n, uint16_t sqid, uint16_t cid,
 static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
     uint8_t event_info, uint8_t log_page)
 {
-    NvmeAsyncEvent *event = (NvmeAsyncEvent *)g_malloc(sizeof(*event));
+    NvmeAsyncEvent *event;
 
+    if (!(n->bar.csts & NVME_CSTS_READY))
+	return;
+
+    event = (NvmeAsyncEvent *)g_malloc(sizeof(*event));
     event->result.event_type = event_type;
     event->result.event_info = event_info;
     event->result.log_page   = log_page;
