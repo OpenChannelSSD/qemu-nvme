@@ -1992,8 +1992,18 @@ static void nvme_init_pci(NvmeCtrl *n)
          * CMBLOC = BIR=2, OFST=0
          */
 
-        n->bar.cmbloc = 2;
-        n->bar.cmbsz = 0x7 | (0x2<<8) | (n->cmb << 12);
+        n->bar.cmbloc = 0;
+        NVME_CMBLOC_SET_BIR(n->bar.cmbloc, 2);
+        NVME_CMBLOC_SET_OFST(n->bar.cmbloc, 0);
+
+        n->bar.cmbsz = 0;
+        NVME_CMBSZ_SET_SQS(n->bar.cmbsz,   1);
+        NVME_CMBSZ_SET_CQS(n->bar.cmbsz,   1);
+        NVME_CMBSZ_SET_LISTS(n->bar.cmbsz, 1);
+        NVME_CMBSZ_SET_RDS(n->bar.cmbsz,   0);
+        NVME_CMBSZ_SET_WDS(n->bar.cmbsz,   0);
+        NVME_CMBSZ_SET_SZU(n->bar.cmbsz,   2);
+        NVME_CMBSZ_SET_SZ(n->bar.cmbsz,    n->cmb);
 
         n->cmbuf = g_malloc0(NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
         memory_region_init_io(&n->ctrl_mem, OBJECT(n), &nvme_cmb_ops, n, "nvme-cmb",
