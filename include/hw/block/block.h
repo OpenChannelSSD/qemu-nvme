@@ -24,6 +24,7 @@ typedef struct BlockConf {
     uint32_t opt_io_size;
     int32_t bootindex;
     uint32_t discard_granularity;
+    uint32_t is_lightnvm;
     /* geometry, not all devices use this */
     uint32_t cyls, heads, secs;
 } BlockConf;
@@ -50,7 +51,8 @@ static inline unsigned int get_physical_block_exp(BlockConf *conf)
     DEFINE_PROP_UINT16("min_io_size", _state, _conf.min_io_size, 0),  \
     DEFINE_PROP_UINT32("opt_io_size", _state, _conf.opt_io_size, 0),    \
     DEFINE_PROP_UINT32("discard_granularity", _state, \
-                       _conf.discard_granularity, -1)
+                       _conf.discard_granularity, -1), \
+    DEFINE_PROP_UINT32("is_lightnvm", _state, _conf.is_lightnvm, 0)
 
 #define DEFINE_BLOCK_CHS_PROPERTIES(_state, _conf)      \
     DEFINE_PROP_UINT32("cyls", _state, _conf.cyls, 0),  \
