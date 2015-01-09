@@ -581,17 +581,9 @@ static void nvme_aer_process_cb(void *param)
     }
 }
 
-static void update_l2p_range(NvmeNamespace *ns, uint64_t lba_off,
-    uint64_t pba, uint16_t nlb)
+static void update_l2p_entry(NvmeNamespace *ns, uint64_t lba, uint64_t pba)
 {
-    uint64_t end = lba_off + nlb;
-    uint64_t i;
-
-    assert(end <= (ns->tbl_entries));
-
-    for(i = lba_off; i < end; i++) {
-        ns->tbl[i] = pba++;
-    }
+    ns->tbl[lba] = pba;
 }
 
 static void nvme_rw_cb(void *opaque, int ret)
@@ -616,7 +608,7 @@ static void nvme_rw_cb(void *opaque, int ret)
         }
     } else {
         if (lnvm_dev(n) && req->is_write) {
-            update_l2p_range(ns, req->lnvm_lba, req->slba, req->nlb);
+            update_l2p_entry(ns, req->lnvm_lba, req->slba + 1);
         }
     }
 
@@ -700,11 +692,6 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->slba = slba;
     req->meta_size = 0;
     req->status = NVME_SUCCESS;
-
-    if (lnvm_dev(n)) {
-        update_l2p_range(ns, req->lnvm_lba, req->slba, nlb);
-    }
-
     req->nlb = nlb;
     req->ns = ns;
 
