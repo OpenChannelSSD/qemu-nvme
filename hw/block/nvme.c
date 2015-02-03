@@ -161,38 +161,23 @@ static void nvme_addr_write(NvmeCtrl *n, hwaddr addr, void *buf, int size)
     }
 }
 
-static uint8_t lnvm_dev(NvmeCtrl *n)
+static uint8_t lightnvm_dev(NvmeCtrl *n)
 {
-    return (n->lnvm_ctrl.id_ctrl.ver_id != 0);
+    return (n->lightnvm_ctrl.id_ctrl.ver_id != 0);
 }
 
-static int lnvm_num_channels(NvmeCtrl *n)
+static int lightnvm_num_channels(NvmeCtrl *n)
 {
-    LnvmIdCtrl *ln_id = &n->lnvm_ctrl.id_ctrl;
+    LnvmIdCtrl *ln_id = &n->lightnvm_ctrl.id_ctrl;
+
     return n->num_namespaces * le16_to_cpu(ln_id->nschannels);
 }
 
-static int lnvm_ext_rcode(uint32_t rcode) {
-    return (rcode >= LNVM_FEAT_EXT_START && rcode <= LNVM_FEAT_EXT_END );
-}
-
-static int lnvm_feature_set(LnvmCtrl *ln, uint32_t ndx, uint8_t val)
-{
-    if (ndx > LNVM_NUM_FEATURES) {
-        return -1;
-    }
-    if (val) {
-        bitmap_set((unsigned long*)&ln->id_features.map, ndx, 1);
-    } else {
-        bitmap_clear((unsigned long*)&ln->id_features.map, ndx, 1);
-    }
-    return 0;
-}
-
-static void lnvm_tbl_initialize(NvmeNamespace *ns)
+static void lightnvm_tbl_initialize(NvmeNamespace *ns)
 {
     uint32_t len = ns->tbl_entries;
     uint32_t i;
+
     for (i = 0; i < len; i++)
         ns->tbl[i] = LNVM_LBA_UNMAPPED;
 }
@@ -581,11 +566,6 @@ static void nvme_aer_process_cb(void *param)
     }
 }
 
-static void update_l2p_entry(NvmeNamespace *ns, uint64_t lba, uint64_t pba)
-{
-    ns->tbl[lba] = pba;
-}
-
 static void nvme_rw_cb(void *opaque, int ret)
 {
     NvmeRequest *req = opaque;
@@ -607,8 +587,8 @@ static void nvme_rw_cb(void *opaque, int ret)
             bitmap_clear(ns->util, req->slba, req->nlb);
         }
     } else {
-        if (lnvm_dev(n) && req->is_write) {
-            update_l2p_entry(ns, req->lnvm_lba, req->slba + 1);
+        if (lightnvm_dev(n) && req->is_write) {
+            ns->tbl[req->lightnvm_lba] = req->slba + 1;
         }
     }
 
@@ -633,7 +613,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t meta_size = nlb * ms;
     uint64_t aio_slba;
 
-    if (lnvm_dev(n)) {
+    if (lightnvm_dev(n)) {
         /* In the case of a LightNVM device. The slba is the logical address, while the actual
          * physical block address is stored in Command Dword 14-15. The spba is a 1-based
          * value. i.e. substract 1 to get the actual address. 0 is used as "not mapped" and
@@ -650,7 +630,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
         elba = spba + nlb - 1;
         slba = spba - 1;
-        req->lnvm_lba = le64_to_cpu(rw->slba);
+        req->lightnvm_lba = le64_to_cpu(rw->slba);
     } else {
         elba = slba + nlb;
     }
@@ -885,7 +865,7 @@ static uint16_t nvme_write_uncor(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_SUCCESS;
 }
 
-static uint16_t lnvm_erase_sync(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+static uint16_t lightnvm_erase_sync(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
     LnvmDmCmd *dm = (LnvmDmCmd *)cmd;
@@ -936,7 +916,7 @@ static void erase_io_complete_cb(void *opaque, int ret)
     nvme_enqueue_req_completion(cq, req);
 }
 
-static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+static uint16_t lightnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
     LnvmDmCmd *dm = (LnvmDmCmd *)cmd;
@@ -1013,14 +993,14 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_OPCODE | NVME_DNR;
 
     case LNVM_CMD_ERASE_SYNC:
-        if (lnvm_dev(n)) {
-            return lnvm_erase_sync(n, ns, cmd, req);
+        if (lightnvm_dev(n)) {
+            return lightnvm_erase_sync(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
 
     case LNVM_CMD_ERASE_ASYNC:
-        if (lnvm_dev(n)) {
-            return lnvm_erase_async(n, ns, cmd, req);
+        if (lightnvm_dev(n)) {
+            return lightnvm_erase_async(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
 
@@ -1590,7 +1570,7 @@ static uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
     uint32_t lba_ds = (1 << id_ns->lbaf[lba_idx].ds);
     uint32_t lba_sz = lba_ds + n->meta;
 
-    if (lnvm_dev(n)) {
+    if (lightnvm_dev(n)) {
         /* p_ent: LBA + md + L2P entry */
         uint64_t p_ent = lba_sz + sizeof(*(ns->tbl));
         uint64_t p_ents = ns_size / p_ent;
@@ -1609,15 +1589,15 @@ static uint64_t ns_bdrv_blks(NvmeNamespace *ns, uint64_t blks, uint8_t lba_idx)
     return blks << (id_ns->lbaf[lba_idx].ds - BDRV_SECTOR_BITS);
 }
 
-static uint32_t lnvm_tbl_size(NvmeNamespace *ns)
+static uint32_t lightnvm_tbl_size(NvmeNamespace *ns)
 {
     return ns->tbl_entries * sizeof(*(ns->tbl));
 }
 
-static void lnvm_init_ns_chnls(NvmeNamespace *ns, uint8_t lba_idx)
+static void lightnvm_init_ns_chnls(NvmeNamespace *ns, uint8_t lba_idx)
 {
     NvmeCtrl *n = ns->ctrl;
-    LnvmCtrl *ln = &n->lnvm_ctrl;
+    LnvmCtrl *ln = &n->lightnvm_ctrl;
     uint64_t page_size = 1 << ns->id_ns.lbaf[lba_idx].ds;
     LnvmIdChannel *c;
     uint16_t ns_chnls = le16_to_cpu(ln->id_ctrl.nschannels);
@@ -1651,9 +1631,9 @@ static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
     blks = ns->ns_blks;
     bdrv_blks = ns_bdrv_blks(ns, ns->ns_blks, lba_idx);
 
-    if (lnvm_dev(n)) {
+    if (lightnvm_dev(n)) {
         uint16_t ns_chnls;
-        ln_id = &n->lnvm_ctrl.id_ctrl;
+        ln_id = &n->lightnvm_ctrl.id_ctrl;
         ns_chnls = le16_to_cpu(ln_id->nschannels);
         /*divide as many blocks as possible evenly between the channels*/
         blks = (ns->ns_blks / ns_chnls) * ns_chnls;
@@ -1664,8 +1644,8 @@ static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
         if (ns->tbl) {
             g_free(ns->tbl);
         }
-        ns->tbl = qemu_blockalign(blk_bs(n->conf.blk), lnvm_tbl_size(ns));
-        lnvm_tbl_initialize(ns);
+        ns->tbl = qemu_blockalign(blk_bs(n->conf.blk), lightnvm_tbl_size(ns));
+        lightnvm_tbl_initialize(ns);
     } else {
         ns->tbl = NULL;
         blks = ns->ns_blks;
@@ -1674,7 +1654,7 @@ static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
 
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(blks);
     ns->meta_start_offset =
-        ((ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS) + lnvm_tbl_size(ns);
+        ((ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS) + lightnvm_tbl_size(ns);
 
     if (ns->util)
         g_free(ns->util);
@@ -1715,8 +1695,8 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
     ns->id_ns.dps = pil | pi;
     ns->ns_blks = ns_blks(ns, lba_idx);
     nvme_partition_ns(ns, lba_idx);
-    if (lnvm_dev(n)) {
-        lnvm_init_ns_chnls(ns, lba_idx);
+    if (lightnvm_dev(n)) {
+        lightnvm_init_ns_chnls(ns, lba_idx);
     }
     if (sec_erase) {
         /* TODO: write zeros, complete asynchronously */;
@@ -1795,13 +1775,13 @@ static uint16_t nvme_set_db_memory(NvmeCtrl *n, const NvmeCmd *cmd)
     return NVME_SUCCESS;
 }
 
-static uint16_t lnvm_identify(NvmeCtrl *n, NvmeCmd *cmd)
+static uint16_t lightnvm_identify(NvmeCtrl *n, NvmeCmd *cmd)
 {
     uint32_t ns_off = le32_to_cpu(cmd->cdw10);
     uint64_t prp1 = le64_to_cpu(cmd->prp1);
     uint64_t prp2 = le64_to_cpu(cmd->prp2);
 
-    LnvmCtrl *ln = &n->lnvm_ctrl;
+    LnvmCtrl *ln = &n->lightnvm_ctrl;
     uint16_t chnls = le16_to_cpu(ln->id_ctrl.nschannels);
     uint8_t *chnl_ptr;
 
@@ -1827,30 +1807,26 @@ static uint16_t lnvm_identify(NvmeCtrl *n, NvmeCmd *cmd)
     return NVME_SUCCESS;
 }
 
-static uint16_t lnvm_get_features(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
+static uint16_t lightnvm_get_features(NvmeCtrl *n, NvmeCmd *cmd)
 {
     uint64_t prp1 = le64_to_cpu(cmd->prp1);
     uint64_t prp2 = le64_to_cpu(cmd->prp2);
 
-    return nvme_dma_read_prp(n, (uint8_t *)&n->lnvm_ctrl.id_features,
+    return nvme_dma_read_prp(n, (uint8_t *)&n->lightnvm_ctrl.id_features,
         sizeof(LnvmIdFeatures), prp1, prp2);
 }
 
-static uint16_t lnvm_set_responsibility(NvmeCtrl *n, NvmeCmd *cmd)
+static uint16_t lightnvm_set_responsibility(NvmeCtrl *n, NvmeCmd *cmd)
 {
-    uint32_t rcode = le32_to_cpu(cmd->cdw10);
-    uint8_t bitval = le32_to_cpu(cmd->cdw11) & 0x1;
+    uint64_t resp = le64_to_cpu(cmd->cdw10);
 
-    LnvmCtrl *ln = &n->lnvm_ctrl;
-
-    if (lnvm_ext_rcode(rcode) || lnvm_feature_set(ln, rcode, bitval)) {
-        /*can't set extensions, only responsibilities/vendor-specific codes*/
+    if (resp != 0)
         return NVME_INVALID_FIELD | NVME_DNR;
-    }
+
     return NVME_SUCCESS;
 }
 
-static uint16_t lnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
+static uint16_t lightnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     NvmeNamespace *ns;
     LnvmGetL2PTbl *gtbl = (LnvmGetL2PTbl*)cmd;
@@ -1865,7 +1841,7 @@ static uint16_t lnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     if (nsid == 0 || nsid > n->num_namespaces) {
         return NVME_INVALID_NSID | NVME_DNR;
     }
-    ns = &n->namespaces[nsid-1];
+    ns = &n->namespaces[nsid - 1];
 
     if (slba >= ns->tbl_entries) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
@@ -1892,7 +1868,7 @@ static uint16_t lnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     return NVME_SUCCESS;
 }
 
-static uint16_t lnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
+static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     LnvmGetBBTbl *bbcmd = (LnvmGetBBTbl *)cmd;
     uint32_t off = le32_to_cpu(bbcmd->tbl_off);
@@ -1900,37 +1876,39 @@ static uint16_t lnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint64_t prp2 = le64_to_cpu(bbcmd->prp2);
     uint8_t prp1_len = bbcmd->prp1_len;
 
-    fprintf(stderr, "NVME: lnvm_get_bb_tbl - STUB! (tbl_off:%"SCNu32", "
+    fprintf(stderr, "NVME: lightnvm_get_bb_tbl - STUB! (tbl_off:%"SCNu32", "
             "prp1:%"SCNu64", prp2:%"SCNu64", prp1_len%"SCNu8")\n",
             off, prp1, prp2, prp1_len);
 
     return NVME_SUCCESS; /*TODO: STUB*/
 }
 
-static int lnvm_flush_tbls(NvmeCtrl *n)
+static int lightnvm_flush_tbls(NvmeCtrl *n)
 {
     uint32_t i;
     for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
         if (bdrv_pwrite_sync(blk_bs(n->conf.blk), ns->tbl_dsk_start_offset,
-                             ns->tbl, lnvm_tbl_size(ns))) {
+                             ns->tbl, lightnvm_tbl_size(ns))) {
             return -1;
         }
     }
     return 0;
 }
 
-static int lnvm_read_tbls(NvmeCtrl *n)
+static int lightnvm_read_tbls(NvmeCtrl *n)
 {
     uint32_t i;
+
     for (i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
-        uint32_t tbl_size = lnvm_tbl_size(ns);
+        uint32_t tbl_size = lightnvm_tbl_size(ns);
         if (blk_pread(n->conf.blk, ns->tbl_dsk_start_offset,
                        ns->tbl, tbl_size) != tbl_size) {
             return -1;
         }
     }
+
     return 0;
 }
 
@@ -1965,28 +1943,28 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     case NVME_ADM_CMD_SET_DB_MEMORY:
         return nvme_set_db_memory(n, cmd);
     case LNVM_ADM_CMD_IDENTIFY:
-        if (lnvm_dev(n)) {
-            return lnvm_identify(n, cmd);
+        if (lightnvm_dev(n)) {
+            return lightnvm_identify(n, cmd);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case LNVM_ADM_CMD_GET_FEATURES:
-        if (lnvm_dev(n)) {
-            return lnvm_get_features(n, cmd, req);
+        if (lightnvm_dev(n)) {
+            return lightnvm_get_features(n, cmd);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case LNVM_ADM_CMD_SET_FEATURES:
-        if (lnvm_dev(n)) {
-            return lnvm_set_responsibility(n, cmd);
+        if (lightnvm_dev(n)) {
+            return lightnvm_set_responsibility(n, cmd);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case LNVM_ADM_CMD_GET_L2P_TBL:
-        if (lnvm_dev(n)) {
-            return lnvm_get_l2p_tbl(n, cmd, req);
+        if (lightnvm_dev(n)) {
+            return lightnvm_get_l2p_tbl(n, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case LNVM_ADM_CMD_GET_BB_TBL:
-        if (lnvm_dev(n)) {
-            return lnvm_get_bb_tbl(n, cmd, req);
+        if (lightnvm_dev(n)) {
+            return lightnvm_get_bb_tbl(n, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_ADM_CMD_ACTIVATE_FW:
@@ -2089,7 +2067,7 @@ static void nvme_clear_ctrl(NvmeCtrl *n)
     }
 
     blk_flush(n->conf.blk);
-    lnvm_flush_tbls(n);
+    lightnvm_flush_tbls(n);
     n->bar.cc = 0;
     n->features.temp_thresh = 0x14d;
     n->temp_warn_issued = 0;
@@ -2359,7 +2337,7 @@ static void nvme_init_namespaces(NvmeCtrl *n)
         NvmeNamespace *ns = &n->namespaces[i];
         NvmeIdNs *id_ns = &ns->id_ns;
 
-        id_ns->nsfeat = lnvm_dev(n) ? 0x02 : 0x0;
+        id_ns->nsfeat = lightnvm_dev(n) ? 0x02 : 0x0;
         id_ns->nlbaf = n->nlbaf - 1;
         id_ns->flbas = n->lba_index | (n->extended << 4);
         id_ns->mc = n->mc;
@@ -2391,7 +2369,7 @@ static void nvme_init_namespaces(NvmeCtrl *n)
     }
 }
 
-static void lnvm_init_id_ctrl(LnvmIdCtrl *ln_id)
+static void lightnvm_init_id_ctrl(LnvmIdCtrl *ln_id)
 {
     ln_id->ver_id = cpu_to_le16(ln_id->ver_id);
     ln_id->nschannels = cpu_to_le16(ln_id->nschannels);
@@ -2414,8 +2392,8 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     id->ieee[2] = 0xb3;
     id->cmic = 0;
     id->mdts = n->mdts;
-    if (lnvm_dev(n)) {
-        lnvm_init_id_ctrl(&n->lnvm_ctrl.id_ctrl);
+    if (lightnvm_dev(n)) {
+        lightnvm_init_id_ctrl(&n->lightnvm_ctrl.id_ctrl);
         id->oacs = cpu_to_le16(n->oacs | NVME_OACS_LNVM_DEV );
     }
     else {
@@ -2526,7 +2504,7 @@ static void nvme_init_pci(NvmeCtrl *n)
     }
 }
 
-static int lnvm_init(NvmeCtrl *n)
+static int lightnvm_init(NvmeCtrl *n)
 {
     LnvmCtrl *ln;
     LnvmIdChannel *c;
@@ -2538,19 +2516,11 @@ static int lnvm_init(NvmeCtrl *n)
     uint8_t lba_ds;
     uint16_t ns_chnls;
 
-    ln = &n->lnvm_ctrl;
+    ln = &n->lightnvm_ctrl;
     ns_chnls = le16_to_cpu(ln->id_ctrl.nschannels);
 
-    lnvm_feature_set(ln, R_L2P_MAPPING, 0);
-    lnvm_feature_set(ln, R_P2L_MAPPING, 0);
-    lnvm_feature_set(ln, R_GC, 1);
-    lnvm_feature_set(ln, R_ECC, 1);
-    lnvm_feature_set(ln, E_BLK_MOVE, 0);
-    lnvm_feature_set(ln, E_NVM_COPY_BACK, 0);
-    lnvm_feature_set(ln, E_SAFE_SHUTDOWN, 0);
-
-    n->lnvm_ctrl.channels = g_malloc0(
-        sizeof(LnvmIdChannel) * lnvm_num_channels(n));
+    n->lightnvm_ctrl.channels = g_malloc0(
+        sizeof(LnvmIdChannel) * lightnvm_num_channels(n));
 
     for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
@@ -2575,7 +2545,7 @@ static int lnvm_init(NvmeCtrl *n)
         }
     }
 
-    return (n->lnvm_ctrl.read_l2p_tbl) ? lnvm_read_tbls(n) : 0;
+    return (n->lightnvm_ctrl.read_l2p_tbl) ? lightnvm_read_tbls(n) : 0;
 }
 
 static int nvme_init(PCIDevice *pci_dev)
@@ -2608,15 +2578,15 @@ static int nvme_init(PCIDevice *pci_dev)
     nvme_init_pci(n);
     nvme_init_ctrl(n);
     nvme_init_namespaces(n);
-    if (lnvm_dev(n)) {
-        return lnvm_init(n);
+    if (lightnvm_dev(n)) {
+        return lightnvm_init(n);
     }
     return 0;
 }
 
-static void lnvm_exit(NvmeCtrl *n)
+static void lightnvm_exit(NvmeCtrl *n)
 {
-    g_free(n->lnvm_ctrl.channels);
+    g_free(n->lightnvm_ctrl.channels);
 }
 
 static void nvme_exit(PCIDevice *pci_dev)
@@ -2636,8 +2606,8 @@ static void nvme_exit(PCIDevice *pci_dev)
         memory_region_unref(&n->ctrl_mem);
     }
 
-    if (lnvm_dev(n)) {
-        lnvm_exit(n);
+    if (lightnvm_dev(n)) {
+        lightnvm_exit(n);
     }
 }
 
@@ -2673,11 +2643,11 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, PCI_VENDOR_ID_INTEL),
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x5845),
-    DEFINE_PROP_UINT8("lver", NvmeCtrl, lnvm_ctrl.id_ctrl.ver_id, 1),
-    DEFINE_PROP_UINT8("ltype", NvmeCtrl, lnvm_ctrl.id_ctrl.nvm_type,
+    DEFINE_PROP_UINT8("lver", NvmeCtrl, lightnvm_ctrl.id_ctrl.ver_id, 1),
+    DEFINE_PROP_UINT8("ltype", NvmeCtrl, lightnvm_ctrl.id_ctrl.nvm_type,
         NVM_BLOCK_ADDRESSABLE),
-    DEFINE_PROP_UINT16("lchannels", NvmeCtrl, lnvm_ctrl.id_ctrl.nschannels, 4),
-    DEFINE_PROP_UINT8("lreadl2ptbl", NvmeCtrl, lnvm_ctrl.read_l2p_tbl, 1),
+    DEFINE_PROP_UINT16("lchannels", NvmeCtrl, lightnvm_ctrl.id_ctrl.nschannels, 4),
+    DEFINE_PROP_UINT8("lreadl2ptbl", NvmeCtrl, lightnvm_ctrl.read_l2p_tbl, 1),
     DEFINE_PROP_END_OF_LIST(),
 };
 

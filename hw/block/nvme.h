@@ -636,8 +636,8 @@ typedef struct NvmeIdCtrl {
 } NvmeIdCtrl;
 
 enum LnvmIoSched {
-    LNVM_IOSCHED_CHANNEL	= 0,
-    LNVM_IOSCHED_CHIP		= 1,
+    LNVM_IOSCHED_CHANNEL     = 0,
+    LNVM_IOSCHED_CHIP        = 1,
 };
 
 typedef struct LnvmIdChannel {
@@ -658,14 +658,9 @@ typedef struct LnvmIdChannel {
     uint8_t     res[133];
 } QEMU_PACKED LnvmIdChannel;
 
-#define LNVM_NUM_FEATURES 192
-typedef struct LnvmIdFeatures {
-    unsigned long map[BITS_TO_LONGS(LNVM_NUM_FEATURES)];
-} QEMU_PACKED LnvmIdFeatures;
-
 enum LnvmNvmType {
-    NVM_BLOCK_ADDRESSABLE     = 0,
-    NVM_BYTE_ADDRESSABLE      = 1,
+    NVM_BLOCK_ADDRESSABLE   = 0,
+    NVM_BYTE_ADDRESSABLE    = 1,
 };
 
 typedef struct LnvmIdCtrl {
@@ -676,16 +671,15 @@ typedef struct LnvmIdCtrl {
 } QEMU_PACKED LnvmIdCtrl;
 
 enum LnvmResponsibility {
-    LNVM_R_L2P         = 0,
-    LNVM_R_P2L         = 1,
-    LNVM_R_GC          = 2,
-    LNVM_R_ECC         = 3,
+    LNVM_RSP_L2P       = 1 << 0,
+    LNVM_RSP_GC        = 1 << 1,
+    LNVM_RSP_ECC       = 1 << 2,
 };
 
 enum LnvmExtension {
     LNVM_EXT_BLK_MV    = 1 << 0,
     LNVM_EXT_CPB       = 1 << 1,
-    LNVM_EXT_PS        = 2 << 2,
+    LNVM_EXT_PS        = 1 << 2,
 };
 
 enum NvmeIdCtrlOacs {
@@ -823,7 +817,6 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNs) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(LnvmIdCtrl) != 256);
     QEMU_BUILD_BUG_ON(sizeof(LnvmIdChannel) != 192);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmIdFeatures) != LNVM_NUM_FEATURES >> 3);
 }
 
 typedef struct NvmeAsyncEvent {
@@ -843,7 +836,7 @@ typedef struct NvmeRequest {
     uint64_t                meta_size;
     uint64_t                mptr;
     void                    *meta_buf;
-    uint64_t                lnvm_lba;
+    uint64_t                lightnvm_lba;
     NvmeCqe                 cqe;
     BlockAcctCookie         acct;
     QEMUSGList              qsg;
@@ -926,22 +919,17 @@ typedef struct NvmeNamespace {
 #define NVME(obj) \
         OBJECT_CHECK(NvmeCtrl, (obj), TYPE_NVME)
 
+typedef struct LnvmIdFeatures {
+   uint64_t rsp;
+   uint64_t ext;
+} LnvmIdFeatures;
+
 typedef struct LnvmCtrl {
     LnvmIdCtrl     id_ctrl;
     LnvmIdFeatures id_features;
     LnvmIdChannel  *channels;
     uint8_t        read_l2p_tbl;
 } LnvmCtrl;
-
-enum LnvmFeatures {
-    R_L2P_MAPPING	= 0U,
-    R_P2L_MAPPING	= 1U,
-    R_GC		= 2U,
-    R_ECC		= 3U,
-    E_BLK_MOVE		= 256U,
-    E_NVM_COPY_BACK	= 257U,
-    E_SAFE_SHUTDOWN	= 258U,
-};
 
 typedef struct NvmeCtrl {
     PCIDevice    parent_obj;
@@ -1011,7 +999,7 @@ typedef struct NvmeCtrl {
     QEMUTimer   *aer_timer;
     uint8_t     aer_mask;
 
-    LnvmCtrl     lnvm_ctrl;
+    LnvmCtrl     lightnvm_ctrl;
 } NvmeCtrl;
 
 typedef struct NvmeDifTuple {
