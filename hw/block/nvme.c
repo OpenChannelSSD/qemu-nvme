@@ -68,6 +68,9 @@
  * and fail to load if there is a conflict or a configuration the emulated
  * device is unable to handle.
  *
+ * Note that when a CMB is requested the NVMe version is set to 1.2,
+ * for all other cases it is set to 1.1.
+ *
  */
 
 /**
@@ -1959,7 +1962,10 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     NVME_CAP_SET_MPSMIN(n->bar.cap, n->mpsmin);
     NVME_CAP_SET_MPSMAX(n->bar.cap, n->mpsmax);
 
-    n->bar.vs = 0x00010001;
+    if (n->cmb)
+        n->bar.vs = 0x00010200;
+    else
+        n->bar.vs = 0x00010100;
     n->bar.intmc = n->bar.intms = 0;
     n->temperature = NVME_TEMPERATURE;
 }
