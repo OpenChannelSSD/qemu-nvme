@@ -2643,7 +2643,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, PCI_VENDOR_ID_INTEL),
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x5845),
-    DEFINE_PROP_UINT8("lver", NvmeCtrl, lightnvm_ctrl.id_ctrl.ver_id, 1),
+    DEFINE_PROP_UINT8("lver", NvmeCtrl, lightnvm_ctrl.id_ctrl.ver_id, 0),
     DEFINE_PROP_UINT8("ltype", NvmeCtrl, lightnvm_ctrl.id_ctrl.nvm_type,
         NVM_BLOCK_ADDRESSABLE),
     DEFINE_PROP_UINT16("lchannels", NvmeCtrl, lightnvm_ctrl.id_ctrl.nschannels, 4),
