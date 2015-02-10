@@ -960,6 +960,8 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     switch (cmd->opcode) {
     case NVME_CMD_WRITE:
     case NVME_CMD_READ:
+    case LNVM_CMD_HYBRID_WRITE:
+    case LNVM_CMD_HYBRID_READ:
         return nvme_rw(n, ns, cmd, req);
 
     case NVME_CMD_FLUSH:

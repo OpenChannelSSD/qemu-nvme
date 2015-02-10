@@ -262,8 +262,12 @@ enum NvmeIoCommands {
 };
 
 enum LnvmDmCommands {
-    LNVM_CMD_ERASE_SYNC        = 0x80,
-    LNVM_CMD_ERASE_ASYNC       = 0x81,
+    LNVM_CMD_HYBRID_WRITE      = 0xE0,
+    LNVM_CMD_HYBRID_READ       = 0xE1,
+    LNVM_CMD_PHYS_WRITE        = 0xE2,
+    LNVM_CMD_PHYS_READ         = 0xE3,
+    LNVM_CMD_ERASE_SYNC        = 0xE4,
+    LNVM_CMD_ERASE_ASYNC       = 0xE5,
 };
 
 typedef struct LnvmGetL2PTbl {
