@@ -2337,7 +2337,7 @@ static void nvme_init_namespaces(NvmeCtrl *n)
         NvmeNamespace *ns = &n->namespaces[i];
         NvmeIdNs *id_ns = &ns->id_ns;
 
-        id_ns->nsfeat = lightnvm_dev(n) ? 0x02 : 0x0;
+        id_ns->nsfeat = lightnvm_dev(n) ? 0x08 : 0x0;
         id_ns->nlbaf = n->nlbaf - 1;
         id_ns->flbas = n->lba_index | (n->extended << 4);
         id_ns->mc = n->mc;
@@ -2392,13 +2392,7 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     id->ieee[2] = 0xb3;
     id->cmic = 0;
     id->mdts = n->mdts;
-    if (lightnvm_dev(n)) {
-        lightnvm_init_id_ctrl(&n->lightnvm_ctrl.id_ctrl);
-        id->oacs = cpu_to_le16(n->oacs | NVME_OACS_LNVM_DEV );
-    }
-    else {
-        id->oacs = cpu_to_le16(n->oacs);
-    }
+    id->oacs = cpu_to_le16(n->oacs);
     id->acl = n->acl;
     id->aerl = n->aerl;
     id->frmw = 7 << 1 | 1;
@@ -2442,6 +2436,10 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     NVME_CAP_SET_DSTRD(n->bar.cap, n->db_stride);
     NVME_CAP_SET_NSSRS(n->bar.cap, 0);
     NVME_CAP_SET_CSS(n->bar.cap, 1);
+    if (lightnvm_dev(n)) {
+        NVME_CAP_SET_LIGHTNVM(n->bar.cap, 1);
+        lightnvm_init_id_ctrl(&n->lightnvm_ctrl.id_ctrl);
+    }
     NVME_CAP_SET_MPSMIN(n->bar.cap, n->mpsmin);
     NVME_CAP_SET_MPSMAX(n->bar.cap, n->mpsmax);
 
