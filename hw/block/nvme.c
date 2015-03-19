@@ -588,7 +588,7 @@ static void nvme_rw_cb(void *opaque, int ret)
         }
     } else {
         if (lightnvm_dev(n) && req->is_write) {
-            ns->tbl[req->lightnvm_lba] = req->slba + 1;
+            ns->tbl[req->lightnvm_lba] = req->slba;
         }
     }
 
@@ -628,16 +628,17 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
-        elba = spba + nlb - 1;
-        slba = spba - 1;
+        elba = spba + nlb;
+        slba = spba;
         req->lightnvm_lba = le64_to_cpu(rw->slba);
+        req->is_write = rw->opcode == LNVM_CMD_HYBRID_WRITE;
     } else {
         elba = slba + nlb;
+        req->is_write = rw->opcode == NVME_CMD_WRITE;
     }
 
     aio_slba = ns->start_block + (slba << (data_shift - BDRV_SECTOR_BITS));
 
-    req->is_write = rw->opcode == NVME_CMD_WRITE;
     if (elba > le64_to_cpu(ns->id_ns.nsze)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
             offsetof(NvmeRwCmd, nlb), elba, ns->id);
