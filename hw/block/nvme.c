@@ -894,6 +894,7 @@ static uint16_t lightnvm_erase_sync(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd
     return NVME_SUCCESS;
 }
 
+#if 0
 static void erase_io_complete_cb(void *opaque, int ret)
 {
     NvmeRequest *req = opaque;
@@ -947,6 +948,7 @@ static uint16_t lightnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cm
 
     return NVME_NO_COMPLETE;
 }
+#endif
 
 static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
@@ -962,7 +964,6 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     case NVME_CMD_WRITE:
     case NVME_CMD_READ:
     case LNVM_CMD_HYBRID_WRITE:
-    case LNVM_CMD_HYBRID_READ:
         return nvme_rw(n, ns, cmd, req);
 
     case NVME_CMD_FLUSH:
@@ -998,12 +999,6 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     case LNVM_CMD_ERASE_SYNC:
         if (lightnvm_dev(n)) {
             return lightnvm_erase_sync(n, ns, cmd, req);
-        }
-        return NVME_INVALID_OPCODE | NVME_DNR;
-
-    case LNVM_CMD_ERASE_ASYNC:
-        if (lightnvm_dev(n)) {
-            return lightnvm_erase_async(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
 

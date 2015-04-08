@@ -244,11 +244,12 @@ enum NvmeAdminCommands {
 };
 
 enum LnvmAdminCommands {
-    LNVM_ADM_CMD_IDENTIFY          = 0xF0,
-    LNVM_ADM_CMD_GET_FEATURES      = 0xF1,
-    LNVM_ADM_CMD_SET_FEATURES      = 0xF2,
-    LNVM_ADM_CMD_GET_L2P_TBL       = 0xF3,
-    LNVM_ADM_CMD_GET_BB_TBL        = 0xF4,
+    LNVM_ADM_CMD_IDENTIFY          = 0xe2,
+    LNVM_ADM_CMD_GET_FEATURES      = 0xe6,
+    LNVM_ADM_CMD_SET_FEATURES      = 0xe5,
+    LNVM_ADM_CMD_GET_L2P_TBL       = 0xea,
+    LNVM_ADM_CMD_GET_BB_TBL        = 0xf2,
+    LNVM_ADM_CMD_SET_BB_TBL        = 0xf1,
 };
 
 enum NvmeIoCommands {
@@ -262,12 +263,11 @@ enum NvmeIoCommands {
 };
 
 enum LnvmDmCommands {
-    LNVM_CMD_HYBRID_WRITE      = 0xE0,
-    LNVM_CMD_HYBRID_READ       = 0xE1,
-    LNVM_CMD_PHYS_WRITE        = 0xE2,
-    LNVM_CMD_PHYS_READ         = 0xE3,
-    LNVM_CMD_ERASE_SYNC        = 0xE4,
-    LNVM_CMD_ERASE_ASYNC       = 0xE5,
+    LNVM_CMD_HYBRID_WRITE      = 0x81,
+    LNVM_CMD_HYBRID_READ       = 0x02,
+    LNVM_CMD_PHYS_WRITE        = 0x91,
+    LNVM_CMD_PHYS_READ         = 0x92,
+    LNVM_CMD_ERASE_SYNC        = 0x90,
 };
 
 typedef struct LnvmGetL2PTbl {
