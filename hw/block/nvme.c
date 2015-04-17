@@ -1866,19 +1866,54 @@ static uint16_t lightnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req
     return NVME_SUCCESS;
 }
 
+/* TODO: Implement parameter for BB frequency */
+/* TODO: Relax assumption that every lun has the same number of blocks */
 static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
-    LnvmGetBBTbl *bbcmd = (LnvmGetBBTbl *)cmd;
-    uint32_t off = le32_to_cpu(bbcmd->tbl_off);
-    uint64_t prp1 = le64_to_cpu(bbcmd->prp1);
-    uint64_t prp2 = le64_to_cpu(bbcmd->prp2);
-    uint8_t prp1_len = bbcmd->prp1_len;
+	NvmeNamespace *ns;
+	LnvmCtrl *ln;
+	LnvmIdChannel *c;
+	LnvmGetBBTbl *bbtbl = (LnvmGetBBTbl*)cmd;
 
-    fprintf(stderr, "NVME: lightnvm_get_bb_tbl - STUB! (tbl_off:%"SCNu32", "
-            "prp1:%"SCNu64", prp2:%"SCNu64", prp1_len%"SCNu8")\n",
-            off, prp1, prp2, prp1_len);
+	uint32_t nsid = le32_to_cpu(bbtbl->nsid);
+	uint64_t prp1 = le64_to_cpu(bbtbl->prp1);
+	uint64_t prp2 = le64_to_cpu(bbtbl->prp2);
+	/* uint8_t prp1_len = bbcmd->prp1_len; */
+	uint32_t lbb = le32_to_cpu(bbtbl->lbb);
+	uint32_t nr_blocks;
+	uint8_t bb_frequency;
+	void *bb_bitmap;
+	uint32_t i;
 
-    return NVME_SUCCESS; /*TODO: STUB*/
+	if (nsid == 0 || nsid > n->num_namespaces) {
+		return NVME_INVALID_NSID | NVME_DNR;
+	}
+
+	ns = &n->namespaces[nsid - 1];
+	ln = &n->lightnvm_ctrl;
+	c = &ln->channels[lbb]; /* XXX: This might be incorrect. Test with more
+				   luns */
+	nr_blocks = (c->laddr_end - c->laddr_begin) / LNVM_PAGES_PR_BLK;
+
+	bb_bitmap = malloc(nr_blocks);
+	bitmap_clear(bb_bitmap, 0, nr_blocks);
+
+	bb_frequency = 100;
+	for (i = 0; i < nr_blocks; i++) {
+		if ((i % bb_frequency) == 0) {
+			set_bit(i, bb_bitmap);
+		}
+	}
+
+	if (nvme_dma_read_prp(n, (uint8_t*)bb_bitmap, nr_blocks, prp1, prp2)) {
+		nvme_set_error_page(n, req->sq->sqid, cmd->cid,
+			NVME_INVALID_FIELD, (uint16_t)1234, 0, ns->id);
+		return NVME_INVALID_FIELD | NVME_DNR;
+	}
+
+	free(bb_bitmap);
+
+	return NVME_SUCCESS; /*TODO: STUB*/
 }
 
 static int lightnvm_flush_tbls(NvmeCtrl *n)

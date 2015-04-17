@@ -286,16 +286,16 @@ typedef struct LnvmGetL2PTbl {
 
 typedef struct LnvmGetBBTbl {
   uint8_t opcode;
-  uint8_t fuse;
+  uint8_t flags;
   uint16_t cid;
   uint32_t nsid;
-  uint32_t rsvd1[4];
+  uint64_t rsvd1[2];
   uint64_t prp1;
   uint64_t prp2;
-  uint32_t tbl_off;
-  uint8_t prp1_len;
-  uint8_t rsvd2[3];
-  uint32_t rsvd3[4];
+  uint32_t prp1_len;
+  uint32_t prp2_len;
+  uint32_t lbb;
+  uint32_t rsvd3[3];
 } LnvmGetBBTbl;
 
 typedef struct NvmeDeleteQ {
