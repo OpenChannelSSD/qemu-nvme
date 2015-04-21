@@ -933,11 +933,15 @@ typedef struct LnvmIdFeatures {
    uint64_t ext;
 } LnvmIdFeatures;
 
+#define LNVM_DEFAULT_BB_FREQ 100; /* Default: 1 bad block per 100 blocks */
 typedef struct LnvmCtrl {
     LnvmIdCtrl     id_ctrl;
     LnvmIdFeatures id_features;
     LnvmIdChannel  *channels;
     uint8_t        read_l2p_tbl;
+    uint8_t        bb_gen_freq;
+    char           *bb_tbl_name;
+    FILE           *bb_tbl;
 } LnvmCtrl;
 
 typedef struct NvmeCtrl {

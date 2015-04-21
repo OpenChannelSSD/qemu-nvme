@@ -30,36 +30,43 @@
  *
  * Advanced optional options:
  *
- *  namespaces=<int> : Namespaces to make out of the backing storage, Default:1
- *  queues=<int>     : Number of possible IO Queues, Default:64
- *  entries=<int>    : Maximum number of Queue entires possible, Default:0x7ff
- *  max_cqes=<int>   : Maximum completion queue entry size, Default:0x4
- *  max_sqes=<int>   : Maximum submission queue entry size, Default:0x6
- *  mpsmin=<int>     : Minimum page size supported, Default:0
- *  mpsmax=<int>     : Maximum page size supported, Default:0
- *  stride=<int>     : Doorbell stride, Default:0
- *  aerl=<int>       : Async event request limit, Default:3
- *  acl=<int>        : Abort command limit, Default:3
- *  elpe=<int>       : Error log page entries, Default:3
- *  mdts=<int>       : Maximum data transfer size, Default:5
- *  cqr=<int>        : Contiguous queues required, Default:1
- *  vwc=<int>        : Volatile write cache enabled, Default:0
- *  intc=<int>       : Interrupt configuration disabled, Default:0
- *  intc_thresh=<int>: Interrupt coalesce threshold, Default:0
- *  intc_ttime=<int> : Interrupt coalesce time 100's of usecs, Default:0
- *  nlbaf=<int>      : Number of logical block formats, Default:1
- *  lba_index=<int>  : Default namespace block format index, Default:0
- *  extended=<int>   : Use extended-lba for meta-data, Default:0
- *  dpc=<int>        : Data protection capabilities, Default:0
- *  dps=<int>        : Data protection settings, Default:0
- *  mc=<int>         : Meta-data capabilities, Default:0
- *  meta=<int>       : Meta-data size, Default:0
- *  oncs=<oncs>      : Optional NVMe command support, Default:DSM
- *  oacs=<oacs>      : Optional Admin command support, Default:Format
- *  cmb=<cmb>        : Controller Memory Buffer, size in MB, Default:0
- *  lver=<int>       : version of the LightNVM standard to use, Default:1
- *  ltype=<nvmtype>  : Whether device is block- or byte addressable, Default:0 (block)
- *  lchannels=<int>  : Number of channels per namespace, Default: 4
+ *  namespaces=<int>   : Namespaces to make out of the backing storage, Default:1
+ *  queues=<int>       : Number of possible IO Queues, Default:64
+ *  entries=<int>      : Maximum number of Queue entires possible, Default:0x7ff
+ *  max_cqes=<int>     : Maximum completion queue entry size, Default:0x4
+ *  max_sqes=<int>     : Maximum submission queue entry size, Default:0x6
+ *  mpsmin=<int>       : Minimum page size supported, Default:0
+ *  mpsmax=<int>       : Maximum page size supported, Default:0
+ *  stride=<int>       : Doorbell stride, Default:0
+ *  aerl=<int>         : Async event request limit, Default:3
+ *  acl=<int>          : Abort command limit, Default:3
+ *  elpe=<int>         : Error log page entries, Default:3
+ *  mdts=<int>         : Maximum data transfer size, Default:5
+ *  cqr=<int>          : Contiguous queues required, Default:1
+ *  vwc=<int>          : Volatile write cache enabled, Default:0
+ *  intc=<int>         : Interrupt configuration disabled, Default:0
+ *  intc_thresh=<int>  : Interrupt coalesce threshold, Default:0
+ *  intc_ttime=<int>   : Interrupt coalesce time 100's of usecs, Default:0
+ *  nlbaf=<int>        : Number of logical block formats, Default:1
+ *  lba_index=<int>    : Default namespace block format index, Default:0
+ *  extended=<int>     : Use extended-lba for meta-data, Default:0
+ *  dpc=<int>          : Data protection capabilities, Default:0
+ *  dps=<int>          : Data protection settings, Default:0
+ *  mc=<int>           : Meta-data capabilities, Default:0
+ *  meta=<int>         : Meta-data size, Default:0
+ *  oncs=<oncs>        : Optional NVMe command support, Default:DSM
+ *  oacs=<oacs>        : Optional Admin command support, Default:Format
+ *  cmb=<cmb>          : Controller Memory Buffer, size in MB, Default:0
+ *  lver=<int>         : version of the LightNVM standard to use, Default:1
+ *  ltype=<nvmtype>    : Whether device is block- or byte addressable, Default:0 (block)
+ *  lchannels=<int>    : Number of channels per namespace, Default: 4
+ *  lreadl2ptbl=<int>  : Load logical to physical table. 1: yes, 0: no. Default: 1
+ *  lbbtable=<file>    : Load bad block table from file destination (Provide path
+ *  to file. If no file is provided a bad block table will be generation. Look
+ *  at lbbfrequency. Default: Null (no file).
+ *  lbbfrequency:<int> : Bad block frequency for generating bad block table. If
+ *  no frequency is provided LNVM_DEFAULT_BB_FREQ will be used.
+ *
  *
  * The logical block formats all start at 512 byte blocks and double for the
  * next index. If meta-data is non-zero, half the logical block formats will
@@ -1866,54 +1873,85 @@ static uint16_t lightnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req
     return NVME_SUCCESS;
 }
 
-/* TODO: Implement parameter for BB frequency */
-/* TODO: Relax assumption that every lun has the same number of blocks */
+/* TODO: Implement for different bad block table formats. It depends on flash
+ * vendors.
+ */
+static int lightnvm_read_bbtbl(LnvmCtrl *ln, void *bb_bitmap)
+{
+    return 0;
+}
+
+static int lightnvm_gen_bbtbl(LnvmCtrl *ln, uint32_t nr_blocks, void *bb_bitmap)
+{
+    uint32_t i;
+    uint8_t bb_frequency;
+
+    if (!ln->bb_gen_freq)
+        ln->bb_gen_freq = LNVM_DEFAULT_BB_FREQ;
+
+    bb_frequency = ln->bb_gen_freq;
+
+    for (i = 0; i < nr_blocks; i++) {
+        if ((i % bb_frequency) == 0) {
+            set_bit(i, bb_bitmap);
+        }
+    }
+
+    printf("Generated bad block table. Bad block freq: %d\n", bb_frequency);
+    return 0;
+}
+
 static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
-	NvmeNamespace *ns;
-	LnvmCtrl *ln;
-	LnvmIdChannel *c;
-	LnvmGetBBTbl *bbtbl = (LnvmGetBBTbl*)cmd;
+    NvmeNamespace *ns;
+    LnvmCtrl *ln;
+    LnvmIdChannel *c;
+    LnvmGetBBTbl *bbtbl = (LnvmGetBBTbl*)cmd;
 
-	uint32_t nsid = le32_to_cpu(bbtbl->nsid);
-	uint64_t prp1 = le64_to_cpu(bbtbl->prp1);
-	uint64_t prp2 = le64_to_cpu(bbtbl->prp2);
-	/* uint8_t prp1_len = bbcmd->prp1_len; */
-	uint32_t lbb = le32_to_cpu(bbtbl->lbb);
-	uint32_t nr_blocks;
-	uint8_t bb_frequency;
-	void *bb_bitmap;
-	uint32_t i;
+    uint32_t nsid = le32_to_cpu(bbtbl->nsid);
+    uint64_t prp1 = le64_to_cpu(bbtbl->prp1);
+    uint64_t prp2 = le64_to_cpu(bbtbl->prp2);
+    /* uint8_t prp1_len = bbcmd->prp1_len; */
+    uint32_t lbb = le32_to_cpu(bbtbl->lbb);
+    uint32_t nr_blocks;
+    void *bb_bitmap;
+    int ret = NVME_SUCCESS;
 
-	if (nsid == 0 || nsid > n->num_namespaces) {
-		return NVME_INVALID_NSID | NVME_DNR;
-	}
+    if (nsid == 0 || nsid > n->num_namespaces) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
 
-	ns = &n->namespaces[nsid - 1];
-	ln = &n->lightnvm_ctrl;
-	c = &ln->channels[lbb]; /* XXX: This might be incorrect. Test with more
-				   luns */
-	nr_blocks = (c->laddr_end - c->laddr_begin) / LNVM_PAGES_PR_BLK;
+    ns = &n->namespaces[nsid - 1];
+    ln = &n->lightnvm_ctrl;
+    c = &ln->channels[lbb]; /* XXX: This might be incorrect. Test with more
+                            luns */
+    nr_blocks = (c->laddr_end - c->laddr_begin) / LNVM_PAGES_PR_BLK;
 
-	bb_bitmap = malloc(nr_blocks);
-	bitmap_clear(bb_bitmap, 0, nr_blocks);
+    bb_bitmap = malloc(nr_blocks);
+    if (!bb_bitmap) {
+        error_report("lightnvm: cannot allocate bitmap for bad block table\n");
+        ret = -ENOMEM;
+        goto out;
+    }
 
-	bb_frequency = 100;
-	for (i = 0; i < nr_blocks; i++) {
-		if ((i % bb_frequency) == 0) {
-			set_bit(i, bb_bitmap);
-		}
-	}
+    bitmap_clear(bb_bitmap, 0, nr_blocks);
 
-	if (nvme_dma_read_prp(n, (uint8_t*)bb_bitmap, nr_blocks, prp1, prp2)) {
-		nvme_set_error_page(n, req->sq->sqid, cmd->cid,
-			NVME_INVALID_FIELD, (uint16_t)1234, 0, ns->id);
-		return NVME_INVALID_FIELD | NVME_DNR;
-	}
+    ret = (ln->bb_tbl_name) ? lightnvm_read_bbtbl(ln, bb_bitmap) :
+                                lightnvm_gen_bbtbl(ln, nr_blocks, bb_bitmap);
+    if (ret)
+        goto clean;
 
-	free(bb_bitmap);
+    if (nvme_dma_read_prp(n, (uint8_t*)bb_bitmap, nr_blocks, prp1, prp2)) {
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid,
+            NVME_INVALID_FIELD, (uint16_t)1234, 0, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
 
-	return NVME_SUCCESS; /*TODO: STUB*/
+
+clean:
+    free(bb_bitmap);
+out:
+    return ret; /*TODO: STUB*/
 }
 
 static int lightnvm_flush_tbls(NvmeCtrl *n)
@@ -2545,6 +2583,7 @@ static int lightnvm_init(NvmeCtrl *n)
     uint64_t chnl_blks, page_size;
     uint8_t lba_index;
     uint8_t lba_ds;
+    int ret = 0;
     uint16_t ns_chnls;
 
     ln = &n->lightnvm_ctrl;
@@ -2576,7 +2615,23 @@ static int lightnvm_init(NvmeCtrl *n)
         }
     }
 
-    return (n->lightnvm_ctrl.read_l2p_tbl) ? lightnvm_read_tbls(n) : 0;
+    ret = (n->lightnvm_ctrl.read_l2p_tbl) ? lightnvm_read_tbls(n) : 0;
+    if (ret) {
+        error_report("nvme: cannot read l2p table\n");
+        return ret;
+    }
+
+    if (!ln->bb_tbl_name)
+        return 0;
+
+    ln->bb_tbl = fopen(ln->bb_tbl_name, "rw+");
+    if (!ln->bb_tbl) {
+        error_report("nvme: cannot open bad block table file: %s\n",
+                                                         ln->bb_tbl_name);
+        return -EEXIST;
+    }
+
+    return 0;
 }
 
 static int nvme_init(PCIDevice *pci_dev)
@@ -2617,6 +2672,9 @@ static int nvme_init(PCIDevice *pci_dev)
 
 static void lightnvm_exit(NvmeCtrl *n)
 {
+    fclose(n->lightnvm_ctrl.bb_tbl);
+    n->lightnvm_ctrl.bb_tbl = NULL;
+
     g_free(n->lightnvm_ctrl.channels);
 }
 
@@ -2679,6 +2737,9 @@ static Property nvme_props[] = {
         NVM_BLOCK_ADDRESSABLE),
     DEFINE_PROP_UINT16("lchannels", NvmeCtrl, lightnvm_ctrl.id_ctrl.nschannels, 4),
     DEFINE_PROP_UINT8("lreadl2ptbl", NvmeCtrl, lightnvm_ctrl.read_l2p_tbl, 1),
+    DEFINE_PROP_STRING("lbbtable", NvmeCtrl, lightnvm_ctrl.bb_tbl_name),
+    DEFINE_PROP_UINT8("lbbfrequency", NvmeCtrl, lightnvm_ctrl.bb_gen_freq, 0),
+
     DEFINE_PROP_END_OF_LIST(),
 };
 
