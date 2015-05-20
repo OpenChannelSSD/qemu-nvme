@@ -1839,6 +1839,7 @@ void gtk_display_init(DisplayState *ds, bool full_screen, bool grab_on_hover)
 {
     GtkDisplayState *s = g_malloc0(sizeof(*s));
     char *filename;
+    GdkDisplay *window_display;
 
     gtk_init(NULL, NULL);
 
@@ -1857,7 +1858,9 @@ void gtk_display_init(DisplayState *ds, bool full_screen, bool grab_on_hover)
     bindtextdomain("qemu", CONFIG_QEMU_LOCALEDIR);
     textdomain("qemu");
 
-    s->null_cursor = gdk_cursor_new(GDK_BLANK_CURSOR);
+    window_display = gtk_widget_get_display(s->window);
+    s->null_cursor = gdk_cursor_new_for_display(window_display,
+                                                GDK_BLANK_CURSOR);
 
     s->mouse_mode_notifier.notify = gd_mouse_mode_change;
     qemu_add_mouse_mode_change_notifier(&s->mouse_mode_notifier);
