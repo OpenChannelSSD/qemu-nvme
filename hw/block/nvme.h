@@ -280,8 +280,7 @@ typedef struct LnvmGetL2PTbl {
     uint64_t prp2;
     uint64_t slba;
     uint32_t nlb;
-    uint16_t prp1_len;
-    uint16_t rsvd2[5];
+    uint16_t rsvd2[6];
 } LnvmGetL2PTbl;
 
 typedef struct LnvmGetBBTbl {
@@ -933,7 +932,6 @@ typedef struct LnvmIdFeatures {
    uint64_t ext;
 } LnvmIdFeatures;
 
-#define LNVM_DEFAULT_BB_FREQ 100; /* Default: 1 bad block per 100 blocks */
 typedef struct LnvmCtrl {
     LnvmIdCtrl     id_ctrl;
     LnvmIdFeatures id_features;
