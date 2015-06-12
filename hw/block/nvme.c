@@ -144,6 +144,8 @@
 #define LNVM_PBA_UNMAPPED 0
 #define LNVM_LBA_UNMAPPED UINT64_MAX
 #define LNVM_PAGES_PR_BLK 128
+#define LNVM_PAGE_SIZE 4096
+#define LNVM_MAX_PAGES_PER_RQ 64
 
 static void nvme_process_sq(void *opaque);
 
@@ -618,6 +620,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
     uint64_t data_size = nlb << data_shift;
     uint64_t meta_size = nlb * ms;
+    uint8_t n_pages = data_size / LNVM_PAGE_SIZE;
     uint64_t aio_slba;
 
     if (lightnvm_dev(n)) {
@@ -628,6 +631,14 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         */
         LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
         uint64_t spba = le64_to_cpu(lrw->spba);
+        uint64_t phys_sector_list[LNVM_MAX_PAGES_PER_RQ];
+
+        if (n_pages > 1)
+                nvme_addr_read(n, spba,
+                                (void *)phys_sector_list, n_pages * sizeof(void *));
+        else
+                phys_sector_list[0] = spba;
+
 
         if (spba == LNVM_PBA_UNMAPPED) {
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
@@ -635,8 +646,13 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
-        elba = spba + nlb;
-        slba = spba;
+        /* XXX: The fact that physical addresses are sequential is a valid
+         * assumption given how we store pages in QEMU. This is not the case in
+         * real hardware; reason why we actually pass a list of ppa's to the
+         * device.
+         */
+        elba = phys_sector_list[0] + nlb;
+        slba = phys_sector_list[0];
         req->lightnvm_lba = le64_to_cpu(rw->slba);
         req->is_write = rw->opcode == LNVM_CMD_HYBRID_WRITE;
     } else {
