@@ -2574,6 +2574,8 @@ static int lightnvm_init(NvmeCtrl *n)
     n->lightnvm_ctrl.channels = g_malloc0(
         sizeof(LnvmIdChannel) * lightnvm_num_channels(n));
 
+    ln->id_features.rsp = (LNVM_RSP_L2P);
+
     for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
         ns_id = &ns->id_ns;
