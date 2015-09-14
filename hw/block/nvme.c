@@ -611,9 +611,9 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint16_t ctrl = le16_to_cpu(rw->control);
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
-    uint64_t slba = le64_to_cpu(rw->slba);
     uint64_t prp1 = le64_to_cpu(rw->prp1);
     uint64_t prp2 = le64_to_cpu(rw->prp2);
+    uint64_t slba;
     uint64_t elba;
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
@@ -625,10 +625,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     if (lightnvm_dev(n)) {
         /* In the case of a LightNVM device. The slba is the logical address, while the actual
-         * physical block address is stored in Command Dword 14-15. The spba is a 1-based
-         * value. i.e. substract 1 to get the actual address. 0 is used as "not mapped" and
-         * is not a valid command.
-        */
+         * physical block address is stored in Command Dword 11-10. */
         LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
         uint64_t spba = le64_to_cpu(lrw->spba);
         uint64_t phys_sector_list[LNVM_MAX_PAGES_PER_RQ];
@@ -642,7 +639,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
         if (spba == LNVM_PBA_UNMAPPED) {
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                offsetof(LnvmRwCmd, spba), slba + nlb, ns->id);
+                offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
@@ -651,11 +648,12 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
          * real hardware; reason why we actually pass a list of ppa's to the
          * device.
          */
-        elba = phys_sector_list[0] + nlb;
         slba = phys_sector_list[0];
-        req->lightnvm_lba = le64_to_cpu(rw->slba);
+        elba = phys_sector_list[0] + nlb;
+        req->lightnvm_lba = le64_to_cpu(lrw->slba);
         req->is_write = rw->opcode == LNVM_CMD_HYBRID_WRITE;
     } else {
+        slba = le64_to_cpu(rw->slba);
         elba = slba + nlb;
         req->is_write = rw->opcode == NVME_CMD_WRITE;
     }

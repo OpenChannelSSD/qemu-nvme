@@ -388,11 +388,11 @@ typedef struct LnvmRwCmd {
     uint64_t    mptr;
     uint64_t    prp1;
     uint64_t    prp2;
-    uint64_t    slba;
+    uint64_t    spba;
     uint16_t    nlb;
     uint16_t    control;
     uint32_t    dsmgmt;
-    uint64_t    spba;
+    uint64_t    slba;
 } LnvmRwCmd;
 
 typedef struct LnvmDmCmd {
