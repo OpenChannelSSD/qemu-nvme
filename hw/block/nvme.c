@@ -2602,7 +2602,7 @@ static int lightnvm_init(NvmeCtrl *n)
             c = &ln->channels[i * ns_chnls + j];
             c->laddr_begin = cpu_to_le64(chnl_blks * j);
             c->laddr_end = cpu_to_le64((chnl_blks * j) + chnl_blks);
-            c->oob_size = cpu_to_le32(0);
+            c->oob_size = cpu_to_le32(n->meta);
             c->queue_size = cpu_to_le32(64);
             c->gran_read = c->gran_write = cpu_to_le32(page_size);
             c->gran_erase = cpu_to_le32(page_size * LNVM_PAGES_PR_BLK);
