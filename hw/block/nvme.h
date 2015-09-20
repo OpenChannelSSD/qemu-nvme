@@ -26,7 +26,7 @@ enum NvmeCapShift {
     CAP_DSTRD_SHIFT    = 32,
     CAP_NSSRS_SHIFT    = 33,
     CAP_CSS_SHIFT      = 37,
-    CAP_LIGHTNVM_SHIFT = 38,
+    CAP_LIGHTNVM_SHIFT = 44,
     CAP_MPSMIN_SHIFT   = 48,
     CAP_MPSMAX_SHIFT   = 52,
 };

@@ -2404,12 +2404,15 @@ static void nvme_init_namespaces(NvmeCtrl *n)
         NvmeNamespace *ns = &n->namespaces[i];
         NvmeIdNs *id_ns = &ns->id_ns;
 
-        id_ns->nsfeat = lightnvm_dev(n) ? 0x08 : 0x0;
+        id_ns->nsfeat = 0x0;
         id_ns->nlbaf = n->nlbaf - 1;
         id_ns->flbas = n->lba_index | (n->extended << 4);
         id_ns->mc = n->mc;
         id_ns->dpc = n->dpc;
         id_ns->dps = n->dps;
+
+        if (lightnvm_dev(n))
+		id_ns->vs[0] = 0x1;
 
         /* TODO: Jesper, please clean this mess up */
         for (j = 0; j < ji; j++) {
@@ -2728,8 +2731,8 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("cmb", NvmeCtrl, cmb, 0),
     DEFINE_PROP_UINT16("oacs", NvmeCtrl, oacs, NVME_OACS_FORMAT),
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),
-    DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, 0x1d1d/*PCI_VENDOR_ID_INTEL*/),
-    DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x2807/* 0x5845 */),
+    DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, PCI_VENDOR_ID_INTEL),
+    DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x5845),
     DEFINE_PROP_UINT8("lver", NvmeCtrl, lightnvm_ctrl.id_ctrl.ver_id, 0),
     DEFINE_PROP_UINT8("ltype", NvmeCtrl, lightnvm_ctrl.id_ctrl.nvm_type,
         NVM_BLOCK_ADDRESSABLE),
