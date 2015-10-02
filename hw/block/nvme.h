@@ -643,39 +643,35 @@ typedef struct NvmeIdCtrl {
     uint8_t     vs[1024];
 } NvmeIdCtrl;
 
-enum LnvmIoSched {
-    LNVM_IOSCHED_CHANNEL     = 0,
-    LNVM_IOSCHED_CHIP        = 1,
-};
-
-typedef struct LnvmIdChannel {
+typedef struct LnvmIdGroup {
     uint64_t    laddr_begin;
-    uint64_t    laddr_end;
-    uint32_t    oob_size;
     uint32_t    queue_size;
-    uint32_t    gran_read;
-    uint32_t    gran_write;
-    uint32_t    gran_erase;
+    uint32_t    channels;
+    uint32_t    luns_per_chnl;
+    uint32_t    sec_per_pg;
+    uint32_t    pgs_per_blk;
+    uint32_t    blocks;
+    uint32_t    planes;
+    uint32_t    sec_size;
+    uint32_t    oob_size;
     uint32_t    t_r;
     uint32_t    t_sqr;
     uint32_t    t_w;
     uint32_t    t_sqw;
     uint32_t    t_e;
     uint16_t    chnl_parallelism;
-    uint8_t     io_sched;
-    uint8_t     res[133];
-} QEMU_PACKED LnvmIdChannel;
-
-enum LnvmNvmType {
-    NVM_BLOCK_ADDRESSABLE   = 0,
-    NVM_BYTE_ADDRESSABLE    = 1,
-};
+    uint8_t     plane_mode;
+    uint8_t     addr_mode;
+    uint8_t     res[124];
+} QEMU_PACKED LnvmIdGroup;
 
 typedef struct LnvmIdCtrl {
-    uint8_t            ver_id;
-    uint8_t            nvm_type;
-    uint16_t           nschannels;
-    uint8_t            unused[252];
+    uint16_t           ver_id;
+    uint16_t           ngroups;
+    uint16_t           nvm_type;
+    uint16_t           nluns; /* not in specification */
+    uint8_t            unused[248];
+    LnvmIdGroup        groups[20];
 } QEMU_PACKED LnvmIdCtrl;
 
 enum LnvmResponsibility {
@@ -823,8 +819,8 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeSmartLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrl) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNs) != 4096);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmIdCtrl) != 256);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmIdChannel) != 192);
+    QEMU_BUILD_BUG_ON(sizeof(LnvmIdCtrl) != 4096);
+    QEMU_BUILD_BUG_ON(sizeof(LnvmIdGroup) != 192);
 }
 
 typedef struct NvmeAsyncEvent {
@@ -935,7 +931,6 @@ typedef struct LnvmIdFeatures {
 typedef struct LnvmCtrl {
     LnvmIdCtrl     id_ctrl;
     LnvmIdFeatures id_features;
-    LnvmIdChannel  *channels;
     uint8_t        read_l2p_tbl;
     uint8_t        bb_gen_freq;
     char           *bb_tbl_name;
