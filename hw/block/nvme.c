@@ -605,7 +605,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     if (elba > le64_to_cpu(ns->id_ns.nsze)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
+	nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
             offsetof(NvmeRwCmd, nlb), elba, ns->id);
         return NVME_LBA_RANGE | NVME_DNR;
     }
@@ -1760,7 +1760,6 @@ static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
     */
     NvmeCtrl *n = ns->ctrl;
     NvmeIdNs *id_ns = &ns->id_ns;
-    LnvmIdCtrl *ln_id;
     uint64_t blks;
     uint64_t bdrv_blks;
 
@@ -1768,9 +1767,6 @@ static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
     bdrv_blks = ns_bdrv_blks(ns, ns->ns_blks, lba_idx);
 
     if (lightnvm_dev(n)) {
-        ln_id = &n->lightnvm_ctrl.id_ctrl;
-        blks = ns->ns_blks * ln_id->nluns;
-
         ns->tbl_dsk_start_offset =
             (ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS;
         ns->tbl_entries = blks;
@@ -1781,7 +1777,6 @@ static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
         lightnvm_tbl_initialize(ns);
     } else {
         ns->tbl = NULL;
-        blks = ns->ns_blks;
         ns->tbl_entries = 0;
     }
 
@@ -2362,7 +2357,7 @@ static int lightnvm_init(NvmeCtrl *n)
 
     for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
-        chnl_blks = ns->ns_blks;
+        chnl_blks = ns->ns_blks / LNVM_PAGES_PR_BLK;
 
         c = &ln->id_ctrl.groups[0];
         c->laddr_begin = cpu_to_le64(0);
