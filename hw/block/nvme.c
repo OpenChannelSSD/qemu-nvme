@@ -567,7 +567,6 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint8_t n_pages = data_size / LNVM_PAGE_SIZE;
     uint64_t aio_slba;
 
-    printf("TESTINg\n");
     if (lightnvm_dev(n)) {
         /* In the case of a LightNVM device. The slba is the logical address, while the actual
          * physical block address is stored in Command Dword 11-10. */
@@ -582,7 +581,6 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 phys_sector_list[0] = spba;
 
 
-	printf("LBaLBaLBALbLABLA: %llu\n", (unsigned long long)spba);
         if (spba == LNVM_PBA_UNMAPPED) {
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                 offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
@@ -901,7 +899,7 @@ static uint16_t lightnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req
     }
     if (nvme_dma_read_prp(n, (uint8_t *)&ns->tbl[slba], xfer_len,
                           prp1, prp2)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+	    nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                             offsetof(LnvmGetL2PTbl, prp1), 0, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -1022,7 +1020,6 @@ static uint16_t lightnvm_erase_sync(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd
     uint32_t nlb_blk = nlb << (data_shift - BDRV_SECTOR_BITS);
     uint64_t start = ns->start_block + (spba << (data_shift - BDRV_SECTOR_BITS));
 
-    printf("I AM YOUR FATHERRRRR: %llu %llu %u\n\n", (long long unsigned int)spba, (long long unsigned int) le64_to_cpu(dm->spba), nlb);
     if ((spba + nlb) <= ns->tbl_entries || nlb != 1) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
             offsetof(LnvmDmCmd, nlb), spba+nlb, ns->id);
@@ -1778,7 +1775,7 @@ static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
 
         ns->tbl_dsk_start_offset =
             (ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS;
-        ns->tbl_entries = blks;
+        ns->tbl_entries = blks * LNVM_PAGES_PR_BLK;
         if (ns->tbl) {
             g_free(ns->tbl);
         }
@@ -2370,7 +2367,7 @@ static int lightnvm_init(NvmeCtrl *n)
         chnl_blks = ns->ns_blks;
 
         c = &ln->id_ctrl.groups[0];
-        c->laddr_begin = cpu_to_le64(1);
+        c->laddr_begin = cpu_to_le64(0);
         c->queue_size = cpu_to_le32(64);
         c->channels = cpu_to_le32(1);
         c->luns_per_chnl = cpu_to_le32(nluns);
@@ -2631,7 +2628,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, PCI_VENDOR_ID_INTEL),
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x5845),
     DEFINE_PROP_UINT16("lver", NvmeCtrl, lightnvm_ctrl.id_ctrl.ver_id, 0),
-    DEFINE_PROP_UINT16("lluns", NvmeCtrl, lightnvm_ctrl.id_ctrl.nluns, 4),
+    DEFINE_PROP_UINT16("lluns", NvmeCtrl, lightnvm_ctrl.id_ctrl.nluns, 1),
     DEFINE_PROP_UINT8("lreadl2ptbl", NvmeCtrl, lightnvm_ctrl.read_l2p_tbl, 1),
     DEFINE_PROP_STRING("lbbtable", NvmeCtrl, lightnvm_ctrl.bb_tbl_name),
     DEFINE_PROP_UINT8("lbbfrequency", NvmeCtrl, lightnvm_ctrl.bb_gen_freq, 0),
