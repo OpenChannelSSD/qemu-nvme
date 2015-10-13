@@ -604,7 +604,6 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         aio_slba = ns->start_block + (slba << (data_shift - BDRV_SECTOR_BITS));
     }
 
-
     if (elba > le64_to_cpu(ns->id_ns.nsze)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
             offsetof(NvmeRwCmd, nlb), elba, ns->id);
@@ -1737,9 +1736,8 @@ static uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
         /* p_ent: LBA + md + L2P entry */
         uint64_t p_ent = lba_sz + sizeof(*(ns->tbl));
         uint64_t p_ents = ns_size / p_ent;
-        uint64_t units = p_ents / LNVM_PAGES_PR_BLK;
 
-        return units;
+        return p_ents;
     } else {
         return ns_size / lba_sz;
     }
@@ -1775,7 +1773,7 @@ static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
 
         ns->tbl_dsk_start_offset =
             (ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS;
-        ns->tbl_entries = blks * LNVM_PAGES_PR_BLK;
+        ns->tbl_entries = blks;
         if (ns->tbl) {
             g_free(ns->tbl);
         }
