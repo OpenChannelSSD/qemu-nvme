@@ -116,6 +116,7 @@
 #include <sysemu/block-backend.h>
 
 #include "nvme.h"
+#include "trace.h"
 
 #define NVME_MAX_QS PCI_MSIX_FLAGS_QSIZE
 #define NVME_MAX_QUEUE_ENTRIES  0xffff
@@ -1759,6 +1760,9 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
     if (addr < sizeof(n->bar)) {
         memcpy(&val, ptr + addr, size);
     }
+
+    trace_nvme_mmio_read(addr, size, val);
+
     return val;
 }
 
@@ -1846,6 +1850,8 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data,
     } else if (addr >= 0x1000) {
         nvme_process_db(n, addr, data);
     }
+
+    trace_nvme_mmio_write(addr, size, data);
 }
 
 static void nvme_cmb_write(void *opaque, hwaddr addr, uint64_t data,
@@ -1853,6 +1859,8 @@ static void nvme_cmb_write(void *opaque, hwaddr addr, uint64_t data,
 {
     NvmeCtrl *n = (NvmeCtrl *)opaque;
     memcpy(&n->cmbuf[addr], &data, size);
+
+    trace_nvme_cmb_write(addr, size, data);
 }
 
 static uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
@@ -1861,6 +1869,7 @@ static uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
     NvmeCtrl *n = (NvmeCtrl *)opaque;
 
     memcpy(&val, &n->cmbuf[addr], size);
+    trace_nvme_cmb_read(addr, size, val);
     return val;
 }
 

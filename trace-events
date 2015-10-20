@@ -1378,3 +1378,9 @@ i8257_unregistered_dma(int nchan, int dma_pos, int dma_len) "unregistered DMA ch
 cpu_set_state(int cpu_index, uint8_t state) "setting cpu %d state to %" PRIu8
 cpu_halt(int cpu_index) "halting cpu %d"
 cpu_unhalt(int cpu_index) "unhalting cpu %d"
+
+# hw/block/nvme.c
+nvme_mmio_write(uint64_t addr, unsigned size, uint64_t value) "nvme mmio write addr %" PRIx64 " size %d <- %" PRIx64
+nvme_mmio_read(uint64_t addr, unsigned size, uint64_t value) "nvme mmio read addr %" PRIx64 " size %d -> %" PRIx64
+nvme_cmb_write(uint64_t addr, unsigned size, uint64_t value) "nvme cmb write addr %" PRIx64 " size %d <- %" PRIx64
+nvme_cmb_read(uint64_t addr, unsigned size, uint64_t value) "nvme cmb read addr %" PRIx64 " size %d -> %" PRIx64
