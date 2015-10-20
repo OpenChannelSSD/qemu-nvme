@@ -595,7 +595,8 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         slba = phys_sector_list[0];
         elba = phys_sector_list[0] + nlb;
         req->lightnvm_lba = le64_to_cpu(lrw->slba);
-        req->is_write = rw->opcode == LNVM_CMD_HYBRID_WRITE;
+        req->is_write = (rw->opcode == LNVM_CMD_PHYS_WRITE ||
+                                          rw->opcode == LNVM_CMD_HYBRID_WRITE);
         aio_slba = ns->start_block + (slba << (data_shift - BDRV_SECTOR_BITS));
     } else {
         slba = le64_to_cpu(rw->slba);
@@ -605,7 +606,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     if (elba > le64_to_cpu(ns->id_ns.nsze)) {
-	nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
             offsetof(NvmeRwCmd, nlb), elba, ns->id);
         return NVME_LBA_RANGE | NVME_DNR;
     }
@@ -1107,6 +1108,8 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     switch (cmd->opcode) {
     case NVME_CMD_WRITE:
     case NVME_CMD_READ:
+    case LNVM_CMD_PHYS_READ:
+    case LNVM_CMD_PHYS_WRITE:
     case LNVM_CMD_HYBRID_WRITE:
         return nvme_rw(n, ns, cmd, req);
 
