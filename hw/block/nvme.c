@@ -838,7 +838,7 @@ static uint32_t lightnvm_tbl_size(NvmeNamespace *ns)
     return ns->tbl_entries * sizeof(*(ns->tbl));
 }
 
-static uint16_t lightnvm_identify(NvmeCtrl *n, NvmeCmd *cmd)
+static uint16_t lightnvm_identity(NvmeCtrl *n, NvmeCmd *cmd)
 {
     NvmeIdentify *c = (NvmeIdentify *)cmd;
     uint32_t nsid = le32_to_cpu(c->nsid);
@@ -851,25 +851,6 @@ static uint16_t lightnvm_identify(NvmeCtrl *n, NvmeCmd *cmd)
 
     return nvme_dma_read_prp(n, (uint8_t *)&n->lightnvm_ctrl.id_ctrl,
                                     sizeof(LnvmIdCtrl), prp1, prp2);
-}
-
-static uint16_t lightnvm_get_features(NvmeCtrl *n, NvmeCmd *cmd)
-{
-    uint64_t prp1 = le64_to_cpu(cmd->prp1);
-    uint64_t prp2 = le64_to_cpu(cmd->prp2);
-
-    return nvme_dma_read_prp(n, (uint8_t *)&n->lightnvm_ctrl.id_features,
-        sizeof(LnvmIdFeatures), prp1, prp2);
-}
-
-static uint16_t lightnvm_set_responsibility(NvmeCtrl *n, NvmeCmd *cmd)
-{
-    uint64_t resp = le64_to_cpu(cmd->cdw10);
-
-    if (resp != 0)
-        return NVME_INVALID_FIELD | NVME_DNR;
-
-    return NVME_SUCCESS;
 }
 
 static uint16_t lightnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
@@ -952,7 +933,7 @@ static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     ns = &n->namespaces[nsid - 1];
     ln = &n->lightnvm_ctrl;
     c = &ln->id_ctrl.groups[0];
-    nr_blocks = c->blocks;
+    nr_blocks = c->num_blk;
 
     bb_bitmap = malloc(nr_blocks);
     if (!bb_bitmap) {
@@ -1144,17 +1125,9 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
 
-    case LNVM_ADM_CMD_IDENTIFY:
+    case LNVM_ADM_CMD_IDENTITY:
         if (lightnvm_dev(n))
-            return lightnvm_identify(n, cmd);
-        return NVME_INVALID_OPCODE | NVME_DNR;
-    case LNVM_ADM_CMD_GET_FEATURES:
-        if (lightnvm_dev(n))
-            return lightnvm_get_features(n, cmd);
-        return NVME_INVALID_OPCODE | NVME_DNR;
-    case LNVM_ADM_CMD_SET_FEATURES:
-        if (lightnvm_dev(n))
-            return lightnvm_set_responsibility(n, cmd);
+            return lightnvm_identity(n, cmd);
         return NVME_INVALID_OPCODE | NVME_DNR;
     case LNVM_ADM_CMD_GET_L2P_TBL:
         if (lightnvm_dev(n))
@@ -1164,7 +1137,6 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         if (lightnvm_dev(n))
             return lightnvm_get_bb_tbl(n, cmd, req);
         return NVME_INVALID_OPCODE | NVME_DNR;
-
     case LNVM_CMD_ERASE_SYNC:
         if (lightnvm_dev(n))
             return lightnvm_erase_sync(n, ns, cmd, req);
@@ -2348,8 +2320,11 @@ static void nvme_init_namespaces(NvmeCtrl *n)
 
 static void lightnvm_init_id_ctrl(LnvmIdCtrl *ln_id)
 {
-    ln_id->ver_id = cpu_to_le16(ln_id->ver_id);
-    ln_id->ngroups = cpu_to_le16(1);
+    ln_id->ver_id = 1;
+    ln_id->vmnt = 0;
+    ln_id->cgrps = 1;
+    ln_id->cap = cpu_to_le32(0x3);
+    ln_id->dom = cpu_to_le32(0x1);
 }
 
 static int lightnvm_init(NvmeCtrl *n)
@@ -2360,34 +2335,35 @@ static int lightnvm_init(NvmeCtrl *n)
     unsigned int i;
     uint64_t chnl_blks;
     int ret = 0;
-    uint16_t nluns;
 
     ln = &n->lightnvm_ctrl;
-    nluns = le16_to_cpu(ln->id_ctrl.nluns);
-
-    ln->id_features.rsp = (LNVM_RSP_L2P);
 
     for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
         chnl_blks = ns->ns_blks / LNVM_PAGES_PR_BLK;
 
         c = &ln->id_ctrl.groups[0];
-        c->laddr_begin = cpu_to_le64(0);
-        c->queue_size = cpu_to_le32(64);
-        c->channels = cpu_to_le32(1);
-        c->luns_per_chnl = cpu_to_le32(nluns);
-        c->sec_per_pg = cpu_to_le32(1);
-        c->pgs_per_blk = cpu_to_le32(LNVM_PAGES_PR_BLK);
-        c->blocks = cpu_to_le32(chnl_blks);
-        c->planes = cpu_to_le32(1);
-        c->sec_size = cpu_to_le32(4096);
-        c->oob_size = cpu_to_le32(n->meta);
-        c->t_r = c->t_sqr = cpu_to_le32(10000);
-        c->t_w = c->t_sqw = cpu_to_le32(10000);
-        c->t_e = cpu_to_le32(100000);
-        c->chnl_parallelism = cpu_to_le16(0);
-        c->plane_mode = 0;
-        c->addr_mode = 0;
+        c->mtype = 0;
+        c->fmtype = 0;
+        c->num_ch = 1;
+        c->num_lun = 1;
+        c->num_pln = 1;
+
+        c->num_blk = cpu_to_le16(chnl_blks);
+        c->num_pg = cpu_to_le16(LNVM_PAGES_PR_BLK);
+        c->fpg_sz = cpu_to_le16(4096);
+        c->csecs = cpu_to_le16(4096);
+        c->sos = cpu_to_le16(n->meta);
+
+        c->trdt = cpu_to_le32(10000);
+        c->trdm = cpu_to_le32(10000);
+        c->tprt = cpu_to_le32(100000);
+        c->tprm = cpu_to_le32(100000);
+        c->tbet = cpu_to_le32(1000000);
+        c->tbem = cpu_to_le32(1000000);
+
+        c->mpos = cpu_to_le32(0x10101); /* single plane */
+        c->cpar = cpu_to_le16(0);
     }
 
     ret = (n->lightnvm_ctrl.read_l2p_tbl) ? lightnvm_read_tbls(n) : 0;
@@ -2632,8 +2608,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, PCI_VENDOR_ID_INTEL),
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x5845),
-    DEFINE_PROP_UINT16("lver", NvmeCtrl, lightnvm_ctrl.id_ctrl.ver_id, 0),
-    DEFINE_PROP_UINT16("lluns", NvmeCtrl, lightnvm_ctrl.id_ctrl.nluns, 1),
+    DEFINE_PROP_UINT8("lver", NvmeCtrl, lightnvm_ctrl.id_ctrl.ver_id, 0),
     DEFINE_PROP_UINT8("lreadl2ptbl", NvmeCtrl, lightnvm_ctrl.read_l2p_tbl, 1),
     DEFINE_PROP_STRING("lbbtable", NvmeCtrl, lightnvm_ctrl.bb_tbl_name),
     DEFINE_PROP_UINT8("lbbfrequency", NvmeCtrl, lightnvm_ctrl.bb_gen_freq, 0),

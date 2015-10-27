@@ -244,9 +244,7 @@ enum NvmeAdminCommands {
 };
 
 enum LnvmAdminCommands {
-    LNVM_ADM_CMD_IDENTIFY          = 0xe2,
-    LNVM_ADM_CMD_GET_FEATURES      = 0xe6,
-    LNVM_ADM_CMD_SET_FEATURES      = 0xe5,
+    LNVM_ADM_CMD_IDENTITY          = 0xe2,
     LNVM_ADM_CMD_GET_L2P_TBL       = 0xea,
     LNVM_ADM_CMD_GET_BB_TBL        = 0xf2,
     LNVM_ADM_CMD_SET_BB_TBL        = 0xf1,
@@ -349,7 +347,7 @@ enum NvmeQueueFlags {
     NVME_Q_PRIO_LOW     = 3,
 };
 
-typedef struct NvmeIdentify {
+typedef struct NvmeIdentity {
     uint8_t     opcode;
     uint8_t     flags;
     uint16_t    cid;
@@ -643,47 +641,61 @@ typedef struct NvmeIdCtrl {
     uint8_t     vs[1024];
 } NvmeIdCtrl;
 
+typedef struct LnvmIdAddrFormat {
+	uint8_t  ch_offset;
+	uint8_t  ch_len;
+	uint8_t  lun_offset;
+	uint8_t  lun_len;
+	uint8_t  pln_offset;
+	uint8_t  pln_len;
+	uint8_t  blk_offset;
+	uint8_t  blk_len;
+	uint8_t  pg_offset;
+	uint8_t  pg_len;
+	uint8_t  sect_offset;
+	uint8_t  sect_len;
+	uint8_t  res[4];
+} QEMU_PACKED LnvmIdAddrFormat;
+
 typedef struct LnvmIdGroup {
-    uint64_t    laddr_begin;
-    uint32_t    queue_size;
-    uint32_t    channels;
-    uint32_t    luns_per_chnl;
-    uint32_t    sec_per_pg;
-    uint32_t    pgs_per_blk;
-    uint32_t    blocks;
-    uint32_t    planes;
-    uint32_t    sec_size;
-    uint32_t    oob_size;
-    uint32_t    t_r;
-    uint32_t    t_sqr;
-    uint32_t    t_w;
-    uint32_t    t_sqw;
-    uint32_t    t_e;
-    uint16_t    chnl_parallelism;
-    uint8_t     plane_mode;
-    uint8_t     addr_mode;
-    uint8_t     res[124];
+    uint8_t    mtype;
+    uint8_t    fmtype;
+    uint16_t   res16;
+    uint8_t    num_ch;
+    uint8_t    num_lun;
+    uint8_t    num_pln;
+    uint16_t   num_blk;
+    uint16_t   num_pg;
+    uint16_t   fpg_sz;
+    uint16_t   csecs;
+    uint16_t   sos;
+    uint32_t   trdt;
+    uint32_t   trdm;
+    uint32_t   tprt;
+    uint32_t   tprm;
+    uint32_t   tbet;
+    uint32_t   tbem;
+    uint32_t   mpos;
+    uint16_t   cpar;
+    uint8_t    res[913];
 } QEMU_PACKED LnvmIdGroup;
 
 typedef struct LnvmIdCtrl {
-    uint16_t           ver_id;
-    uint16_t           ngroups;
-    uint16_t           nvm_type;
-    uint16_t           nluns; /* not in specification */
-    uint8_t            unused[248];
-    LnvmIdGroup        groups[20];
+    uint8_t       ver_id;
+    uint8_t       vmnt;
+    uint8_t       cgrps;
+    uint8_t       res[5];
+    uint32_t      cap;
+    uint32_t      dom;
+    struct LnvmIdAddrFormat ppaf;
+    uint8_t       ppat;
+    uint8_t       resv[223];
+    LnvmIdGroup   groups[4];
 } QEMU_PACKED LnvmIdCtrl;
 
 enum LnvmResponsibility {
     LNVM_RSP_L2P       = 1 << 0,
-    LNVM_RSP_GC        = 1 << 1,
-    LNVM_RSP_ECC       = 1 << 2,
-};
-
-enum LnvmExtension {
-    LNVM_EXT_BLK_MV    = 1 << 0,
-    LNVM_EXT_CPB       = 1 << 1,
-    LNVM_EXT_PS        = 1 << 2,
+    LNVM_RSP_ECC       = 1 << 1,
 };
 
 enum NvmeIdCtrlOacs {
@@ -820,7 +832,8 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrl) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNs) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(LnvmIdCtrl) != 4096);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmIdGroup) != 192);
+    QEMU_BUILD_BUG_ON(sizeof(LnvmIdAddrFormat) != 16);
+    QEMU_BUILD_BUG_ON(sizeof(LnvmIdGroup) != 960);
 }
 
 typedef struct NvmeAsyncEvent {
@@ -923,14 +936,8 @@ typedef struct NvmeNamespace {
 #define NVME(obj) \
         OBJECT_CHECK(NvmeCtrl, (obj), TYPE_NVME)
 
-typedef struct LnvmIdFeatures {
-   uint64_t rsp;
-   uint64_t ext;
-} LnvmIdFeatures;
-
 typedef struct LnvmCtrl {
     LnvmIdCtrl     id_ctrl;
-    LnvmIdFeatures id_features;
     uint8_t        read_l2p_tbl;
     uint8_t        bb_gen_freq;
     char           *bb_tbl_name;
