@@ -1062,9 +1062,11 @@ static uint16_t nvme_identify(NvmeCtrl *n, NvmeCmd *cmd)
     uint64_t prp1 = le64_to_cpu(c->prp1);
     uint64_t prp2 = le64_to_cpu(c->prp2);
 
-    if (cns) {
+    if (cns == 1) {
         return nvme_dma_read_prp(n, (uint8_t *)&n->id_ctrl, sizeof(n->id_ctrl),
             prp1, prp2);
+    } else if (cns != 0) {
+        return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (nsid == 0 || nsid > n->num_namespaces) {
         return NVME_INVALID_NSID | NVME_DNR;
