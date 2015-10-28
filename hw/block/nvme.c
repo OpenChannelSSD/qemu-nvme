@@ -564,7 +564,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
     uint64_t data_size = nlb << data_shift;
     uint64_t meta_size = nlb * ms;
-    uint8_t n_pages = data_size / LNVM_PAGE_SIZE;
+    uint32_t n_pages = data_size / LNVM_PAGE_SIZE;
     uint64_t aio_slba;
 
     if (lightnvm_dev(n)) {
@@ -574,12 +574,16 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         uint64_t spba = le64_to_cpu(lrw->spba);
         uint64_t phys_sector_list[LNVM_MAX_PAGES_PER_RQ];
 
-        if (n_pages > 1)
+        if (n_pages > 64) {
+            printf("npages too large (%u)\n", n_pages);
+            nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
+                offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        } else if (n_pages > 1)
                 nvme_addr_read(n, spba,
                                 (void *)phys_sector_list, n_pages * sizeof(void *));
         else
                 phys_sector_list[0] = spba;
-
 
         if (spba == LNVM_PBA_UNMAPPED) {
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
