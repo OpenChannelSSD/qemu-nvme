@@ -894,12 +894,12 @@ static uint16_t lightnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req
 /* TODO: Implement for different bad block table formats. It depends on flash
  * vendors.
  */
-static int lightnvm_read_bbtbl(LnvmCtrl *ln, void *bb_bitmap)
+static int lightnvm_read_bbtbl(LnvmCtrl *ln, uint32_t nr_blocks, uint8_t *blks)
 {
     return 0;
 }
 
-static int lightnvm_gen_bbtbl(LnvmCtrl *ln, uint32_t nr_blocks, void *bb_bitmap)
+static int lightnvm_gen_bbtbl(LnvmCtrl *ln, uint32_t nr_blocks, uint8_t *blks)
 {
     uint32_t i;
 
@@ -908,7 +908,7 @@ static int lightnvm_gen_bbtbl(LnvmCtrl *ln, uint32_t nr_blocks, void *bb_bitmap)
 
     for (i = 0; i < nr_blocks; i++) {
         if ((i % ln->bb_gen_freq) == 0) {
-            set_bit(i, bb_bitmap);
+            blks[i] = 0x1; /* factory bad block */
         }
     }
 
@@ -926,7 +926,7 @@ static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint64_t prp1 = le64_to_cpu(bbtbl->prp1);
     uint64_t prp2 = le64_to_cpu(bbtbl->prp2);
     uint32_t nr_blocks;
-    void *bb_bitmap;
+    LnvmBBTbl *bb_tbl;
     int ret = NVME_SUCCESS;
 
     if (nsid == 0 || nsid > n->num_namespaces) {
@@ -938,29 +938,34 @@ static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     c = &ln->id_ctrl.groups[0];
     nr_blocks = c->num_blk;
 
-    bb_bitmap = malloc(nr_blocks);
-    if (!bb_bitmap) {
+    bb_tbl = calloc(sizeof(LnvmBBTbl) + nr_blocks, 1);
+    if (!bb_tbl) {
         error_report("lightnvm: cannot allocate bitmap for bad block table\n");
         ret = -ENOMEM;
         goto out;
     }
 
-    bitmap_clear(bb_bitmap, 0, nr_blocks);
+    bb_tbl->tblid[0] = 'B';
+    bb_tbl->tblid[1] = 'B';
+    bb_tbl->tblid[2] = 'L';
+    bb_tbl->tblid[3] = 'T';
+    bb_tbl->verid = cpu_to_le16(1);
+    bb_tbl->tblks = cpu_to_le32(nr_blocks);
 
-    ret = (ln->bb_tbl_name) ? lightnvm_read_bbtbl(ln, bb_bitmap) :
-                                lightnvm_gen_bbtbl(ln, nr_blocks, bb_bitmap);
+    ret = (ln->bb_tbl_name) ? lightnvm_read_bbtbl(ln, nr_blocks, bb_tbl->blk) :
+                                lightnvm_gen_bbtbl(ln, nr_blocks, bb_tbl->blk);
     if (ret)
         goto clean;
 
-    if (nvme_dma_read_prp(n, (uint8_t*)bb_bitmap, nr_blocks, prp1, prp2)) {
+    if (nvme_dma_read_prp(n, (uint8_t*)bb_tbl, nr_blocks, prp1, prp2)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid,
             NVME_INVALID_FIELD, (uint16_t)1234, 0, ns->id);
+        free(bb_tbl);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-
 clean:
-    free(bb_bitmap);
+    free(bb_tbl);
 out:
     return ret; /*TODO: STUB*/
 }

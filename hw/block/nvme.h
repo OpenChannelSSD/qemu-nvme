@@ -289,11 +289,27 @@ typedef struct LnvmGetBBTbl {
   uint64_t rsvd1[2];
   uint64_t prp1;
   uint64_t prp2;
-  uint32_t prp1_len;
-  uint32_t prp2_len;
-  uint32_t lbb;
-  uint32_t rsvd3[3];
+  uint64_t rsvd2;
+  uint8_t chid;
+  uint8_t lunid;
+  uint16_t rsvd3;
+  uint32_t rsvd4[3]; // DW15, 14, 13
 } LnvmGetBBTbl;
+
+typedef struct LnvmSetBBTbl {
+  uint8_t opcode;
+  uint8_t flags;
+  uint16_t cid;
+  uint32_t nsid;
+  uint64_t rsvd1[2];
+  uint64_t prp1;
+  uint64_t prp2;
+  uint64_t rsvd2;
+  uint16_t nlb;
+  uint8_t value;
+  uint8_t rsvd3;
+  uint32_t rsvd4[3];
+} LnvmSetBBTbl;
 
 typedef struct NvmeDeleteQ {
     uint8_t     opcode;
@@ -693,6 +709,20 @@ typedef struct LnvmIdCtrl {
     LnvmIdGroup   groups[4];
 } QEMU_PACKED LnvmIdCtrl;
 
+typedef struct LnvmBBTbl {
+	uint8_t		tblid[4];
+	uint16_t	verid;
+	uint16_t	revid;
+	uint32_t	rvsd1;
+	uint32_t	tblks;
+	uint32_t	tfact;
+	uint32_t	tgrown;
+	uint32_t	tdresv;
+	uint32_t	thresv;
+	uint32_t	rsvd2[8];
+	uint8_t		blk[0];
+} QEMU_PACKED LnvmBBTbl;
+
 enum LnvmResponsibility {
     LNVM_RSP_L2P       = 1 << 0,
     LNVM_RSP_ECC       = 1 << 1,
@@ -817,6 +847,7 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(LnvmGetL2PTbl) != 64);
     QEMU_BUILD_BUG_ON(sizeof(LnvmGetBBTbl) != 64);
+    QEMU_BUILD_BUG_ON(sizeof(LnvmSetBBTbl) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeDeleteQ) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCreateCq) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCreateSq) != 64);
