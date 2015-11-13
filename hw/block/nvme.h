@@ -680,11 +680,13 @@ typedef struct LnvmIdGroup {
     uint8_t    num_ch;
     uint8_t    num_lun;
     uint8_t    num_pln;
+    uint8_t    rsvd1;
     uint16_t   num_blk;
     uint16_t   num_pg;
     uint16_t   fpg_sz;
     uint16_t   csecs;
     uint16_t   sos;
+    uint16_t   rsvd2;
     uint32_t   trdt;
     uint32_t   trdm;
     uint32_t   tprt;
@@ -692,8 +694,9 @@ typedef struct LnvmIdGroup {
     uint32_t   tbet;
     uint32_t   tbem;
     uint32_t   mpos;
+    uint32_t   mccap;
     uint16_t   cpar;
-    uint8_t    res[913];
+    uint8_t    res[906];
 } QEMU_PACKED LnvmIdGroup;
 
 typedef struct LnvmIdCtrl {
