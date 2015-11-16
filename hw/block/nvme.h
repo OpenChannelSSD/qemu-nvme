@@ -707,8 +707,7 @@ typedef struct LnvmIdCtrl {
     uint32_t      cap;
     uint32_t      dom;
     struct LnvmIdAddrFormat ppaf;
-    uint8_t       ppat;
-    uint8_t       resv[223];
+    uint8_t       resv[228];
     LnvmIdGroup   groups[4];
 } QEMU_PACKED LnvmIdCtrl;
 
@@ -969,6 +968,22 @@ typedef struct NvmeNamespace {
 #define TYPE_NVME "nvme"
 #define NVME(obj) \
         OBJECT_CHECK(NvmeCtrl, (obj), TYPE_NVME)
+
+struct ppa_addr {
+	/* Generic structure for all addresses */
+	union {
+		struct {
+		uint64_t blk		: 16;
+		uint64_t pg		: 16;
+		uint64_t sec		: 8;
+		uint64_t pl		: 8;
+		uint64_t lun		: 8;
+		uint64_t ch		: 8;
+		} g;
+
+		uint64_t ppa;
+	};
+};
 
 typedef struct LnvmCtrl {
     LnvmIdCtrl     id_ctrl;

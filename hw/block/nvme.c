@@ -572,7 +572,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
          * physical block address is stored in Command Dword 11-10. */
         LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
         uint64_t spba = le64_to_cpu(lrw->spba);
-        uint64_t phys_sector_list[LNVM_MAX_PAGES_PER_RQ];
+        struct ppa_addr psl[LNVM_MAX_PAGES_PER_RQ];
 
         if (n_pages > 64) {
             printf("npages too large (%u)\n", n_pages);
@@ -581,9 +581,9 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return NVME_INVALID_FIELD | NVME_DNR;
         } else if (n_pages > 1)
                 nvme_addr_read(n, spba,
-                                (void *)phys_sector_list, n_pages * sizeof(void *));
+                                (void *)psl, n_pages * sizeof(void *));
         else
-                phys_sector_list[0] = spba;
+                psl[0].ppa = spba;
 
         if (spba == LNVM_PBA_UNMAPPED) {
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
@@ -596,8 +596,8 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
          * real hardware; reason why we actually pass a list of ppa's to the
          * device.
          */
-        slba = phys_sector_list[0];
-        elba = phys_sector_list[0] + nlb;
+	slba = psl[0].g.pg + psl[0].g.blk * 256;
+        elba = slba + nlb;
         req->lightnvm_lba = le64_to_cpu(lrw->slba);
         req->is_write = (rw->opcode == LNVM_CMD_PHYS_WRITE ||
                                           rw->opcode == LNVM_CMD_HYBRID_WRITE);
@@ -2325,6 +2325,19 @@ static void lightnvm_init_id_ctrl(LnvmIdCtrl *ln_id)
     ln_id->cgrps = 1;
     ln_id->cap = cpu_to_le32(0x3);
     ln_id->dom = cpu_to_le32(0x1);
+
+    ln_id->ppaf.blk_offset = 0;
+    ln_id->ppaf.blk_len = 16;
+    ln_id->ppaf.pg_offset = 16;
+    ln_id->ppaf.pg_len = 16;
+    ln_id->ppaf.sect_offset = 32;
+    ln_id->ppaf.sect_len = 8;
+    ln_id->ppaf.pln_offset = 40;
+    ln_id->ppaf.pln_len = 8;
+    ln_id->ppaf.lun_offset = 48;
+    ln_id->ppaf.lun_len = 8;
+    ln_id->ppaf.ch_offset = 56;
+    ln_id->ppaf.ch_len = 8;
 }
 
 static int lightnvm_init(NvmeCtrl *n)
