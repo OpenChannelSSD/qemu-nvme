@@ -703,7 +703,7 @@ typedef struct LnvmIdCtrl {
     uint8_t       ver_id;
     uint8_t       vmnt;
     uint8_t       cgrps;
-    uint8_t       res[5];
+    uint8_t       res;
     uint32_t      cap;
     uint32_t      dom;
     struct LnvmIdAddrFormat ppaf;
