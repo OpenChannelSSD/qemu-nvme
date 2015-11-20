@@ -882,6 +882,7 @@ static uint16_t lightnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req
             offsetof(LnvmGetL2PTbl, nlb), 0, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+
     if (nvme_dma_read_prp(n, (uint8_t *)&ns->tbl[slba], xfer_len,
                           prp1, prp2)) {
 	    nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
@@ -1131,19 +1132,6 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         if (NVME_ONCS_WRITE_UNCORR & n->oncs) {
             return nvme_write_uncor(n, ns, cmd, req);
         }
-        return NVME_INVALID_OPCODE | NVME_DNR;
-
-    case LNVM_ADM_CMD_IDENTITY:
-        if (lightnvm_dev(n))
-            return lightnvm_identity(n, cmd);
-        return NVME_INVALID_OPCODE | NVME_DNR;
-    case LNVM_ADM_CMD_GET_L2P_TBL:
-        if (lightnvm_dev(n))
-            return lightnvm_get_l2p_tbl(n, cmd, req);
-        return NVME_INVALID_OPCODE | NVME_DNR;
-    case LNVM_ADM_CMD_GET_BB_TBL:
-        if (lightnvm_dev(n))
-            return lightnvm_get_bb_tbl(n, cmd, req);
         return NVME_INVALID_OPCODE | NVME_DNR;
     case LNVM_CMD_ERASE_SYNC:
         if (lightnvm_dev(n))
@@ -1913,6 +1901,12 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_ADM_CMD_SET_DB_MEMORY:
         return nvme_set_db_memory(n, cmd);
+    case LNVM_ADM_CMD_IDENTITY:
+            return lightnvm_identity(n, cmd);
+    case LNVM_ADM_CMD_GET_L2P_TBL:
+            return lightnvm_get_l2p_tbl(n, cmd, req);
+    case LNVM_ADM_CMD_GET_BB_TBL:
+            return lightnvm_get_bb_tbl(n, cmd, req);
     case NVME_ADM_CMD_ACTIVATE_FW:
     case NVME_ADM_CMD_DOWNLOAD_FW:
     case NVME_ADM_CMD_SECURITY_SEND:
