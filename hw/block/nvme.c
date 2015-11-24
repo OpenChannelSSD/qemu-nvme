@@ -2613,8 +2613,8 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("cmb", NvmeCtrl, cmb, 0),
     DEFINE_PROP_UINT16("oacs", NvmeCtrl, oacs, NVME_OACS_FORMAT),
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),
-    DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, PCI_VENDOR_ID_INTEL),
-    DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x5845),
+    DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, 0x1d1d),
+    DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("lver", NvmeCtrl, lightnvm_ctrl.id_ctrl.ver_id, 0),
     DEFINE_PROP_UINT8("lreadl2ptbl", NvmeCtrl, lightnvm_ctrl.read_l2p_tbl, 1),
     DEFINE_PROP_STRING("lbbtable", NvmeCtrl, lightnvm_ctrl.bb_tbl_name),
@@ -2636,7 +2636,7 @@ static void nvme_class_init(ObjectClass *oc, void *data)
     pc->init = nvme_init;
     pc->exit = nvme_exit;
     pc->class_id = PCI_CLASS_STORAGE_EXPRESS;
-    pc->vendor_id = PCI_VENDOR_ID_INTEL;
+    pc->vendor_id = 0x1d1d;
     pc->is_express = 1;
 
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
