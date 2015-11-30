@@ -1003,27 +1003,30 @@ static int lightnvm_read_tbls(NvmeCtrl *n)
 static uint16_t lightnvm_erase_sync(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
-    LnvmDmCmd *dm = (LnvmDmCmd *)cmd;
-    uint64_t spba = (le64_to_cpu(dm->spba) / LNVM_PAGES_PR_BLK) - 1;
+    LnvmRwCmd *dm = (LnvmRwCmd *)cmd;
+    uint64_t spba = le64_to_cpu(dm->spba);
+    struct ppa_addr ppa;
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
     uint32_t nlb_blk = nlb << (data_shift - BDRV_SECTOR_BITS);
     uint64_t start = ns->start_block + (spba << (data_shift - BDRV_SECTOR_BITS));
+    int offset;
 
-    if ((spba + nlb) <= ns->tbl_entries || nlb != 1) {
+    ppa.ppa = spba;
+    if (nlb != 1) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-            offsetof(LnvmDmCmd, nlb), spba+nlb, ns->id);
+            offsetof(LnvmRwCmd, nlb), ppa.ppa+nlb, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    spba = spba / LNVM_PAGES_PR_BLK;
-    bitmap_set(ns->util, spba, nlb);
-    bitmap_clear(ns->uncorrectable, spba, nlb);
+    offset = ppa.g.blk;
+    bitmap_set(ns->util, offset, nlb);
+    bitmap_clear(ns->uncorrectable, offset, nlb);
 
     if (bdrv_write_zeroes(blk_bs(n->conf.blk), start, nlb_blk, 0)) {
         nvme_set_error_page(n, req->sq->sqid, req->cqe.cid,
-        NVME_INTERNAL_DEV_ERROR, offsetof(LnvmDmCmd, spba), spba, ns->id);
+        NVME_INTERNAL_DEV_ERROR, offsetof(LnvmRwCmd, spba), spba, ns->id);
         bitmap_clear(ns->util, spba, nlb);
         return NVME_INTERNAL_DEV_ERROR;
     }
