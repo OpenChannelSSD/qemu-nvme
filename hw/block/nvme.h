@@ -304,7 +304,7 @@ typedef struct LnvmSetBBTbl {
   uint64_t rsvd1[2];
   uint64_t prp1;
   uint64_t prp2;
-  uint64_t rsvd2;
+  uint64_t spba;
   uint16_t nlb;
   uint8_t value;
   uint8_t rsvd3;
@@ -963,6 +963,7 @@ typedef struct NvmeNamespace {
     uint64_t        tbl_dsk_start_offset;
     uint32_t        tbl_entries;
     uint64_t        *tbl;
+    uint8_t        *bbtbl;
 } NvmeNamespace;
 
 #define TYPE_NVME "nvme"
