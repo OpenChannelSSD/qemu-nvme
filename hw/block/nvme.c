@@ -2483,7 +2483,7 @@ static int lightnvm_init(NvmeCtrl *n)
 
         c->mpos = cpu_to_le32(0x10101); /* single plane */
         c->cpar = cpu_to_le16(0);
-
+	c->mccap = 1;
         ns->bbtbl = qemu_blockalign(blk_bs(n->conf.blk), c->num_blk);
 	memset(ns->bbtbl, 0, c->num_blk);
     }
