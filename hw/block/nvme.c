@@ -595,7 +595,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
-    uint16_t ctrl = le16_to_cpu(rw->control);
+    uint16_t ctrl = 0;
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
     uint64_t prp1 = le64_to_cpu(rw->prp1);
     uint64_t prp2 = le64_to_cpu(rw->prp2);
@@ -650,6 +650,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         elba = slba + nlb;
         req->is_write = rw->opcode == NVME_CMD_WRITE;
         aio_slba = ns->start_block + (slba << (data_shift - BDRV_SECTOR_BITS));
+	ctrl = le16_to_cpu(rw->control);
     }
 
     if (elba > le64_to_cpu(ns->id_ns.nsze)) {
