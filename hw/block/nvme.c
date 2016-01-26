@@ -947,7 +947,21 @@ static uint16_t lightnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req
  */
 static int lightnvm_read_bbtbl(NvmeNamespace *ns, uint32_t nr_blocks, uint8_t *blks)
 {
-    memcpy(blks, ns->bbtbl, nr_blocks);
+    struct LnvmCtrl *ln = &ns->ctrl->lightnvm_ctrl;
+    FILE *fp;
+    size_t ret;
+
+    fp = fopen(ln->bb_tbl_name, "r");
+    if (!fp) {
+        memcpy(blks, ns->bbtbl, nr_blocks);
+        return 0;
+    }
+
+    ret = fread(blks, 1, nr_blocks, fp);
+    if (ret != nr_blocks)
+        printf("Could not read file\n");
+
+    fclose(fp);
     return 0;
 }
 
@@ -1004,8 +1018,6 @@ static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     bb_tbl->verid = cpu_to_le16(1);
     bb_tbl->tblks = cpu_to_le32(nr_blocks);
 
-/*    ret = (ln->bb_tbl_name) ? lightnvm_read_bbtbl(ln, nr_blocks, bb_tbl->blk) :
-                                lightnvm_gen_bbtbl(ln, nr_blocks, bb_tbl->blk);*/
     ret = lightnvm_read_bbtbl(ns, nr_blocks, bb_tbl->blk);
     if (ret)
         goto clean;
@@ -1038,6 +1050,8 @@ static uint16_t lightnvm_set_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t nr_blocks;
     int i;
     struct ppa_addr spbappa;
+    FILE *fp;
+    size_t ret;
 
     spbappa.ppa = spba;
 
@@ -1065,6 +1079,19 @@ static uint16_t lightnvm_set_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             ns->bbtbl[ppas[i].g.blk] = value;
         }
     }
+
+    fp = fopen(ln->bb_tbl_name, "w+");
+    if (!fp) {
+        error_report("nvme: could not save bad block table file: %s\n",
+                                                         ln->bb_tbl_name);
+        return -EEXIST;
+    }
+
+    ret = fwrite(ns->bbtbl, 1, nr_blocks, fp);
+    if (ret != nr_blocks)
+        printf("Could not read file\n");
+
+    fclose(fp);
 
     return NVME_SUCCESS;
 }
@@ -2489,20 +2516,13 @@ static int lightnvm_init(NvmeCtrl *n)
 	memset(ns->bbtbl, 0, c->num_blk);
     }
 
+    if (!ln->bb_tbl_name)
+        strncpy(ln->bb_tbl_name, "bbtable.qemu\0", 13);
+
     ret = (n->lightnvm_ctrl.read_l2p_tbl) ? lightnvm_read_tbls(n) : 0;
     if (ret) {
         error_report("nvme: cannot read l2p table\n");
         return ret;
-    }
-
-    if (!ln->bb_tbl_name)
-        return 0;
-
-    ln->bb_tbl = fopen(ln->bb_tbl_name, "rw+");
-    if (!ln->bb_tbl) {
-        error_report("nvme: cannot open bad block table file: %s\n",
-                                                         ln->bb_tbl_name);
-        return -EEXIST;
     }
 
     return 0;
