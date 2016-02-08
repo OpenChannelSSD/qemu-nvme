@@ -991,6 +991,7 @@ typedef struct LnvmCtrl {
     LnvmIdCtrl     id_ctrl;
     uint8_t        read_l2p_tbl;
     uint8_t        bb_gen_freq;
+    uint8_t        bb_auto_gen;
     char           *bb_tbl_name;
     FILE           *bb_tbl;
 } LnvmCtrl;

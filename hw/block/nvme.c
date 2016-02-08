@@ -2516,8 +2516,15 @@ static int lightnvm_init(NvmeCtrl *n)
 	memset(ns->bbtbl, 0, c->num_blk);
     }
 
-    if (!ln->bb_tbl_name)
+    if (!ln->bb_tbl_name) {
+        ln->bb_auto_gen = 1;
+        ln->bb_tbl_name = malloc(13);
+        if (!ln->bb_tbl_name)
+            return -ENOMEM;
         strncpy(ln->bb_tbl_name, "bbtable.qemu\0", 13);
+    } else {
+        ln->bb_auto_gen = 0;
+    }
 
     ret = (n->lightnvm_ctrl.read_l2p_tbl) ? lightnvm_read_tbls(n) : 0;
     if (ret) {
@@ -2676,6 +2683,10 @@ static int nvme_init(PCIDevice *pci_dev)
 
 static void lightnvm_exit(NvmeCtrl *n)
 {
+    LnvmCtrl *ln = &n->lightnvm_ctrl;
+
+    if (ln->bb_auto_gen)
+        free(ln->bb_tbl_name);
     fclose(n->lightnvm_ctrl.bb_tbl);
     n->lightnvm_ctrl.bb_tbl = NULL;
 }
