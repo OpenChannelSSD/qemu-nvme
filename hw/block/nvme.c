@@ -586,7 +586,15 @@ static void nvme_rw_cb(void *opaque, int ret)
         }
     } else {
         if (lightnvm_dev(n) && req->is_write) {
-            ns->tbl[req->lightnvm_lba] = req->slba;
+            if (req->nlb > 1) {
+                int i;
+                for (i = 0; i < req->nlb; i++)
+                    ns->tbl[req->lightnvm_slba + i] = req->lightnvm_ppa_list[i];
+
+                free(req->lightnvm_ppa_list);
+            } else {
+                ns->tbl[req->lightnvm_slba] = req->slba;
+            }
         }
     }
 
@@ -598,70 +606,10 @@ static void nvme_rw_cb(void *opaque, int ret)
     nvme_enqueue_req_completion(cq, req);
 }
 
-static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
+static uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+    NvmeRequest *req, uint64_t slba, uint64_t elba, uint32_t nlb, uint16_t ctrl,
+    uint64_t data_size, uint64_t meta_size)
 {
-    LnvmCtrl *ln = &n->lightnvm_ctrl;
-    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
-    uint16_t ctrl = 0;
-    uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
-    uint64_t prp1 = le64_to_cpu(rw->prp1);
-    uint64_t prp2 = le64_to_cpu(rw->prp2);
-    uint64_t slba;
-    uint64_t elba;
-    const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
-    const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
-    uint64_t data_size = nlb << data_shift;
-    uint64_t meta_size = nlb * ms;
-    uint32_t n_pages = data_size / ln->params.sec_size;
-    uint64_t aio_slba;
-
-    if (lightnvm_dev(n)) {
-        /* In the case of a LightNVM device. The slba is the logical address, while the actual
-         * physical block address is stored in Command Dword 11-10. */
-        LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
-        uint64_t spba = le64_to_cpu(lrw->spba);
-        struct ppa_addr psl[ln->params.max_sec_per_rq];
-
-        if (n_pages > ln->params.max_sec_per_rq) {
-            printf("npages too large (%u). Max:%u supported\n",
-                                        n_pages, ln->params.max_sec_per_rq);
-            nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
-            return NVME_INVALID_FIELD | NVME_DNR;
-        } else if (n_pages > 1) {
-                nvme_addr_read(n, spba,
-                                (void *)psl, n_pages * sizeof(void *));
-        } else {
-                psl[0].ppa = spba;
-        }
-
-        if (spba == LNVM_PBA_UNMAPPED) {
-            nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-
-        /* XXX: The fact that physical addresses are sequential is a valid
-         * assumption given how we store pages in QEMU. This is not the case in
-         * real hardware; reason why we actually pass a list of ppa's to the
-         * device.
-         */
-        slba = psl[0].g.pg + psl[0].g.blk * 256;
-        elba = slba + nlb;
-        req->lightnvm_lba = le64_to_cpu(lrw->slba);
-        req->is_write = (rw->opcode == LNVM_CMD_PHYS_WRITE ||
-                                          rw->opcode == LNVM_CMD_HYBRID_WRITE);
-        aio_slba = ns->start_block + (slba << (data_shift - BDRV_SECTOR_BITS));
-    } else {
-        slba = le64_to_cpu(rw->slba);
-        elba = slba + nlb;
-        req->is_write = rw->opcode == NVME_CMD_WRITE;
-        aio_slba = ns->start_block + (slba << (data_shift - BDRV_SECTOR_BITS));
-        ctrl = le16_to_cpu(rw->control);
-    }
-
     if (elba > le64_to_cpu(ns->id_ns.nsze)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
             offsetof(NvmeRwCmd, nlb), elba, ns->id);
@@ -687,6 +635,157 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             offsetof(NvmeRwCmd, slba), elba, ns->id);
         return NVME_UNRECOVERED_READ;
     }
+
+    return 0;
+}
+
+static inline uint64_t nvme_gen_to_dev_addr(LnvmCtrl *ln, struct ppa_addr *r)
+{
+    LnvmIdGroup *c = &ln->id_ctrl.groups[0];
+
+    return r->g.pg + ((r->g.blk + r->g.lun * c->num_blk) * ln->params.pgs_per_blk);
+}
+
+static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+    NvmeRequest *req)
+{
+    /* In the case of a LightNVM device. The slba is the logical address, while the actual
+     * physical block address is stored in Command Dword 11-10. */
+    LnvmCtrl *ln = &n->lightnvm_ctrl;
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
+    struct ppa_addr psl[ln->params.max_sec_per_rq];
+    uint16_t ctrl = 0;
+    uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
+    uint64_t prp1 = le64_to_cpu(rw->prp1);
+    uint64_t prp2 = le64_to_cpu(rw->prp2);
+    uint64_t spba = le64_to_cpu(lrw->spba);
+    uint64_t sppa;
+    uint64_t eppa;
+    uint64_t lba;
+    uint64_t *sector_list;
+    uint64_t *aio_sector_list;
+    const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
+    const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
+    uint64_t data_size = nlb << data_shift;
+    uint64_t meta_size = nlb * ms;
+    uint32_t n_pages = data_size / ln->params.sec_size;
+    uint16_t err;
+    uint8_t i;
+
+    sector_list = g_malloc(sizeof(uint64_t) * ln->params.max_sec_per_rq);
+    if (!sector_list)
+        return -ENOMEM;
+
+    aio_sector_list = g_malloc(sizeof(uint64_t) * ln->params.max_sec_per_rq);
+    if (!aio_sector_list)
+        return -ENOMEM;
+
+    if (n_pages > ln->params.max_sec_per_rq) {
+        printf("npages too large (%u). Max:%u supported\n",
+                                        n_pages, ln->params.max_sec_per_rq);
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
+                offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    } else if (n_pages > 1) {
+            nvme_addr_read(n, spba, (void *)psl, n_pages * sizeof(void *));
+    } else {
+            psl[0].ppa = spba;
+    }
+
+    if (spba == LNVM_PBA_UNMAPPED) {
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
+                offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    ctrl = le16_to_cpu(rw->control);
+    req->lightnvm_ppa_list = sector_list;
+    req->lightnvm_slba = le64_to_cpu(lrw->slba);
+    req->is_write = (rw->opcode == LNVM_CMD_PHYS_WRITE ||
+                                          rw->opcode == LNVM_CMD_HYBRID_WRITE);
+
+    /* If several LUNs are set up, the ppa list sent by the host will not be
+     * sequential. In this case, we need to pass on the list of ppas to the dma
+     * handlers to write/read data to/from the right pysical sector
+     */
+    for (i = 0; i < n_pages; i++) {
+        lba = nvme_gen_to_dev_addr(ln, &psl[i]);
+        sector_list[i] = lba;
+        aio_sector_list[i] =
+                    ns->start_block + (lba << (data_shift - BDRV_SECTOR_BITS));
+    }
+
+    /* Reuse check logic from nvme_rw */
+    sppa = nvme_gen_to_dev_addr(ln, &psl[0]);
+    eppa = nvme_gen_to_dev_addr(ln, &psl[n_pages - 1]);
+
+    err = nvme_rw_check_req(n, ns, cmd, req, sppa, eppa, nlb, ctrl,
+                                                        data_size, meta_size);
+    if (err)
+        return err;
+
+
+    if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+            offsetof(NvmeRwCmd, prp1), 0, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    req->slba = sppa;
+    req->meta_size = 0;
+    req->status = NVME_SUCCESS;
+    req->nlb = nlb;
+    req->ns = ns;
+
+    dma_acct_start(n->conf.blk, &req->acct, &req->qsg, req->is_write ?
+        BLOCK_ACCT_WRITE : BLOCK_ACCT_READ);
+    if (req->qsg.nsg > 0) {
+        req->aiocb = req->is_write ?
+            dma_blk_write_list(n->conf.blk, &req->qsg, aio_sector_list,
+                                                            nvme_rw_cb, req) :
+            dma_blk_read_list(n->conf.blk, &req->qsg, aio_sector_list,
+                                                            nvme_rw_cb, req);
+    } else {
+        req->aiocb = req->is_write ?
+            blk_aio_writev(n->conf.blk, aio_sector_list[0], &req->iov,
+                                            data_size >> 9, nvme_rw_cb, req) :
+            blk_aio_readv(n->conf.blk, aio_sector_list[0], &req->iov,
+                                            data_size >> 9, nvme_rw_cb, req);
+    }
+
+    return NVME_NO_COMPLETE;
+
+}
+
+static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+    NvmeRequest *req)
+{
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    uint16_t ctrl = 0;
+    uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
+    uint64_t prp1 = le64_to_cpu(rw->prp1);
+    uint64_t prp2 = le64_to_cpu(rw->prp2);
+    uint64_t slba;
+    uint64_t elba;
+    const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
+    const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
+    uint64_t data_size = nlb << data_shift;
+    uint64_t meta_size = nlb * ms;
+    uint64_t aio_slba;
+    uint16_t err;
+
+    slba = le64_to_cpu(rw->slba);
+    elba = slba + nlb;
+    req->is_write = rw->opcode == NVME_CMD_WRITE;
+    aio_slba = ns->start_block + (slba << (data_shift - BDRV_SECTOR_BITS));
+    ctrl = le16_to_cpu(rw->control);
+
+    err = nvme_rw_check_req(n, ns, cmd, req, slba, elba, nlb, ctrl,
+                                                        data_size, meta_size);
+    if (err)
+        return err;
 
     if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
@@ -1234,11 +1333,14 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
     ns = &n->namespaces[nsid - 1];
     switch (cmd->opcode) {
-    case NVME_CMD_WRITE:
-    case NVME_CMD_READ:
+    case LNVM_CMD_HYBRID_WRITE:
     case LNVM_CMD_PHYS_READ:
     case LNVM_CMD_PHYS_WRITE:
-    case LNVM_CMD_HYBRID_WRITE:
+        return nvme_lnvm_rw(n, ns, cmd, req);
+    case NVME_CMD_READ:
+        if (lightnvm_dev(n))
+            return nvme_lnvm_rw(n, ns, cmd, req);
+    case NVME_CMD_WRITE:
         return nvme_rw(n, ns, cmd, req);
 
     case NVME_CMD_FLUSH:
@@ -2500,8 +2602,6 @@ static int lightnvm_init(NvmeCtrl *n)
         error_report("nvme: Only SLC Flash is supported at the moment\n");
     if (ln->params.num_ch != 1)
         error_report("nvme: Only 1 channel is supported at the moment\n");
-    if (ln->params.num_lun != 1)
-        error_report("nvme: Only 1 LUN is supported at the moment\n");
     if (ln->params.num_pln!= 1)
         error_report("nvme: Only 1 flash plane is supported at the moment\n");
     if (ln->params.sec_size != 4096)

@@ -73,6 +73,7 @@ typedef struct {
     BlockAIOCB *acb;
     QEMUSGList *sg;
     uint64_t sector_num;
+    uint64_t *sector_list;
     DMADirection dir;
     int sg_cur_index;
     dma_addr_t sg_cur_byte;
@@ -184,6 +185,7 @@ static void dma_blk_list_cb(void *opaque, int ret)
     trace_dma_blk_cb(dbs, ret);
 
     if (dbs->sg_cur_index == dbs->sg->nsg || ret < 0) {
+        free(dbs->sector_list);
         dma_complete(dbs, ret);
         return;
     }
