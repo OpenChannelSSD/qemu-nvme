@@ -59,6 +59,16 @@
  *  cmbsz=<cmbsz>    : Controller Memory Buffer CMBSZ register, Default:0
  *  cmbloc=<cmbloc>  : Controller Memory Buffer CMBLOC register, Default:0
  *  lver=<int>         : version of the LightNVM standard to use, Default:1
+ *  lsec_size=<int>    : Flash sector size in KB. Default: 4096
+ *  lpgs_per_blk=<int> : Number of pages per flash block. Default: 256
+ *  lmax_sec_per_rq=<int> : Maximum number of sectors per I/O request. Default: 64
+ *  lmtype=<int>       : Media type. Default: 0 (NAND Flash Memory)
+ *  lfmtype=<int>      : Flash media type. Default: 0 (SLC)
+ *  lnum_ch=<int>      : Number of controller channels. Default: 1
+ *  lnum_lun=<int>     : Number of LUNs per channel, Default:1
+ *  lnum_pln=<int>     : Number of flash planes per LUN. Defult: 1
+ *  lcsecs=<int>       : Controller Sector Size. Default: 4096
+ *  lfgg_sz=<int>      : Number of bytes in a flash page. Default 4096
  *  lreadl2ptbl=<int>  : Load logical to physical table. 1: yes, 0: no. Default: 1
  *  lbbtable=<file>    : Load bad block table from file destination (Provide path
  *  to file. If no file is provided a bad block table will be generation. Look
@@ -143,9 +153,6 @@
 #define LNVM_FEAT_EXT_END 127
 #define LNVM_PBA_UNMAPPED UINT64_MAX
 #define LNVM_LBA_UNMAPPED UINT64_MAX
-#define LNVM_PAGES_PR_BLK 256
-#define LNVM_PAGE_SIZE 4096
-#define LNVM_MAX_PAGES_PER_RQ 64
 
 static void nvme_process_sq(void *opaque);
 
@@ -594,6 +601,7 @@ static void nvme_rw_cb(void *opaque, int ret)
 static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
+    LnvmCtrl *ln = &n->lightnvm_ctrl;
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint16_t ctrl = 0;
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
@@ -606,7 +614,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
     uint64_t data_size = nlb << data_shift;
     uint64_t meta_size = nlb * ms;
-    uint32_t n_pages = data_size / LNVM_PAGE_SIZE;
+    uint32_t n_pages = data_size / ln->params.sec_size;
     uint64_t aio_slba;
 
     if (lightnvm_dev(n)) {
@@ -614,10 +622,11 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
          * physical block address is stored in Command Dword 11-10. */
         LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
         uint64_t spba = le64_to_cpu(lrw->spba);
-        struct ppa_addr psl[LNVM_MAX_PAGES_PER_RQ];
+        struct ppa_addr psl[ln->params.max_sec_per_rq];
 
-        if (n_pages > 64) {
-            printf("npages too large (%u)\n", n_pages);
+        if (n_pages > ln->params.max_sec_per_rq) {
+            printf("npages too large (%u). Max:%u supported\n",
+                                        n_pages, ln->params.max_sec_per_rq);
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                 offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
             return NVME_INVALID_FIELD | NVME_DNR;
@@ -639,7 +648,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
          * real hardware; reason why we actually pass a list of ppa's to the
          * device.
          */
-	slba = psl[0].g.pg + psl[0].g.blk * 256;
+        slba = psl[0].g.pg + psl[0].g.blk * 256;
         elba = slba + nlb;
         req->lightnvm_lba = le64_to_cpu(lrw->slba);
         req->is_write = (rw->opcode == LNVM_CMD_PHYS_WRITE ||
@@ -650,7 +659,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         elba = slba + nlb;
         req->is_write = rw->opcode == NVME_CMD_WRITE;
         aio_slba = ns->start_block + (slba << (data_shift - BDRV_SECTOR_BITS));
-	ctrl = le16_to_cpu(rw->control);
+        ctrl = le16_to_cpu(rw->control);
     }
 
     if (elba > le64_to_cpu(ns->id_ns.nsze)) {
@@ -2485,21 +2494,36 @@ static int lightnvm_init(NvmeCtrl *n)
 
     ln = &n->lightnvm_ctrl;
 
+    if (ln->params.mtype != 0)
+        error_report("nvme: Only NAND Flash Memory supported at the moment\n");
+    if (ln->params.fmtype != 0)
+        error_report("nvme: Only SLC Flash is supported at the moment\n");
+    if (ln->params.num_ch != 1)
+        error_report("nvme: Only 1 channel is supported at the moment\n");
+    if (ln->params.num_lun != 1)
+        error_report("nvme: Only 1 LUN is supported at the moment\n");
+    if (ln->params.num_pln!= 1)
+        error_report("nvme: Only 1 flash plane is supported at the moment\n");
+    if (ln->params.sec_size != 4096)
+        error_report("nvme: Only 4KB sector size is supported at the moment\n");
+    if ((ln->params.csecs != 4096) || (ln->params.fpg_sz != 4096))
+        error_report("nvme: Only 4KB pages (1 sector) are supported at the moment\n");
+
     for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
-        chnl_blks = ns->ns_blks / LNVM_PAGES_PR_BLK;
+        chnl_blks = ns->ns_blks / ln->params.pgs_per_blk;
 
         c = &ln->id_ctrl.groups[0];
-        c->mtype = 0;
-        c->fmtype = 0;
-        c->num_ch = 1;
-        c->num_lun = 1;
-        c->num_pln = 1;
+        c->mtype = ln->params.mtype;
+        c->fmtype = ln->params.fmtype;
+        c->num_ch = ln->params.num_ch;
+        c->num_lun = ln->params.num_lun;
+        c->num_pln = ln->params.num_pln;
 
-        c->num_blk = cpu_to_le16(chnl_blks);
-        c->num_pg = cpu_to_le16(LNVM_PAGES_PR_BLK);
-        c->fpg_sz = cpu_to_le16(4096);
-        c->csecs = cpu_to_le16(4096);
+        c->num_blk = cpu_to_le16(chnl_blks) / c->num_lun;
+        c->num_pg = cpu_to_le16(ln->params.pgs_per_blk);
+        c->fpg_sz = cpu_to_le16(ln->params.fpg_sz);
+        c->csecs = cpu_to_le16(ln->params.csecs);
         c->sos = cpu_to_le16(n->meta);
 
         c->trdt = cpu_to_le32(10000);
@@ -2747,6 +2771,16 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("lver", NvmeCtrl, lightnvm_ctrl.id_ctrl.ver_id, 0),
+    DEFINE_PROP_UINT16("lsec_size", NvmeCtrl, lightnvm_ctrl.params.sec_size, 4096),
+    DEFINE_PROP_UINT16("lpgs_per_blk", NvmeCtrl, lightnvm_ctrl.params.pgs_per_blk, 256),
+    DEFINE_PROP_UINT8("lmax_sec_per_rq", NvmeCtrl, lightnvm_ctrl.params.max_sec_per_rq, 64),
+    DEFINE_PROP_UINT8("lmtype", NvmeCtrl, lightnvm_ctrl.params.mtype, 0),
+    DEFINE_PROP_UINT8("lfmtype", NvmeCtrl, lightnvm_ctrl.params.fmtype, 0),
+    DEFINE_PROP_UINT8("lnum_ch", NvmeCtrl, lightnvm_ctrl.params.num_ch, 1),
+    DEFINE_PROP_UINT8("lnum_lun", NvmeCtrl, lightnvm_ctrl.params.num_lun, 1),
+    DEFINE_PROP_UINT8("lnum_pln", NvmeCtrl, lightnvm_ctrl.params.num_pln, 1),
+    DEFINE_PROP_UINT16("lcsecs", NvmeCtrl, lightnvm_ctrl.params.csecs, 4096),
+    DEFINE_PROP_UINT16("lfpg_sz", NvmeCtrl, lightnvm_ctrl.params.fpg_sz, 4096),
     DEFINE_PROP_UINT8("lreadl2ptbl", NvmeCtrl, lightnvm_ctrl.read_l2p_tbl, 1),
     DEFINE_PROP_STRING("lbbtable", NvmeCtrl, lightnvm_ctrl.bb_tbl_name),
     DEFINE_PROP_UINT8("lbbfrequency", NvmeCtrl, lightnvm_ctrl.bb_gen_freq, 0),

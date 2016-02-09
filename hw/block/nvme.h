@@ -725,6 +725,22 @@ typedef struct LnvmBBTbl {
 	uint8_t		blk[0];
 } QEMU_PACKED LnvmBBTbl;
 
+/* Parameters passed on to QEMU to configure the characteristics of the drive */
+typedef struct LnvmParams {
+    /* configurable device characteristics */
+    uint16_t    sec_size;
+    uint16_t    pgs_per_blk;
+    uint8_t     max_sec_per_rq;
+    /* configurable parameters for LnvmIdGroup */
+    uint8_t     mtype;
+    uint8_t     fmtype;
+    uint8_t     num_ch;
+    uint8_t     num_pln;
+    uint8_t     num_lun;
+    uint16_t    csecs;
+    uint16_t    fpg_sz;
+} QEMU_PACKED LnvmParams;
+
 enum LnvmResponsibility {
     LNVM_RSP_L2P       = 1 << 0,
     LNVM_RSP_ECC       = 1 << 1,
@@ -988,6 +1004,7 @@ struct ppa_addr {
 };
 
 typedef struct LnvmCtrl {
+    LnvmParams     params;
     LnvmIdCtrl     id_ctrl;
     uint8_t        read_l2p_tbl;
     uint8_t        bb_gen_freq;
