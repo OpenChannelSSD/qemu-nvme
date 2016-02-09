@@ -944,7 +944,7 @@ static uint16_t lightnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req
 
     if (nvme_dma_read_prp(n, (uint8_t *)&ns->tbl[slba], xfer_len,
                           prp1, prp2)) {
-	    nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                             offsetof(LnvmGetL2PTbl, prp1), 0, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -2434,7 +2434,7 @@ static void nvme_init_namespaces(NvmeCtrl *n)
         id_ns->dps = n->dps;
 
         if (lightnvm_dev(n))
-		id_ns->vs[0] = 0x1;
+            id_ns->vs[0] = 0x1;
 
         /* TODO: Jesper, please clean this mess up */
         for (j = 0; j < ji; j++) {
@@ -2535,9 +2535,9 @@ static int lightnvm_init(NvmeCtrl *n)
 
         c->mpos = cpu_to_le32(0x10101); /* single plane */
         c->cpar = cpu_to_le16(0);
-	c->mccap = 1;
+        c->mccap = 1;
         ns->bbtbl = qemu_blockalign(blk_bs(n->conf.blk), c->num_blk);
-	memset(ns->bbtbl, 0, c->num_blk);
+        memset(ns->bbtbl, 0, c->num_blk);
     }
 
     if (!ln->bb_tbl_name) {

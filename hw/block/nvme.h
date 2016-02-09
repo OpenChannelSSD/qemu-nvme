@@ -658,19 +658,19 @@ typedef struct NvmeIdCtrl {
 } NvmeIdCtrl;
 
 typedef struct LnvmIdAddrFormat {
-	uint8_t  ch_offset;
-	uint8_t  ch_len;
-	uint8_t  lun_offset;
-	uint8_t  lun_len;
-	uint8_t  pln_offset;
-	uint8_t  pln_len;
-	uint8_t  blk_offset;
-	uint8_t  blk_len;
-	uint8_t  pg_offset;
-	uint8_t  pg_len;
-	uint8_t  sect_offset;
-	uint8_t  sect_len;
-	uint8_t  res[4];
+    uint8_t  ch_offset;
+    uint8_t  ch_len;
+    uint8_t  lun_offset;
+    uint8_t  lun_len;
+    uint8_t  pln_offset;
+    uint8_t  pln_len;
+    uint8_t  blk_offset;
+    uint8_t  blk_len;
+    uint8_t  pg_offset;
+    uint8_t  pg_len;
+    uint8_t  sect_offset;
+    uint8_t  sect_len;
+    uint8_t  res[4];
 } QEMU_PACKED LnvmIdAddrFormat;
 
 typedef struct LnvmIdGroup {
@@ -712,17 +712,17 @@ typedef struct LnvmIdCtrl {
 } QEMU_PACKED LnvmIdCtrl;
 
 typedef struct LnvmBBTbl {
-	uint8_t		tblid[4];
-	uint16_t	verid;
-	uint16_t	revid;
-	uint32_t	rvsd1;
-	uint32_t	tblks;
-	uint32_t	tfact;
-	uint32_t	tgrown;
-	uint32_t	tdresv;
-	uint32_t	thresv;
-	uint32_t	rsvd2[8];
-	uint8_t		blk[0];
+    uint8_t     tblid[4];
+    uint16_t    verid;
+    uint16_t    revid;
+    uint32_t    rvsd1;
+    uint32_t    tblks;
+    uint32_t    tfact;
+    uint32_t    tgrown;
+    uint32_t    tdresv;
+    uint32_t    thresv;
+    uint32_t    rsvd2[8];
+    uint8_t     blk[0];
 } QEMU_PACKED LnvmBBTbl;
 
 /* Parameters passed on to QEMU to configure the characteristics of the drive */
@@ -988,19 +988,19 @@ typedef struct NvmeNamespace {
         OBJECT_CHECK(NvmeCtrl, (obj), TYPE_NVME)
 
 struct ppa_addr {
-	/* Generic structure for all addresses */
-	union {
-		struct {
-		uint64_t blk		: 16;
-		uint64_t pg		: 16;
-		uint64_t sec		: 8;
-		uint64_t pl		: 8;
-		uint64_t lun		: 8;
-		uint64_t ch		: 8;
-		} g;
+    /* Generic structure for all addresses */
+    union {
+        struct {
+        uint64_t blk    : 16;
+        uint64_t pg     : 16;
+        uint64_t sec    : 8;
+        uint64_t pl     : 8;
+        uint64_t lun    : 8;
+        uint64_t ch     : 8;
+    } g;
 
-		uint64_t ppa;
-	};
+    uint64_t ppa;
+    };
 };
 
 typedef struct LnvmCtrl {
