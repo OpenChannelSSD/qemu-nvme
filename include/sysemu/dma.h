@@ -211,6 +211,17 @@ BlockAIOCB *dma_blk_read(BlockBackend *blk,
 BlockAIOCB *dma_blk_write(BlockBackend *blk,
                           QEMUSGList *sg, uint64_t sector,
                           BlockCompletionFunc *cb, void *opaque);
+BlockAIOCB *dma_blk_io_list(BlockBackend *blk,
+                       QEMUSGList *sg, uint64_t *sector_list,
+                       DMAIOFunc *io_func, BlockCompletionFunc *cb,
+                       void *opaque, DMADirection dir);
+BlockAIOCB *dma_blk_read_list(BlockBackend *blk,
+                         QEMUSGList *sg, uint64_t *sector_list,
+                         BlockCompletionFunc *cb, void *opaque);
+BlockAIOCB *dma_blk_write_list(BlockBackend *blk,
+                          QEMUSGList *sg, uint64_t *sector_list,
+                          BlockCompletionFunc *cb, void *opaque);
+
 uint64_t dma_buf_read(uint8_t *ptr, int32_t len, QEMUSGList *sg);
 uint64_t dma_buf_write(uint8_t *ptr, int32_t len, QEMUSGList *sg);
 
