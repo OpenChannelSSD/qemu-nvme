@@ -59,7 +59,8 @@
  *  cmbsz=<cmbsz>    : Controller Memory Buffer CMBSZ register, Default:0
  *  cmbloc=<cmbloc>  : Controller Memory Buffer CMBLOC register, Default:0
  *  lver=<int>         : version of the LightNVM standard to use, Default:1
- *  lsec_size=<int>    : Flash sector size in KB. Default: 4096
+ *  lsec_size=<int>    : Controller Sector Size. Default: 4096
+ *  lsecs_per_pg=<int> : Number of sectors in a flash page. Default: 1
  *  lpgs_per_blk=<int> : Number of pages per flash block. Default: 256
  *  lmax_sec_per_rq=<int> : Maximum number of sectors per I/O request. Default: 64
  *  lmtype=<int>       : Media type. Default: 0 (NAND Flash Memory)
@@ -67,8 +68,6 @@
  *  lnum_ch=<int>      : Number of controller channels. Default: 1
  *  lnum_lun=<int>     : Number of LUNs per channel, Default:1
  *  lnum_pln=<int>     : Number of flash planes per LUN. Defult: 1
- *  lcsecs=<int>       : Controller Sector Size. Default: 4096
- *  lfgg_sz=<int>      : Number of bytes in a flash page. Default 4096
  *  lreadl2ptbl=<int>  : Load logical to physical table. 1: yes, 0: no. Default: 1
  *  lbbtable=<file>    : Load bad block table from file destination (Provide path
  *  to file. If no file is provided a bad block table will be generation. Look
@@ -2604,9 +2603,7 @@ static int lightnvm_init(NvmeCtrl *n)
         error_report("nvme: Only 1 channel is supported at the moment\n");
     if (ln->params.num_pln!= 1)
         error_report("nvme: Only 1 flash plane is supported at the moment\n");
-    if (ln->params.sec_size != 4096)
-        error_report("nvme: Only 4KB sector size is supported at the moment\n");
-    if ((ln->params.csecs != 4096) || (ln->params.fpg_sz != 4096))
+    if ((ln->params.sec_size != 4096) || (ln->params.secs_per_pg != 1))
         error_report("nvme: Only 4KB pages (1 sector) are supported at the moment\n");
 
     for (i = 0; i < n->num_namespaces; i++) {
@@ -2622,8 +2619,8 @@ static int lightnvm_init(NvmeCtrl *n)
 
         c->num_blk = cpu_to_le16(chnl_blks) / c->num_lun;
         c->num_pg = cpu_to_le16(ln->params.pgs_per_blk);
-        c->fpg_sz = cpu_to_le16(ln->params.fpg_sz);
-        c->csecs = cpu_to_le16(ln->params.csecs);
+        c->csecs = cpu_to_le16(ln->params.sec_size);
+        c->fpg_sz = cpu_to_le16(ln->params.sec_size * ln->params.secs_per_pg);
         c->sos = cpu_to_le16(n->meta);
 
         c->trdt = cpu_to_le32(10000);
@@ -2872,6 +2869,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("lver", NvmeCtrl, lightnvm_ctrl.id_ctrl.ver_id, 0),
     DEFINE_PROP_UINT16("lsec_size", NvmeCtrl, lightnvm_ctrl.params.sec_size, 4096),
+    DEFINE_PROP_UINT8("lsecs_per_pg", NvmeCtrl, lightnvm_ctrl.params.secs_per_pg, 1),
     DEFINE_PROP_UINT16("lpgs_per_blk", NvmeCtrl, lightnvm_ctrl.params.pgs_per_blk, 256),
     DEFINE_PROP_UINT8("lmax_sec_per_rq", NvmeCtrl, lightnvm_ctrl.params.max_sec_per_rq, 64),
     DEFINE_PROP_UINT8("lmtype", NvmeCtrl, lightnvm_ctrl.params.mtype, 0),
@@ -2879,8 +2877,6 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("lnum_ch", NvmeCtrl, lightnvm_ctrl.params.num_ch, 1),
     DEFINE_PROP_UINT8("lnum_lun", NvmeCtrl, lightnvm_ctrl.params.num_lun, 1),
     DEFINE_PROP_UINT8("lnum_pln", NvmeCtrl, lightnvm_ctrl.params.num_pln, 1),
-    DEFINE_PROP_UINT16("lcsecs", NvmeCtrl, lightnvm_ctrl.params.csecs, 4096),
-    DEFINE_PROP_UINT16("lfpg_sz", NvmeCtrl, lightnvm_ctrl.params.fpg_sz, 4096),
     DEFINE_PROP_UINT8("lreadl2ptbl", NvmeCtrl, lightnvm_ctrl.read_l2p_tbl, 1),
     DEFINE_PROP_STRING("lbbtable", NvmeCtrl, lightnvm_ctrl.bb_tbl_name),
     DEFINE_PROP_UINT8("lbbfrequency", NvmeCtrl, lightnvm_ctrl.bb_gen_freq, 0),
