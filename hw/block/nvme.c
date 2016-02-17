@@ -660,13 +660,12 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     /* In the case of a LightNVM device. The slba is the logical address, while the actual
      * physical block address is stored in Command Dword 11-10. */
     LnvmCtrl *ln = &n->lightnvm_ctrl;
-    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
     struct ppa_addr psl[ln->params.max_sec_per_rq];
     uint16_t ctrl = 0;
-    uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
-    uint64_t prp1 = le64_to_cpu(rw->prp1);
-    uint64_t prp2 = le64_to_cpu(rw->prp2);
+    uint32_t nlb  = le16_to_cpu(lrw->nlb) + 1;
+    uint64_t prp1 = le64_to_cpu(lrw->prp1);
+    uint64_t prp2 = le64_to_cpu(lrw->prp2);
     uint64_t spba = le64_to_cpu(lrw->spba);
     uint64_t sppa;
     uint64_t eppa;
@@ -712,11 +711,11 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    ctrl = le16_to_cpu(rw->control);
+    ctrl = le16_to_cpu(lrw->control);
     req->lightnvm_ppa_list = sector_list;
     req->lightnvm_slba = le64_to_cpu(lrw->slba);
-    req->is_write = (rw->opcode == LNVM_CMD_PHYS_WRITE ||
-                                          rw->opcode == LNVM_CMD_HYBRID_WRITE);
+    req->is_write = (lrw->opcode == LNVM_CMD_PHYS_WRITE ||
+                                          lrw->opcode == LNVM_CMD_HYBRID_WRITE);
 
     /* If several LUNs are set up, the ppa list sent by the host will not be
      * sequential. In this case, we need to pass on the list of ppas to the dma
