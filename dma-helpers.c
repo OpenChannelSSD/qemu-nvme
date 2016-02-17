@@ -185,7 +185,7 @@ static void dma_blk_list_cb(void *opaque, int ret)
     trace_dma_blk_cb(dbs, ret);
 
     if (dbs->sg_cur_index == dbs->sg->nsg || ret < 0) {
-        free(dbs->sector_list);
+        g_free(dbs->sector_list);
         dma_complete(dbs, ret);
         return;
     }

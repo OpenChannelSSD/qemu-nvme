@@ -738,6 +738,11 @@ typedef struct LnvmParams {
     uint8_t     num_ch;
     uint8_t     num_pln;
     uint8_t     num_lun;
+    /* calculated values */
+    uint32_t    sec_per_pl;
+    uint32_t    sec_per_blk;
+    uint32_t    sec_per_lun;
+    uint32_t    total_secs;
 } QEMU_PACKED LnvmParams;
 
 enum LnvmResponsibility {

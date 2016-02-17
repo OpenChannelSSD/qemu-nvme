@@ -590,10 +590,11 @@ static void nvme_rw_cb(void *opaque, int ret)
                 for (i = 0; i < req->nlb; i++)
                     ns->tbl[req->lightnvm_slba + i] = req->lightnvm_ppa_list[i];
 
-                free(req->lightnvm_ppa_list);
             } else {
                 ns->tbl[req->lightnvm_slba] = req->slba;
             }
+
+            g_free(req->lightnvm_ppa_list);
         }
     }
 
@@ -641,8 +642,16 @@ static uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 static inline uint64_t nvme_gen_to_dev_addr(LnvmCtrl *ln, struct ppa_addr *r)
 {
     LnvmIdGroup *c = &ln->id_ctrl.groups[0];
+    uint64_t pg_off = r->g.pg * ln->params.secs_per_pg;
+    uint64_t blk_lun_off = ((r->g.blk + r->g.lun * c->num_blk) *
+                        (ln->params.pgs_per_blk) * (ln->params.secs_per_pg));
+    uint64_t ret;
 
-    return r->g.pg + ((r->g.blk + r->g.lun * c->num_blk) * ln->params.pgs_per_blk);
+    ret = r->g.sec + pg_off + blk_lun_off;
+    if (ret > ln->params.total_secs)
+        printf("Lnvm: sector out of bounds\n");
+
+    return ret;
 }
 
 static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -661,7 +670,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t spba = le64_to_cpu(lrw->spba);
     uint64_t sppa;
     uint64_t eppa;
-    uint64_t lba;
+    uint64_t ppa;
     uint64_t *sector_list;
     uint64_t *aio_sector_list;
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
@@ -678,14 +687,18 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return -ENOMEM;
 
     aio_sector_list = g_malloc(sizeof(uint64_t) * ln->params.max_sec_per_rq);
-    if (!aio_sector_list)
+    if (!aio_sector_list) {
+        g_free(sector_list);
         return -ENOMEM;
+    }
 
     if (n_pages > ln->params.max_sec_per_rq) {
         printf("npages too large (%u). Max:%u supported\n",
                                         n_pages, ln->params.max_sec_per_rq);
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                 offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
+        g_free(aio_sector_list);
+        g_free(sector_list);
         return NVME_INVALID_FIELD | NVME_DNR;
     } else if (n_pages > 1) {
             nvme_addr_read(n, spba, (void *)psl, n_pages * sizeof(void *));
@@ -710,21 +723,19 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      * handlers to write/read data to/from the right pysical sector
      */
     for (i = 0; i < n_pages; i++) {
-        lba = nvme_gen_to_dev_addr(ln, &psl[i]);
-        sector_list[i] = lba;
+        ppa = nvme_gen_to_dev_addr(ln, &psl[i]);
+        sector_list[i] = ppa;
         aio_sector_list[i] =
-                    ns->start_block + (lba << (data_shift - BDRV_SECTOR_BITS));
+                    ns->start_block + (ppa << (data_shift - BDRV_SECTOR_BITS));
     }
 
     /* Reuse check logic from nvme_rw */
     sppa = nvme_gen_to_dev_addr(ln, &psl[0]);
     eppa = nvme_gen_to_dev_addr(ln, &psl[n_pages - 1]);
-
     err = nvme_rw_check_req(n, ns, cmd, req, sppa, eppa, nlb, ctrl,
                                                         data_size, meta_size);
     if (err)
         return err;
-
 
     if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
@@ -746,11 +757,15 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             dma_blk_read_list(n->conf.blk, &req->qsg, aio_sector_list,
                                                             nvme_rw_cb, req);
     } else {
+        uint64_t aio_sector = aio_sector_list[0];
+
         req->aiocb = req->is_write ?
-            blk_aio_writev(n->conf.blk, aio_sector_list[0], &req->iov,
+            blk_aio_writev(n->conf.blk, aio_sector, &req->iov,
                                             data_size >> 9, nvme_rw_cb, req) :
-            blk_aio_readv(n->conf.blk, aio_sector_list[0], &req->iov,
+            blk_aio_readv(n->conf.blk, aio_sector, &req->iov,
                                             data_size >> 9, nvme_rw_cb, req);
+
+        g_free(aio_sector_list);
     }
 
     return NVME_NO_COMPLETE;
@@ -2603,12 +2618,10 @@ static int lightnvm_init(NvmeCtrl *n)
         error_report("nvme: Only 1 channel is supported at the moment\n");
     if (ln->params.num_pln!= 1)
         error_report("nvme: Only 1 flash plane is supported at the moment\n");
-    if ((ln->params.sec_size != 4096) || (ln->params.secs_per_pg != 1))
-        error_report("nvme: Only 4KB pages (1 sector) are supported at the moment\n");
 
     for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
-        chnl_blks = ns->ns_blks / ln->params.pgs_per_blk;
+        chnl_blks = ns->ns_blks / (ln->params.pgs_per_blk * ln->params.secs_per_pg);
 
         c = &ln->id_ctrl.groups[0];
         c->mtype = ln->params.mtype;
@@ -2635,6 +2648,12 @@ static int lightnvm_init(NvmeCtrl *n)
         c->mccap = 1;
         ns->bbtbl = qemu_blockalign(blk_bs(n->conf.blk), c->num_blk);
         memset(ns->bbtbl, 0, c->num_blk);
+
+        /* calculated values for internal checks */
+        ln->params.sec_per_pl = ln->params.secs_per_pg * ln->params.num_pln;
+        ln->params.sec_per_blk = ln->params.sec_per_pl * ln->params.pgs_per_blk;
+        ln->params.sec_per_lun = ln->params.sec_per_blk * c->num_blk;
+        ln->params.total_secs = ln->params.num_lun * ln->params.sec_per_lun;
     }
 
     if (!ln->bb_tbl_name) {
