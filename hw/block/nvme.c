@@ -1249,31 +1249,51 @@ static int lightnvm_read_tbls(NvmeCtrl *n)
 static uint16_t lightnvm_erase_sync(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
+    LnvmCtrl *ln = &n->lightnvm_ctrl;
+    LnvmIdGroup *c = &ln->id_ctrl.groups[0];
     LnvmRwCmd *dm = (LnvmRwCmd *)cmd;
     uint64_t spba = le64_to_cpu(dm->spba);
-    struct ppa_addr ppa;
+    struct ppa_addr addr;
+    uint64_t ppa;
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
     uint32_t nlb_blk = nlb << (data_shift - BDRV_SECTOR_BITS);
-    uint64_t start = ns->start_block + (spba << (data_shift - BDRV_SECTOR_BITS));
+    uint64_t start;
     int offset;
 
-    ppa.ppa = spba;
+    /* Do not implement erase until we have simulated planes, since block
+     * mapping will chenge then too
+     */
+    return NVME_SUCCESS;
+
+    addr.ppa = spba;
+    ppa = nvme_gen_to_dev_addr(ln, &addr);
+    start = ns->start_block + (ppa << (data_shift - BDRV_SECTOR_BITS));
+    /* printf("Erase: spba:%lu, ppa:%lu, nlb:%d\n", */
+            /* spba, ppa, nlb); */
+    /* printf("addr:blk:%d,pg:%d,sec:%d,lun:%d,pl:%d,ch:%d\n\n", */
+            /* addr.g.blk, */
+            /* addr.g.pg, */
+            /* addr.g.sec, */
+            /* addr.g.lun, */
+            /* addr.g.pl, */
+            /* addr.g.ch); */
     if (nlb != 1) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-            offsetof(LnvmRwCmd, nlb), ppa.ppa+nlb, ns->id);
+            offsetof(LnvmRwCmd, nlb), ppa + nlb, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    offset = ppa.g.blk;
+    offset = addr.g.blk + addr.g.lun * c->num_blk;
+    /* printf("offset:%d\n", offset); */
     bitmap_set(ns->util, offset, nlb);
     bitmap_clear(ns->uncorrectable, offset, nlb);
 
     if (bdrv_write_zeroes(blk_bs(n->conf.blk), start, nlb_blk, 0)) {
         nvme_set_error_page(n, req->sq->sqid, req->cqe.cid,
         NVME_INTERNAL_DEV_ERROR, offsetof(LnvmRwCmd, spba), spba, ns->id);
-        bitmap_clear(ns->util, spba, nlb);
+        bitmap_clear(ns->util, offset, nlb);
         return NVME_INTERNAL_DEV_ERROR;
     }
     return NVME_SUCCESS;
