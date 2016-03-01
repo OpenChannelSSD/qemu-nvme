@@ -59,6 +59,7 @@
  *  cmbsz=<cmbsz>    : Controller Memory Buffer CMBSZ register, Default:0
  *  cmbloc=<cmbloc>  : Controller Memory Buffer CMBLOC register, Default:0
  *  lver=<int>         : version of the LightNVM standard to use, Default:1
+ *  ll2pmode=<int>     : LightNVM op. mode. 1: hybrid, 0: full host-based. Default: 1
  *  lsec_size=<int>    : Controller Sector Size. Default: 4096
  *  lsecs_per_pg=<int> : Number of sectors in a flash page. Default: 1
  *  lpgs_per_blk=<int> : Number of pages per flash block. Default: 256
@@ -2605,7 +2606,6 @@ static void lightnvm_init_id_ctrl(LnvmIdCtrl *ln_id)
     ln_id->vmnt = 0;
     ln_id->cgrps = 1;
     ln_id->cap = cpu_to_le32(0x3);
-    ln_id->dom = cpu_to_le32(0x1);
 
     ln_id->ppaf.blk_offset = 0;
     ln_id->ppaf.blk_len = 16;
@@ -2909,6 +2909,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("lver", NvmeCtrl, lightnvm_ctrl.id_ctrl.ver_id, 0),
+    DEFINE_PROP_UINT32("ll2pmode", NvmeCtrl, lightnvm_ctrl.id_ctrl.dom, 1),
     DEFINE_PROP_UINT16("lsec_size", NvmeCtrl, lightnvm_ctrl.params.sec_size, 4096),
     DEFINE_PROP_UINT8("lsecs_per_pg", NvmeCtrl, lightnvm_ctrl.params.secs_per_pg, 1),
     DEFINE_PROP_UINT16("lpgs_per_blk", NvmeCtrl, lightnvm_ctrl.params.pgs_per_blk, 256),
