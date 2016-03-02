@@ -68,7 +68,8 @@
  *  lfmtype=<int>      : Flash media type. Default: 0 (SLC)
  *  lnum_ch=<int>      : Number of controller channels. Default: 1
  *  lnum_lun=<int>     : Number of LUNs per channel, Default:1
- *  lnum_pln=<int>     : Number of flash planes per LUN. Defult: 1
+ *  lnum_pln=<int>     : Number of flash planes per LUN. Supported single (1),
+ *  dual (2) and quad (4) plane modes. Defult: 1
  *  lreadl2ptbl=<int>  : Load logical to physical table. 1: yes, 0: no. Default: 1
  *  lbbtable=<file>    : Load bad block table from file destination (Provide path
  *  to file. If no file is provided a bad block table will be generation. Look
@@ -645,13 +646,13 @@ static uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
 static inline uint64_t nvme_gen_to_dev_addr(LnvmCtrl *ln, struct ppa_addr *r)
 {
-    LnvmIdGroup *c = &ln->id_ctrl.groups[0];
+    uint64_t lun_of = r->g.lun * ln->params.sec_per_lun;
+    uint64_t pln_off = r->g.pl * ln->params.sec_per_pl;
+    uint64_t blk_off = r->g.blk * ln->params.sec_per_blk;
     uint64_t pg_off = r->g.pg * ln->params.secs_per_pg;
-    uint64_t blk_lun_off = ((r->g.blk + r->g.lun * c->num_blk) *
-                        (ln->params.pgs_per_blk) * (ln->params.secs_per_pg));
     uint64_t ret;
 
-    ret = r->g.sec + pg_off + blk_lun_off;
+    ret = r->g.sec + pg_off + blk_off + pln_off + lun_of;
     if (ret > ln->params.total_secs)
         printf("Lnvm: sector out of bounds\n");
 
@@ -2638,12 +2639,12 @@ static int lightnvm_init(NvmeCtrl *n)
         error_report("nvme: Only SLC Flash is supported at the moment\n");
     if (ln->params.num_ch != 1)
         error_report("nvme: Only 1 channel is supported at the moment\n");
-    if (ln->params.num_pln!= 1)
-        error_report("nvme: Only 1 flash plane is supported at the moment\n");
+    if ((ln->params.num_pln > 4) || (ln->params.num_pln == 3))
+        error_report("nvme: Only single, dual and quad plane modes supported \n");
 
     for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
-        chnl_blks = ns->ns_blks / (ln->params.pgs_per_blk * ln->params.secs_per_pg);
+        chnl_blks = ns->ns_blks / (ln->params.secs_per_pg * ln->params.pgs_per_blk);
 
         c = &ln->id_ctrl.groups[0];
         c->mtype = ln->params.mtype;
@@ -2652,7 +2653,7 @@ static int lightnvm_init(NvmeCtrl *n)
         c->num_lun = ln->params.num_lun;
         c->num_pln = ln->params.num_pln;
 
-        c->num_blk = cpu_to_le16(chnl_blks) / c->num_lun;
+        c->num_blk = cpu_to_le16(chnl_blks) / (c->num_lun * c->num_pln);
         c->num_pg = cpu_to_le16(ln->params.pgs_per_blk);
         c->csecs = cpu_to_le16(ln->params.sec_size);
         c->fpg_sz = cpu_to_le16(ln->params.sec_size * ln->params.secs_per_pg);
@@ -2671,7 +2672,7 @@ static int lightnvm_init(NvmeCtrl *n)
         ns->bbtbl = qemu_blockalign(blk_bs(n->conf.blk), c->num_blk);
         memset(ns->bbtbl, 0, c->num_blk);
 
-        /* calculated values for internal checks */
+        /* calculated values */
         ln->params.sec_per_pl = ln->params.secs_per_pg * ln->params.num_pln;
         ln->params.sec_per_blk = ln->params.sec_per_pl * ln->params.pgs_per_blk;
         ln->params.sec_per_lun = ln->params.sec_per_blk * c->num_blk;
