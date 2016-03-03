@@ -667,22 +667,24 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     LnvmCtrl *ln = &n->lightnvm_ctrl;
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
     struct ppa_addr psl[ln->params.max_sec_per_rq];
-    uint16_t ctrl = 0;
-    uint32_t nlb  = le16_to_cpu(lrw->nlb) + 1;
-    uint64_t prp1 = le64_to_cpu(lrw->prp1);
-    uint64_t prp2 = le64_to_cpu(lrw->prp2);
-    uint64_t spba = le64_to_cpu(lrw->spba);
     uint64_t sppa;
     uint64_t eppa;
     uint64_t ppa;
     uint64_t *sector_list;
     uint64_t *aio_sector_list;
+    uint32_t nlb  = le16_to_cpu(lrw->nlb) + 1;
+    uint64_t prp1 = le64_to_cpu(lrw->prp1);
+    uint64_t prp2 = le64_to_cpu(lrw->prp2);
+    uint64_t spba = le64_to_cpu(lrw->spba);
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
     const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
     uint64_t data_size = nlb << data_shift;
     uint64_t meta_size = nlb * ms;
     uint32_t n_pages = data_size / ln->params.sec_size;
+    uint16_t is_write = (lrw->opcode == LNVM_CMD_PHYS_WRITE ||
+                                          lrw->opcode == LNVM_CMD_HYBRID_WRITE);
+    uint16_t ctrl = 0;
     uint16_t err;
     uint8_t i;
 
@@ -704,6 +706,15 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         g_free(aio_sector_list);
         g_free(sector_list);
         return NVME_INVALID_FIELD | NVME_DNR;
+    } else if ((is_write) && (n_pages < ln->params.sec_per_pl)) {
+        printf("lnvm: I/O does not respect device write constrains."
+                "Sectors send: (%u). Min:%u sectors required\n",
+                                        n_pages, ln->params.sec_per_pl);
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
+                offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
+        g_free(aio_sector_list);
+        g_free(sector_list);
+        return NVME_INVALID_FIELD | NVME_DNR;
     } else if (n_pages > 1) {
             nvme_addr_read(n, spba, (void *)psl, n_pages * sizeof(void *));
     } else {
@@ -719,8 +730,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     ctrl = le16_to_cpu(lrw->control);
     req->lightnvm_ppa_list = sector_list;
     req->lightnvm_slba = le64_to_cpu(lrw->slba);
-    req->is_write = (lrw->opcode == LNVM_CMD_PHYS_WRITE ||
-                                          lrw->opcode == LNVM_CMD_HYBRID_WRITE);
+    req->is_write = is_write;
 
     /* If several LUNs are set up, the ppa list sent by the host will not be
      * sequential. In this case, we need to pass on the list of ppas to the dma
