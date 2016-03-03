@@ -2676,7 +2676,21 @@ static int lightnvm_init(NvmeCtrl *n)
         c->tbet = cpu_to_le32(1000000);
         c->tbem = cpu_to_le32(1000000);
 
-        c->mpos = cpu_to_le32(0x10101); /* single plane */
+        switch(c->num_pln) {
+            case 1:
+                c->mpos = cpu_to_le32(0x10101); /* single plane */
+                break;
+            case 2:
+                c->mpos = cpu_to_le32(0x20202); /* dual plane */
+                break;
+            case 4:
+                c->mpos = cpu_to_le32(0x40404); /* quad plane */
+                break;
+            default:
+                error_report("nvme: Invalid plane mode\n");
+                return -EINVAL;
+        }
+
         c->cpar = cpu_to_le16(0);
         c->mccap = 1;
         ns->bbtbl = qemu_blockalign(blk_bs(n->conf.blk), c->num_blk);
