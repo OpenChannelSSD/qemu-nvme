@@ -1138,7 +1138,7 @@ static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     ns = &n->namespaces[nsid - 1];
     ln = &n->lightnvm_ctrl;
     c = &ln->id_ctrl.groups[0];
-    nr_blocks = c->num_blk;
+    nr_blocks = c->num_blk * c->num_pln;
 
     bb_tbl = calloc(sizeof(LnvmBBTbl) + nr_blocks, 1);
     if (!bb_tbl) {
@@ -1198,12 +1198,12 @@ static uint16_t lightnvm_set_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     ns = &n->namespaces[nsid - 1];
     ln = &n->lightnvm_ctrl;
     c = &ln->id_ctrl.groups[0];
-    nr_blocks = c->num_blk;
+    nr_blocks = c->num_blk * c->num_pln;
 
     struct ppa_addr ppas[nr_blocks];
     if (nlb == 1) {
         ppas[0].ppa = spbappa.ppa;
-        ns->bbtbl[ppas[0].g.blk] = value;
+        ns->bbtbl[(ppas[0].g.blk * c->num_pln) + ppas[0].g.pl] = value;
     } else {
         if (nvme_dma_write_prp(n, (uint8_t *)ppas, nlb * 8, spba, prp2)) {
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
@@ -1212,7 +1212,7 @@ static uint16_t lightnvm_set_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
 
         for (i = 0; i < nlb; i++) {
-            ns->bbtbl[ppas[i].g.blk] = value;
+            ns->bbtbl[(ppas[i].g.blk * c->num_pln) + ppas[i].g.pl] = value;
         }
     }
 
