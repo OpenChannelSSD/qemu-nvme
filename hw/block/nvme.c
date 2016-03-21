@@ -646,13 +646,13 @@ static uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
 static inline uint64_t nvme_gen_to_dev_addr(LnvmCtrl *ln, struct ppa_addr *r)
 {
+    uint64_t pln_off = r->g.pl * ln->params.sec_per_log_pl;
     uint64_t lun_of = r->g.lun * ln->params.sec_per_lun;
-    uint64_t pln_off = r->g.pl * ln->params.sec_per_pl;
     uint64_t blk_off = r->g.blk * ln->params.sec_per_blk;
     uint64_t pg_off = r->g.pg * ln->params.secs_per_pg;
     uint64_t ret;
 
-    ret = r->g.sec + pg_off + blk_off + pln_off + lun_of;
+    ret = r->g.sec + pg_off + blk_off + lun_of + pln_off;
     if (ret > ln->params.total_secs)
         printf("Lnvm: sector out of bounds\n");
 
@@ -706,10 +706,10 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         g_free(aio_sector_list);
         g_free(sector_list);
         return NVME_INVALID_FIELD | NVME_DNR;
-    } else if ((is_write) && (n_pages < ln->params.sec_per_pl)) {
+    } else if ((is_write) && (n_pages < ln->params.sec_per_phys_pl)) {
         printf("lnvm: I/O does not respect device write constrains."
                 "Sectors send: (%u). Min:%u sectors required\n",
-                                        n_pages, ln->params.sec_per_pl);
+                                        n_pages, ln->params.sec_per_phys_pl);
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                 offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
         g_free(aio_sector_list);
@@ -2696,11 +2696,31 @@ static int lightnvm_init(NvmeCtrl *n)
         ns->bbtbl = qemu_blockalign(blk_bs(n->conf.blk), c->num_blk);
         memset(ns->bbtbl, 0, c->num_blk);
 
+        /* We devide de address space linearly to be able to fit into the 4KB
+         * sectors that the nvme driver divides the backend file. We do the
+         * division in LUNS - BLOCKS - PAGES - SECTORS. If there is 2 or 4
+         * planes, each LUN is unfolded into planes.
+         *
+         * For example a quad plane configuration is layed out as:
+         * -----------------------------------------------------------
+         * |                        QUAD PLANE                       |
+         * -------------- -------------- -------------- --------------
+         * |   LUN 00   | |   LUN 01   | |   LUN 02   | |   LUN 03   |
+         * -------------- -------------- -------------- --------------
+         * |   BLOCKS  |               ...               |   BLOCKS  |
+         * -------------
+         * |   PAGES   |               ...               |   PAGES   |
+         * -----------------------------------------------------------
+         * |                        ALL SECTORS                      |
+         * -----------------------------------------------------------
+         */
+
         /* calculated values */
-        ln->params.sec_per_pl = ln->params.secs_per_pg * ln->params.num_pln;
-        ln->params.sec_per_blk = ln->params.sec_per_pl * ln->params.pgs_per_blk;
+        ln->params.sec_per_phys_pl = ln->params.secs_per_pg * c->num_pln;
+        ln->params.sec_per_blk = ln->params.secs_per_pg * ln->params.pgs_per_blk;
         ln->params.sec_per_lun = ln->params.sec_per_blk * c->num_blk;
-        ln->params.total_secs = ln->params.num_lun * ln->params.sec_per_lun;
+        ln->params.sec_per_log_pl = ln->params.sec_per_lun * c->num_lun;
+        ln->params.total_secs = ln->params.sec_per_log_pl * c->num_pln;;
     }
 
     if (!ln->bb_tbl_name) {
