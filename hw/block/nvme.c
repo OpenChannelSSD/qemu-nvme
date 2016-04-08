@@ -1138,7 +1138,7 @@ static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     ns = &n->namespaces[nsid - 1];
     ln = &n->lightnvm_ctrl;
     c = &ln->id_ctrl.groups[0];
-    nr_blocks = c->num_blk * c->num_pln;
+    nr_blocks = c->num_blk * c->num_pln * c->num_lun;
 
     bb_tbl = calloc(sizeof(LnvmBBTbl) + nr_blocks, 1);
     if (!bb_tbl) {
@@ -1198,7 +1198,7 @@ static uint16_t lightnvm_set_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     ns = &n->namespaces[nsid - 1];
     ln = &n->lightnvm_ctrl;
     c = &ln->id_ctrl.groups[0];
-    nr_blocks = c->num_blk * c->num_pln;
+    nr_blocks = c->num_blk * c->num_pln * c->num_lun;
 
     struct ppa_addr ppas[nr_blocks];
     if (nlb == 1) {
@@ -2639,6 +2639,7 @@ static int lightnvm_init(NvmeCtrl *n)
     NvmeNamespace *ns;
     unsigned int i;
     uint64_t chnl_blks;
+    uint32_t nr_total_blocks;
     int ret = 0;
 
     ln = &n->lightnvm_ctrl;
@@ -2691,12 +2692,13 @@ static int lightnvm_init(NvmeCtrl *n)
                 return -EINVAL;
         }
 
+        nr_total_blocks = c->num_blk * c->num_pln * c->num_lun;
         c->cpar = cpu_to_le16(0);
         c->mccap = 1;
-        ns->bbtbl = qemu_blockalign(blk_bs(n->conf.blk), c->num_blk);
-        memset(ns->bbtbl, 0, c->num_blk);
+        ns->bbtbl = qemu_blockalign(blk_bs(n->conf.blk), nr_total_blocks);
+        memset(ns->bbtbl, 0, nr_total_blocks);
 
-        /* We devide de address space linearly to be able to fit into the 4KB
+        /* We devide the address space linearly to be able to fit into the 4KB
          * sectors that the nvme driver divides the backend file. We do the
          * division in LUNS - BLOCKS - PAGES - SECTORS. If there is 2 or 4
          * planes, each LUN is unfolded into planes.
