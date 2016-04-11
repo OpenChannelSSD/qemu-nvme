@@ -1081,7 +1081,8 @@ static uint16_t lightnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req
 /* TODO: Implement for different bad block table formats. It depends on flash
  * vendors.
  */
-static int lightnvm_read_bbtbl(NvmeNamespace *ns, uint32_t nr_blocks, uint8_t *blks)
+static int lightnvm_read_bbtbl(NvmeNamespace *ns, uint32_t nr_blocks,
+                                             uint32_t offset, uint8_t *blks)
 {
     struct LnvmCtrl *ln = &ns->ctrl->lightnvm_ctrl;
     FILE *fp;
@@ -1093,9 +1094,16 @@ static int lightnvm_read_bbtbl(NvmeNamespace *ns, uint32_t nr_blocks, uint8_t *b
         return 0;
     }
 
+    if (fseek(fp, offset, SEEK_SET)) {
+        printf("Could not read bb file\n");
+        return -1;
+    }
+
     ret = fread(blks, 1, nr_blocks, fp);
-    if (ret != nr_blocks)
-        printf("Could not read file\n");
+    if (ret != nr_blocks) {
+        printf("Could not read bb file\n");
+        return -1;
+    }
 
     fclose(fp);
     return 0;
@@ -1127,6 +1135,8 @@ static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t nsid = le32_to_cpu(bbtbl->nsid);
     uint64_t prp1 = le64_to_cpu(bbtbl->prp1);
     uint64_t prp2 = le64_to_cpu(bbtbl->prp2);
+    struct ppa_addr ppa;
+    uint64_t offset;
     uint32_t nr_blocks;
     LnvmBBTbl *bb_tbl;
     int ret = NVME_SUCCESS;
@@ -1135,10 +1145,11 @@ static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
+    ppa.ppa= le64_to_cpu(bbtbl->spba);
     ns = &n->namespaces[nsid - 1];
     ln = &n->lightnvm_ctrl;
     c = &ln->id_ctrl.groups[0];
-    nr_blocks = c->num_blk * c->num_pln * c->num_lun;
+    nr_blocks = c->num_blk * c->num_pln;
 
     bb_tbl = calloc(sizeof(LnvmBBTbl) + nr_blocks, 1);
     if (!bb_tbl) {
@@ -1154,7 +1165,8 @@ static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     bb_tbl->verid = cpu_to_le16(1);
     bb_tbl->tblks = cpu_to_le32(nr_blocks);
 
-    ret = lightnvm_read_bbtbl(ns, nr_blocks, bb_tbl->blk);
+    offset = ppa.g.lun * (c->num_blk * c->num_pln);
+    ret = lightnvm_read_bbtbl(ns, nr_blocks, offset, bb_tbl->blk);
     if (ret)
         goto clean;
 
@@ -1200,7 +1212,7 @@ static uint16_t lightnvm_set_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     c = &ln->id_ctrl.groups[0];
     nr_blocks = c->num_blk * c->num_pln * c->num_lun;
 
-    struct ppa_addr ppas[nr_blocks];
+    struct ppa_addr ppas[ln->params.max_sec_per_rq];
     if (nlb == 1) {
         ppas[0].ppa = spbappa.ppa;
         ns->bbtbl[(ppas[0].g.blk * c->num_pln) + ppas[0].g.pl] = value;
@@ -1211,8 +1223,13 @@ static uint16_t lightnvm_set_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
+        uint64_t lun_of;
+        uint64_t pln_off;
+        uint64_t blks_per_lun = c->num_blk * c->num_pln;
         for (i = 0; i < nlb; i++) {
-            ns->bbtbl[(ppas[i].g.blk * c->num_pln) + ppas[i].g.pl] = value;
+            lun_of = ppas[i].g.lun * blks_per_lun;
+            pln_off = ppas[i].g.blk * c->num_pln;
+            ns->bbtbl[lun_of + pln_off + ppas[i].g.pl] = value;
         }
     }
 
