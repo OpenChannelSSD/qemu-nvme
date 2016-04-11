@@ -289,11 +289,8 @@ typedef struct LnvmGetBBTbl {
   uint64_t rsvd1[2];
   uint64_t prp1;
   uint64_t prp2;
-  uint64_t rsvd2;
-  uint8_t chid;
-  uint8_t lunid;
-  uint16_t rsvd3;
-  uint32_t rsvd4[3]; // DW15, 14, 13
+  uint64_t spba;
+  uint32_t rsvd4[4]; // DW15, 14, 13, 12
 } LnvmGetBBTbl;
 
 typedef struct LnvmSetBBTbl {
