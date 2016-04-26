@@ -667,6 +667,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     LnvmCtrl *ln = &n->lightnvm_ctrl;
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
     struct ppa_addr psl[ln->params.max_sec_per_rq];
+    uint64_t msl[ln->params.max_sec_per_rq];
     uint64_t sppa;
     uint64_t eppa;
     uint64_t ppa;
@@ -676,6 +677,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t prp1 = le64_to_cpu(lrw->prp1);
     uint64_t prp2 = le64_to_cpu(lrw->prp2);
     uint64_t spba = le64_to_cpu(lrw->spba);
+    uint64_t meta = le64_to_cpu(lrw->metadata);
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
     const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
@@ -717,8 +719,10 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_INVALID_FIELD | NVME_DNR;
     } else if (n_pages > 1) {
             nvme_addr_read(n, spba, (void *)psl, n_pages * sizeof(void *));
+            nvme_addr_read(n, meta, (void *)msl, n_pages * sizeof(void *));
     } else {
             psl[0].ppa = spba;
+            msl[0] = meta;
     }
 
     if (spba == LNVM_PBA_UNMAPPED) {
