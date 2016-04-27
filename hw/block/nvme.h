@@ -490,8 +490,13 @@ typedef struct NvmeAerResult {
 } NvmeAerResult;
 
 typedef struct NvmeCqe {
-    uint32_t    result;
-    uint32_t    rsvd;
+    union {
+        struct {
+            uint32_t    result;
+            uint32_t    rsvd;
+        } n;
+        uint64_t    res64;
+    };
     uint16_t    sq_head;
     uint16_t    sq_id;
     uint16_t    cid;
@@ -1014,6 +1019,8 @@ typedef struct LnvmCtrl {
     uint8_t        bb_auto_gen;
     char           *bb_tbl_name;
     FILE           *bb_tbl;
+    uint32_t       err_write;
+    uint32_t       err_write_cnt;
 } LnvmCtrl;
 
 typedef struct NvmeCtrl {
