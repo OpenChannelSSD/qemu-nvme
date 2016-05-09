@@ -540,7 +540,7 @@ static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
     if (!(n->bar.csts & NVME_CSTS_READY))
 	return;
 
-    event = (NvmeAsyncEvent *)g_malloc(sizeof(*event));
+    event = (NvmeAsyncEvent *)g_malloc0(sizeof(*event));
     event->result.event_type = event_type;
     event->result.event_info = event_info;
     event->result.log_page   = log_page;
@@ -752,14 +752,22 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                                           lrw->opcode == LNVM_CMD_HYBRID_WRITE);
     uint16_t ctrl = 0;
     uint16_t err;
-    uint8_t i;
 
-    sector_list = g_malloc(sizeof(uint64_t) * ln->params.max_sec_per_rq);
+   uint8_t i;
+
+    sector_list = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
     if (!sector_list)
         return -ENOMEM;
 
-    aio_sector_list = g_malloc(sizeof(uint64_t) * ln->params.max_sec_per_rq);
+    aio_sector_list = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
     if (!aio_sector_list) {
+        g_free(sector_list);
+        return -ENOMEM;
+    }
+
+    msl = g_malloc0(ln->params.sos * ln->params.max_sec_per_rq);
+    if (!msl) {
+        g_free(aio_sector_list);
         g_free(sector_list);
         return -ENOMEM;
     }
@@ -1600,7 +1608,7 @@ static uint16_t nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
         }
     }
 
-    sq->io_req = g_malloc(sq->size * sizeof(*sq->io_req));
+    sq->io_req = g_malloc0(sq->size * sizeof(*sq->io_req));
     QTAILQ_INIT(&sq->req_list);
     QTAILQ_INIT(&sq->out_req_list);
     for (i = 0; i < sq->size; i++) {
@@ -2994,7 +3002,7 @@ static int nvme_init(PCIDevice *pci_dev)
     n->namespaces = g_malloc0(sizeof(*n->namespaces) * n->num_namespaces);
     n->elpes = g_malloc0((n->elpe + 1) * sizeof(*n->elpes));
     n->aer_reqs = g_malloc0((n->aerl + 1) * sizeof(*n->aer_reqs));
-    n->features.int_vector_config = g_malloc(n->num_queues *
+    n->features.int_vector_config = g_malloc0(n->num_queues *
         sizeof(*n->features.int_vector_config));
 
     nvme_init_pci(n);
