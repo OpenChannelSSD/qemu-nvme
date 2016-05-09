@@ -740,6 +740,7 @@ typedef struct LnvmParams {
     uint8_t     num_ch;
     uint8_t     num_pln;
     uint8_t     num_lun;
+    uint16_t    sos;
     /* calculated values */
     uint32_t    sec_per_phys_pl;
     uint32_t    sec_per_log_pl;
@@ -1017,10 +1018,13 @@ typedef struct LnvmCtrl {
     uint8_t        read_l2p_tbl;
     uint8_t        bb_gen_freq;
     uint8_t        bb_auto_gen;
+    uint8_t        meta_auto_gen;
     char           *bb_tbl_name;
+    char           *meta_name;
     FILE           *bb_tbl;
     uint32_t       err_write;
     uint32_t       err_write_cnt;
+    FILE           *metadata;
 } LnvmCtrl;
 
 typedef struct NvmeCtrl {

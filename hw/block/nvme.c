@@ -72,6 +72,8 @@
  *  dual (2) and quad (4) plane modes. Defult: 1
  *  lreadl2ptbl=<int>  : Load logical to physical table. 1: yes, 0: no. Default: 1
  *  lbbtable=<file>    : Load bad block table from file destination (Provide path
+ *  lmetadata=<file>   : Load metadata from file destination
+ *  lmetasize=<int>    : LightNVM metadata (OOB) size. Default: 16
  *  to file. If no file is provided a bad block table will be generation. Look
  *  at lbbfrequency. Default: Null (no file).
  *  lbbfrequency:<int> : Bad block frequency for generating bad block table. If
@@ -656,7 +658,57 @@ static uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return 0;
 }
 
-static inline uint64_t nvme_gen_to_dev_addr(LnvmCtrl *ln, struct ppa_addr *r)
+static inline int nvme_write_meta(LnvmCtrl *ln, void *meta, uint64_t ppa)
+{
+    FILE *fp = ln->metadata;
+    size_t meta_len = ln->params.sos;
+    size_t ret;
+
+    if (fseek(fp, ppa * meta_len , SEEK_SET)) {
+        printf("Could not write to metadata file\n");
+        return -1;
+    }
+
+    ret = fwrite(meta, meta_len, 1, fp);
+    if (ret != 1) {
+        printf("Could not write to metadata file\n");
+        return -1;
+    }
+
+    fflush(fp);
+
+    return 0;
+}
+
+static inline int nvme_read_meta(LnvmCtrl *ln, void *meta, uint64_t ppa)
+{
+    FILE *fp = ln->metadata;
+    size_t meta_len = ln->params.sos;
+    size_t ret;
+
+    if (fseek(fp, ppa * meta_len, SEEK_SET)) {
+        printf("Could not read to metadata file (SEEK)\n");
+        return -1;
+    }
+
+    ret = fread(meta, 1, meta_len, fp);
+    if (ret != meta_len) {
+        if (errno == EAGAIN)
+            return 0;
+        printf("Could not read to metadata file - ppa:%lu (ret:%lu)\n", ppa, ret);
+        perror("read");
+        return -1;
+    }
+
+    return 0;
+}
+
+static inline void *nvme_index_meta(LnvmCtrl *ln, void *meta, uint32_t index)
+{
+    return meta + (index * ln->params.sos);
+}
+
+static inline int64_t nvme_gen_to_dev_addr(LnvmCtrl *ln, struct ppa_addr *r)
 {
     uint64_t pln_off = r->g.pl * ln->params.sec_per_log_pl;
     uint64_t lun_of = r->g.lun * ln->params.sec_per_lun;
@@ -679,7 +731,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     LnvmCtrl *ln = &n->lightnvm_ctrl;
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
     struct ppa_addr psl[ln->params.max_sec_per_rq];
-    uint64_t msl[ln->params.max_sec_per_rq];
+    void *msl;
     uint64_t sppa;
     uint64_t eppa;
     uint64_t ppa;
@@ -731,11 +783,11 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_INVALID_FIELD | NVME_DNR;
     } else if (n_pages > 1) {
             nvme_addr_read(n, spba, (void *)psl, n_pages * sizeof(void *));
-            nvme_addr_read(n, meta, (void *)msl, n_pages * sizeof(void *));
     } else {
             psl[0].ppa = spba;
-            msl[0] = meta;
     }
+
+    nvme_addr_read(n, meta, (void *)msl, n_pages * ln->params.sos);
 
     if (spba == LNVM_PBA_UNMAPPED) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
@@ -748,6 +800,17 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->lightnvm_slba = le64_to_cpu(lrw->slba);
     req->is_write = is_write;
 
+    /* Reuse check logic from nvme_rw */
+    sppa = nvme_gen_to_dev_addr(ln, &psl[0]);
+    eppa = nvme_gen_to_dev_addr(ln, &psl[n_pages - 1]);
+    if (sppa == -1 || eppa == -1)
+        return -EINVAL;
+
+    err = nvme_rw_check_req(n, ns, cmd, req, sppa, eppa, nlb, ctrl,
+                                                        data_size, meta_size);
+    if (err)
+        return err;
+
     /* If several LUNs are set up, the ppa list sent by the host will not be
      * sequential. In this case, we need to pass on the list of ppas to the dma
      * handlers to write/read data to/from the right pysical sector
@@ -757,15 +820,19 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         sector_list[i] = ppa;
         aio_sector_list[i] =
                     ns->start_block + (ppa << (data_shift - BDRV_SECTOR_BITS));
-    }
 
-    /* Reuse check logic from nvme_rw */
-    sppa = nvme_gen_to_dev_addr(ln, &psl[0]);
-    eppa = nvme_gen_to_dev_addr(ln, &psl[n_pages - 1]);
-    err = nvme_rw_check_req(n, ns, cmd, req, sppa, eppa, nlb, ctrl,
-                                                        data_size, meta_size);
-    if (err)
-        return err;
+        if (is_write) {
+            if (nvme_write_meta(ln, nvme_index_meta(ln, msl, i), ppa)) {
+                printf("write metadata failed\n");
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
+        } else {
+            if (nvme_read_meta(ln, nvme_index_meta(ln, msl, i), ppa)) {
+                printf("read metadata failed\n");
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
+        }
+    }
 
     if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
@@ -799,7 +866,6 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     return NVME_NO_COMPLETE;
-
 }
 
 static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -2701,7 +2767,7 @@ static int lightnvm_init(NvmeCtrl *n)
         c->num_pg = cpu_to_le16(ln->params.pgs_per_blk);
         c->csecs = cpu_to_le16(ln->params.sec_size);
         c->fpg_sz = cpu_to_le16(ln->params.sec_size * ln->params.secs_per_pg);
-        c->sos = cpu_to_le16(n->meta);
+        c->sos = cpu_to_le16(ln->params.sos);
 
         c->trdt = cpu_to_le32(10000);
         c->trdm = cpu_to_le32(10000);
@@ -2766,6 +2832,22 @@ static int lightnvm_init(NvmeCtrl *n)
         strncpy(ln->bb_tbl_name, "bbtable.qemu\0", 13);
     } else {
         ln->bb_auto_gen = 0;
+    }
+
+    if (!ln->meta_name) {
+        ln->meta_auto_gen = 1;
+        ln->meta_name = malloc(10);
+        if (!ln->meta_name)
+            return -ENOMEM;
+        strncpy(ln->meta_name, "meta.qemu\0", 10);
+    } else {
+        ln->meta_auto_gen = 0;
+    }
+
+    ln->metadata = fopen(ln->meta_name, "w+");
+    if (!ln->metadata) {
+        error_report("nvme: could not open metadata file: %s\n", ln->meta_name);
+        return -EEXIST;
     }
 
     ret = (n->lightnvm_ctrl.read_l2p_tbl) ? lightnvm_read_tbls(n) : 0;
@@ -2929,8 +3011,12 @@ static void lightnvm_exit(NvmeCtrl *n)
 
     if (ln->bb_auto_gen)
         free(ln->bb_tbl_name);
+    if (ln->meta_auto_gen)
+        free(ln->meta_name);
     fclose(n->lightnvm_ctrl.bb_tbl);
+    fclose(n->lightnvm_ctrl.metadata);
     n->lightnvm_ctrl.bb_tbl = NULL;
+    n->lightnvm_ctrl.metadata = NULL;
 }
 
 static void nvme_exit(PCIDevice *pci_dev)
@@ -3001,6 +3087,8 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("lnum_pln", NvmeCtrl, lightnvm_ctrl.params.num_pln, 1),
     DEFINE_PROP_UINT8("lreadl2ptbl", NvmeCtrl, lightnvm_ctrl.read_l2p_tbl, 1),
     DEFINE_PROP_STRING("lbbtable", NvmeCtrl, lightnvm_ctrl.bb_tbl_name),
+    DEFINE_PROP_STRING("lmetadata", NvmeCtrl, lightnvm_ctrl.meta_name),
+    DEFINE_PROP_UINT16("lmetasize", NvmeCtrl, lightnvm_ctrl.params.sos, 16),
     DEFINE_PROP_UINT8("lbbfrequency", NvmeCtrl, lightnvm_ctrl.bb_gen_freq, 0),
     DEFINE_PROP_UINT32("inject_err_write", NvmeCtrl, lightnvm_ctrl.err_write, 0),
     DEFINE_PROP_END_OF_LIST(),
