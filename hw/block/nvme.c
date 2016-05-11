@@ -717,8 +717,15 @@ static inline int64_t nvme_gen_to_dev_addr(LnvmCtrl *ln, struct ppa_addr *r)
     uint64_t ret;
 
     ret = r->g.sec + pg_off + blk_off + lun_of + pln_off;
-    if (ret > ln->params.total_secs)
-        printf("Lnvm: sector out of bounds\n");
+    if (ret > ln->params.total_secs) {
+        printf("Lnvm: sector out of bounds:lun:%d,pl:%dblk:%d,pg:%d,sec:%d\n",
+                                r->g.lun,
+                                r->g.pl,
+                                r->g.blk,
+                                r->g.pg,
+                                r->g.sec);
+        return -1;
+    }
 
     return ret;
 }
