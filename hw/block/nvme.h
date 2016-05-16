@@ -1023,6 +1023,7 @@ typedef struct LnvmCtrl {
     char           *meta_name;
     FILE           *bb_tbl;
     uint32_t       err_write;
+    uint32_t       n_err_write;
     uint32_t       err_write_cnt;
     FILE           *metadata;
 } LnvmCtrl;

@@ -74,6 +74,8 @@
  *  lbbtable=<file>    : Load bad block table from file destination (Provide path
  *  lmetadata=<file>   : Load metadata from file destination
  *  lmetasize=<int>    : LightNVM metadata (OOB) size. Default: 16
+ *  lb_err_write       : First ppa to inject write error. Default: 0 (disbled)
+ *  ln_err_write       : Number of ppas affected by write error injection
  *  to file. If no file is provided a bad block table will be generation. Look
  *  at lbbfrequency. Default: Null (no file).
  *  lbbfrequency:<int> : Bad block frequency for generating bad block table. If
@@ -448,14 +450,23 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     }
 
     if (ln->err_write && req->is_write) {
-        if ((ln->err_write_cnt + req->nlb + 1) > ln->err_write) {
-	    int bit = ln->err_write - ln->err_write_cnt;
-	    cqe->res64 = cpu_to_le64(1ULL << bit); /* kill first sector in ppa list */
-	    req->status = 0x40ff; /* FAIL WRITE status code */
-	    ln->err_write_cnt = 0;
-            printf("nvme: injected error: %u\n", bit);
+        printf("nvme:err_stat:err_write_cnt:%d,nppas:%d,err_write:%d, n_err_write:%d\n",
+                    ln->err_write_cnt, req->nlb, ln->err_write, ln->n_err_write);
+        if ((ln->err_write_cnt + req->nlb) > ln->err_write) {
+            int i;
+            int bit;
+
+            /* kill n_err_write sectors in ppa list */
+            for (i = 0; i < ln->n_err_write; i++) {
+                bit = ln->err_write - ln->err_write_cnt;
+                bitmap_set(&cqe->res64, bit, ln->n_err_write);
+                ln->err_write_cnt = 0;
+            }
+            printf("nvme: injected error:%u, n:%u\n", bit, ln->n_err_write);
+            req->status = 0x40ff; /* FAIL WRITE status code */
+            printf("nvme: bitmap: %lu\n", cqe->res64);
         }
-	ln->err_write_cnt += req->nlb + 1;
+        ln->err_write_cnt += req->nlb;
     }
 
     cqe->status = cpu_to_le16((req->status << 1) | phase);
@@ -3105,7 +3116,8 @@ static Property nvme_props[] = {
     DEFINE_PROP_STRING("lmetadata", NvmeCtrl, lightnvm_ctrl.meta_name),
     DEFINE_PROP_UINT16("lmetasize", NvmeCtrl, lightnvm_ctrl.params.sos, 16),
     DEFINE_PROP_UINT8("lbbfrequency", NvmeCtrl, lightnvm_ctrl.bb_gen_freq, 0),
-    DEFINE_PROP_UINT32("inject_err_write", NvmeCtrl, lightnvm_ctrl.err_write, 0),
+    DEFINE_PROP_UINT32("lb_err_write", NvmeCtrl, lightnvm_ctrl.err_write, 0),
+    DEFINE_PROP_UINT32("ln_err_write", NvmeCtrl, lightnvm_ctrl.n_err_write, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
