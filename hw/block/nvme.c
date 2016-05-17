@@ -457,14 +457,19 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
             int bit;
 
             /* kill n_err_write sectors in ppa list */
-            for (i = 0; i < ln->n_err_write; i++) {
-                bit = ln->err_write - ln->err_write_cnt;
+            for (i = 0; i < req->nlb; i++) {
+                if (ln->err_write_cnt + i < ln->err_write)
+                    continue;
+
+                bit = i;
                 bitmap_set(&cqe->res64, bit, ln->n_err_write);
-                ln->err_write_cnt = 0;
+                break;
             }
-            printf("nvme: injected error:%u, n:%u\n", bit, ln->n_err_write);
+
+            printf("nvme: injected error:%u, n:%u, bitmap:%lu\n",
+                        bit, ln->n_err_write, cqe->res64);
             req->status = 0x40ff; /* FAIL WRITE status code */
-            printf("nvme: bitmap: %lu\n", cqe->res64);
+            ln->err_write_cnt = 0;
         }
         ln->err_write_cnt += req->nlb;
     }
