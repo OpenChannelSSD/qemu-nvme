@@ -74,8 +74,9 @@
  *  lbbtable=<file>    : Load bad block table from file destination (Provide path
  *  lmetadata=<file>   : Load metadata from file destination
  *  lmetasize=<int>    : LightNVM metadata (OOB) size. Default: 16
- *  lb_err_write       : First ppa to inject write error. Default: 0 (disbled)
+ *  lb_err_write       : First ppa to inject write error. Default: 0 (disabled)
  *  ln_err_write       : Number of ppas affected by write error injection
+ *  ldebug             : Enable LightNVM debugging. Default: 0 (disabled)
  *  to file. If no file is provided a bad block table will be generation. Look
  *  at lbbfrequency. Default: Null (no file).
  *  lbbfrequency:<int> : Bad block frequency for generating bad block table. If
@@ -450,7 +451,8 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
     }
 
     if (ln->err_write && req->is_write) {
-        printf("nvme:err_stat:err_write_cnt:%d,nppas:%d,err_write:%d, n_err_write:%d\n",
+        if (ln->debug)
+            printf("nvme:err_stat:err_write_cnt:%d,nppas:%d,err_write:%d, n_err_write:%d\n",
                     ln->err_write_cnt, req->nlb, ln->err_write, ln->n_err_write);
         if ((ln->err_write_cnt + req->nlb) > ln->err_write) {
             int i;
@@ -466,8 +468,9 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
                 break;
             }
 
-            printf("nvme: injected error:%u, n:%u, bitmap:%lu\n",
-                        bit, ln->n_err_write, cqe->res64);
+            if (ln->debug)
+                printf("nvme: injected error:%u, n:%u, bitmap:%lu\n",
+                                             bit, ln->n_err_write, cqe->res64);
             req->status = 0x40ff; /* FAIL WRITE status code */
             ln->err_write_cnt = 0;
         }
@@ -3123,6 +3126,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("lbbfrequency", NvmeCtrl, lightnvm_ctrl.bb_gen_freq, 0),
     DEFINE_PROP_UINT32("lb_err_write", NvmeCtrl, lightnvm_ctrl.err_write, 0),
     DEFINE_PROP_UINT32("ln_err_write", NvmeCtrl, lightnvm_ctrl.n_err_write, 0),
+    DEFINE_PROP_UINT8("ldebug", NvmeCtrl, lightnvm_ctrl.debug, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 

@@ -1019,6 +1019,7 @@ typedef struct LnvmCtrl {
     uint8_t        bb_gen_freq;
     uint8_t        bb_auto_gen;
     uint8_t        meta_auto_gen;
+    uint8_t        debug;
     char           *bb_tbl_name;
     char           *meta_name;
     FILE           *bb_tbl;
