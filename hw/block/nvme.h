@@ -902,6 +902,7 @@ typedef struct NvmeRequest {
     struct NvmeSQueue       *sq;
     struct NvmeNamespace    *ns;
     BlockAIOCB               *aiocb;
+    uint8_t                 cmd_opcode;
     uint16_t                status;
     uint64_t                slba;
     uint16_t                is_write;

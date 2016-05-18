@@ -434,23 +434,9 @@ static uint16_t nvme_dma_read_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
     return status;
 }
 
-static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
+static void lnvm_inject_w_err(LnvmCtrl *ln, NvmeRequest *req, NvmeCqe *cqe)
 {
-    NvmeCtrl *n = cq->ctrl;
-    LnvmCtrl *ln = &n->lightnvm_ctrl;
-    NvmeSQueue *sq = req->sq;
-    NvmeCqe *cqe = &req->cqe;
-    uint8_t phase = cq->phase;
-    hwaddr addr;
-
-    if (cq->phys_contig) {
-        addr = cq->dma_addr + cq->tail * n->cqe_size;
-    } else {
-        addr = nvme_discontig(cq->prp_list, cq->tail, n->page_size,
-            n->cqe_size);
-    }
-
-    if (ln->err_write && req->is_write) {
+   if (ln->err_write && req->is_write) {
         if (ln->debug)
             printf("nvme:err_stat:err_write_cnt:%d,nppas:%d,err_write:%d, n_err_write:%d\n",
                     ln->err_write_cnt, req->nlb, ln->err_write, ln->n_err_write);
@@ -476,6 +462,39 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
         }
         ln->err_write_cnt += req->nlb;
     }
+}
+
+static void lnvm_post_cqe(NvmeCtrl *n, NvmeRequest *req)
+{
+    LnvmCtrl *ln = &n->lightnvm_ctrl;
+    NvmeCqe *cqe = &req->cqe;
+
+   /* Do post-completion processing depending on the type of command. This is
+     * used primarily to inject different types of errors.
+     */
+    switch (req->cmd_opcode) {
+    case LNVM_CMD_HYBRID_WRITE:
+    case LNVM_CMD_PHYS_WRITE:
+         lnvm_inject_w_err(ln, req, cqe);
+    }
+}
+
+static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
+{
+    NvmeCtrl *n = cq->ctrl;
+    NvmeSQueue *sq = req->sq;
+    NvmeCqe *cqe = &req->cqe;
+    uint8_t phase = cq->phase;
+    hwaddr addr;
+
+    if (cq->phys_contig) {
+        addr = cq->dma_addr + cq->tail * n->cqe_size;
+    } else {
+        addr = nvme_discontig(cq->prp_list, cq->tail, n->page_size,
+            n->cqe_size);
+    }
+
+    lnvm_post_cqe(n, req);
 
     cqe->status = cpu_to_le16((req->status << 1) | phase);
     cqe->sq_id = cpu_to_le16(sq->sqid);
@@ -2388,6 +2407,7 @@ static void nvme_process_sq(void *opaque)
         memset(&req->cqe, 0, sizeof(req->cqe));
         req->cqe.cid = cmd.cid;
         req->aiocb = NULL;
+        req->cmd_opcode = cmd.opcode;
 
         status = sq->sqid ? nvme_io_cmd(n, &cmd, req) :
             nvme_admin_cmd(n, &cmd, req);
