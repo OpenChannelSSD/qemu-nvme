@@ -1305,7 +1305,7 @@ static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     if (ret)
         goto clean;
 
-    if (nvme_dma_read_prp(n, (uint8_t*)bb_tbl, nr_blocks, prp1, prp2)) {
+    if (nvme_dma_read_prp(n, (uint8_t*)bb_tbl, sizeof(bb_tbl) + nr_blocks, prp1, prp2)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid,
             NVME_INVALID_FIELD, (uint16_t)1234, 0, ns->id);
         free(bb_tbl);
