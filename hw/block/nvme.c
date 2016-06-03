@@ -825,7 +825,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         g_free(aio_sector_list);
         g_free(sector_list);
         return NVME_INVALID_FIELD | NVME_DNR;
-    } else if ((is_write) && (n_pages < ln->params.sec_per_phys_pl)) {
+    } else if ((is_write) && (!ln->id_ctrl.dom) && (n_pages < ln->params.sec_per_phys_pl)) {
         printf("lnvm: I/O does not respect device write constrains."
                 "Sectors send: (%u). Min:%u sectors required\n",
                                         n_pages, ln->params.sec_per_phys_pl);
