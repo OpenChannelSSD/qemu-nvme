@@ -2823,12 +2823,12 @@ static int lightnvm_init(NvmeCtrl *n)
         c->fpg_sz = cpu_to_le16(ln->params.sec_size * ln->params.secs_per_pg);
         c->sos = cpu_to_le16(ln->params.sos);
 
-        c->trdt = cpu_to_le32(10000);
-        c->trdm = cpu_to_le32(10000);
-        c->tprt = cpu_to_le32(100000);
-        c->tprm = cpu_to_le32(100000);
-        c->tbet = cpu_to_le32(1000000);
-        c->tbem = cpu_to_le32(1000000);
+        c->trdt = cpu_to_le32(70000);
+        c->trdm = cpu_to_le32(100000);
+        c->tprt = cpu_to_le32(1900000);
+        c->tprm = cpu_to_le32(3500000);
+        c->tbet = cpu_to_le32(3000000);
+        c->tbem = cpu_to_le32(3000000);
 
         switch(c->num_pln) {
             case 1:
