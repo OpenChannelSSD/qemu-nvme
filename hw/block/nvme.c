@@ -843,6 +843,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     nvme_addr_read(n, meta, (void *)msl, n_pages * ln->params.sos);
 
     if (spba == LNVM_PBA_UNMAPPED) {
+        printf("lnvm: unmapped PBA\n");
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                 offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -866,7 +867,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     /* If several LUNs are set up, the ppa list sent by the host will not be
      * sequential. In this case, we need to pass on the list of ppas to the dma
-     * handlers to write/read data to/from the right pysical sector
+     * handlers to write/read data to/from the right physical sector
      */
     for (i = 0; i < n_pages; i++) {
         ppa = nvme_gen_to_dev_addr(ln, &psl[i]);
@@ -876,18 +877,19 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
         if (is_write) {
             if (nvme_write_meta(ln, nvme_index_meta(ln, msl, i), ppa)) {
-                printf("write metadata failed\n");
+                printf("lnvm: write metadata failed\n");
                 return NVME_INVALID_FIELD | NVME_DNR;
             }
         } else {
             if (nvme_read_meta(ln, nvme_index_meta(ln, msl, i), ppa)) {
-                printf("read metadata failed\n");
+                printf("lnvm: read metadata failed\n");
                 return NVME_INVALID_FIELD | NVME_DNR;
             }
         }
     }
 
-    if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
+    if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {;
+        printf("lnvm: malformed prp (size:%lu)\n", data_size);
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
             offsetof(NvmeRwCmd, prp1), 0, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
