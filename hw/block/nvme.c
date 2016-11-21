@@ -1540,11 +1540,8 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     case LNVM_CMD_PHYS_WRITE:
         return nvme_lnvm_rw(n, ns, cmd, req);
     case NVME_CMD_READ:
-        if (lightnvm_dev(n))
-            return nvme_lnvm_rw(n, ns, cmd, req);
     case NVME_CMD_WRITE:
         return nvme_rw(n, ns, cmd, req);
-
     case NVME_CMD_FLUSH:
         if (!n->id_ctrl.vwc || !n->features.volatile_wc) {
             return NVME_SUCCESS;
