@@ -746,22 +746,24 @@ static inline void *nvme_index_meta(LnvmCtrl *ln, void *meta, uint32_t index)
     return meta + (index * ln->params.sos);
 }
 
-static inline int64_t nvme_gen_to_dev_addr(LnvmCtrl *ln, struct ppa_addr *r)
+static inline int64_t nvme_gen_to_dev_addr(LnvmCtrl *ln, uint64_t r)
 {
-    uint64_t pln_off = r->g.pl * ln->params.sec_per_log_pl;
-    uint64_t lun_of = r->g.lun * ln->params.sec_per_lun;
-    uint64_t blk_off = r->g.blk * ln->params.sec_per_blk;
-    uint64_t pg_off = r->g.pg * ln->params.secs_per_pg;
-    uint64_t ret;
+    uint64_t ch = (r & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
+    uint64_t lun = (r & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
+    uint64_t pln = (r & ln->ppaf.pln_mask) >> ln->ppaf.pln_offset;
+    uint64_t blk = (r & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
+    uint64_t pg = (r & ln->ppaf.pg_mask) >> ln->ppaf.pg_offset;
+    uint64_t sec = (r & ln->ppaf.sec_mask) >> ln->ppaf.sec_offset;
+    uint64_t pln_off = pln * ln->params.sec_per_log_pl;
+    uint64_t lun_of = lun * ln->params.sec_per_lun;
+    uint64_t blk_off = blk * ln->params.sec_per_blk;
+    uint64_t pg_off = pg * ln->params.secs_per_pg;
+    uint32_t ret;
 
-    ret = r->g.sec + pg_off + blk_off + lun_of + pln_off;
+    ret = sec + pg_off + blk_off + lun_of + pln_off;
     if (ret > ln->params.total_secs) {
-        printf("Lnvm: sector out of bounds:lun:%d,pl:%dblk:%d,pg:%d,sec:%d\n",
-                                r->g.lun,
-                                r->g.pl,
-                                r->g.blk,
-                                r->g.pg,
-                                r->g.sec);
+        printf("Lnvm: ppa OOB:ch:%lu,lun:%lu,blk:%lu,pg:%lu,pl:%lu,sec:%lu\n",
+                ch, lun, blk, pg, pln, sec);
         return -1;
     }
 
@@ -775,7 +777,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      * physical block address is stored in Command Dword 11-10. */
     LnvmCtrl *ln = &n->lightnvm_ctrl;
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
-    struct ppa_addr psl[ln->params.max_sec_per_rq];
+    uint64_t psl[ln->params.max_sec_per_rq];
     void *msl;
     uint64_t sppa;
     uint64_t eppa;
@@ -837,7 +839,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     } else if (n_pages > 1) {
             nvme_addr_read(n, spba, (void *)psl, n_pages * sizeof(void *));
     } else {
-            psl[0].ppa = spba;
+            psl[0] = spba;
     }
 
     nvme_addr_read(n, meta, (void *)msl, n_pages * ln->params.sos);
@@ -855,8 +857,8 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->is_write = is_write;
 
     /* Reuse check logic from nvme_rw */
-    sppa = nvme_gen_to_dev_addr(ln, &psl[0]);
-    eppa = nvme_gen_to_dev_addr(ln, &psl[n_pages - 1]);
+    sppa = nvme_gen_to_dev_addr(ln, psl[0]);
+    eppa = nvme_gen_to_dev_addr(ln, psl[n_pages - 1]);
     if (sppa == -1 || eppa == -1)
         return -EINVAL;
 
@@ -870,7 +872,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      * handlers to write/read data to/from the right physical sector
      */
     for (i = 0; i < n_pages; i++) {
-        ppa = nvme_gen_to_dev_addr(ln, &psl[i]);
+        ppa = nvme_gen_to_dev_addr(ln, psl[i]);
         sector_list[i] = ppa;
         aio_sector_list[i] =
                     ns->start_block + (ppa << (data_shift - BDRV_SECTOR_BITS));
@@ -1272,7 +1274,7 @@ static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t nsid = le32_to_cpu(bbtbl->nsid);
     uint64_t prp1 = le64_to_cpu(bbtbl->prp1);
     uint64_t prp2 = le64_to_cpu(bbtbl->prp2);
-    struct ppa_addr ppa;
+    uint64_t ppa, lun;
     uint64_t offset;
     uint32_t nr_blocks;
     LnvmBBTbl *bb_tbl;
@@ -1282,11 +1284,13 @@ static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
-    ppa.ppa= le64_to_cpu(bbtbl->spba);
     ns = &n->namespaces[nsid - 1];
     ln = &n->lightnvm_ctrl;
     c = &ln->id_ctrl.groups[0];
     nr_blocks = c->num_blk * c->num_pln;
+
+    ppa = le64_to_cpu(bbtbl->spba);
+    lun = (ppa & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
 
     bb_tbl = calloc(sizeof(LnvmBBTbl) + nr_blocks, 1);
     if (!bb_tbl) {
@@ -1302,7 +1306,7 @@ static uint16_t lightnvm_get_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     bb_tbl->verid = cpu_to_le16(1);
     bb_tbl->tblks = cpu_to_le32(nr_blocks);
 
-    offset = ppa.g.lun * (c->num_blk * c->num_pln);
+    offset = lun * (c->num_blk * c->num_pln);
     ret = lightnvm_read_bbtbl(ns, nr_blocks, offset, bb_tbl->blk);
     if (ret)
         goto clean;
@@ -1333,12 +1337,10 @@ static uint16_t lightnvm_set_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint64_t spba = le64_to_cpu(bbtbl->spba);
     uint8_t value = bbtbl->value;
     uint32_t nr_blocks;
+    uint64_t blk, pln, lun;
     int i;
-    struct ppa_addr spbappa;
     FILE *fp;
     size_t ret;
-
-    spbappa.ppa = spba;
 
     if (nsid == 0 || nsid > n->num_namespaces) {
         return NVME_INVALID_NSID | NVME_DNR;
@@ -1349,10 +1351,13 @@ static uint16_t lightnvm_set_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     c = &ln->id_ctrl.groups[0];
     nr_blocks = c->num_blk * c->num_pln * c->num_lun;
 
-    struct ppa_addr ppas[ln->params.max_sec_per_rq];
+    uint64_t ppas[ln->params.max_sec_per_rq];
+
     if (nlb == 1) {
-        ppas[0].ppa = spbappa.ppa;
-        ns->bbtbl[(ppas[0].g.blk * c->num_pln) + ppas[0].g.pl] = value;
+        ppas[0] = spba;
+        blk = (ppas[0] & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
+        pln = (ppas[0] & ln->ppaf.pln_mask) >> ln->ppaf.pln_offset;
+        ns->bbtbl[(blk * c->num_pln) + pln] = value;
     } else {
         if (nvme_dma_write_prp(n, (uint8_t *)ppas, nlb * 8, spba, prp2)) {
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
@@ -1364,9 +1369,12 @@ static uint16_t lightnvm_set_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         uint64_t pln_off;
         uint64_t blks_per_lun = c->num_blk * c->num_pln;
         for (i = 0; i < nlb; i++) {
-            lun_of = ppas[i].g.lun * blks_per_lun;
-            pln_off = ppas[i].g.blk * c->num_pln;
-            ns->bbtbl[lun_of + pln_off + ppas[i].g.pl] = value;
+            lun = (ppas[i] & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
+            blk = (ppas[i] & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
+            pln = (ppas[i] & ln->ppaf.pln_mask) >> ln->ppaf.pln_offset;
+            lun_of = lun * blks_per_lun;
+            pln_off = blk * c->num_pln;
+            ns->bbtbl[lun_of + pln_off + pln] = value;
         }
     }
 
@@ -1422,7 +1430,7 @@ static uint16_t lightnvm_erase_sync(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd
     LnvmIdGroup *c = &ln->id_ctrl.groups[0];
     LnvmRwCmd *dm = (LnvmRwCmd *)cmd;
     uint64_t spba = le64_to_cpu(dm->spba);
-    struct ppa_addr addr;
+    uint32_t blk, lun;
     uint64_t ppa;
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
@@ -1436,26 +1444,17 @@ static uint16_t lightnvm_erase_sync(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd
      */
     return NVME_SUCCESS;
 
-    addr.ppa = spba;
-    ppa = nvme_gen_to_dev_addr(ln, &addr);
+    ppa = nvme_gen_to_dev_addr(ln, spba);
     start = ns->start_block + (ppa << (data_shift - BDRV_SECTOR_BITS));
-    /* printf("Erase: spba:%lu, ppa:%lu, nlb:%d\n", */
-            /* spba, ppa, nlb); */
-    /* printf("addr:blk:%d,pg:%d,sec:%d,lun:%d,pl:%d,ch:%d\n\n", */
-            /* addr.g.blk, */
-            /* addr.g.pg, */
-            /* addr.g.sec, */
-            /* addr.g.lun, */
-            /* addr.g.pl, */
-            /* addr.g.ch); */
     if (nlb != 1) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
             offsetof(LnvmRwCmd, nlb), ppa + nlb, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    offset = addr.g.blk + addr.g.lun * c->num_blk;
-    /* printf("offset:%d\n", offset); */
+    lun = (spba & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
+    blk = (spba & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
+    offset = blk + lun * c->num_blk;
     bitmap_set(ns->util, offset, nlb);
     bitmap_clear(ns->uncorrectable, offset, nlb);
 
@@ -2763,25 +2762,27 @@ static void nvme_init_namespaces(NvmeCtrl *n)
     }
 }
 
-static void lightnvm_init_id_ctrl(LnvmIdCtrl *ln_id)
+static void lightnvm_init_id_ctrl(LnvmCtrl *ln)
 {
+    LnvmIdCtrl *ln_id = &ln->id_ctrl;
+
     ln_id->ver_id = 1;
     ln_id->vmnt = 0;
     ln_id->cgrps = 1;
     ln_id->cap = cpu_to_le32(0x3);
 
     ln_id->ppaf.blk_offset = 0;
-    ln_id->ppaf.blk_len = 16;
-    ln_id->ppaf.pg_offset = 16;
-    ln_id->ppaf.pg_len = 16;
-    ln_id->ppaf.sect_offset = 32;
-    ln_id->ppaf.sect_len = 8;
-    ln_id->ppaf.pln_offset = 40;
-    ln_id->ppaf.pln_len = 8;
-    ln_id->ppaf.lun_offset = 48;
-    ln_id->ppaf.lun_len = 8;
-    ln_id->ppaf.ch_offset = 56;
-    ln_id->ppaf.ch_len = 8;
+    ln_id->ppaf.blk_len = 12;
+    ln_id->ppaf.pg_offset = ln_id->ppaf.blk_offset + ln_id->ppaf.blk_len;
+    ln_id->ppaf.pg_len = qemu_fls(cpu_to_le16(ln->params.pgs_per_blk) - 1);
+    ln_id->ppaf.sect_offset = ln_id->ppaf.pg_offset + ln_id->ppaf.pg_len;
+    ln_id->ppaf.sect_len = qemu_fls(cpu_to_le16(ln->params.secs_per_pg) - 1);
+    ln_id->ppaf.pln_offset = ln_id->ppaf.sect_offset + ln_id->ppaf.sect_len;
+    ln_id->ppaf.pln_len = qemu_fls(cpu_to_le16(ln->params.num_pln) - 1);
+    ln_id->ppaf.lun_offset = ln_id->ppaf.pln_offset + ln_id->ppaf.pln_len;
+    ln_id->ppaf.lun_len = qemu_fls(cpu_to_le16(ln->params.num_lun) - 1);
+    ln_id->ppaf.ch_offset = ln_id->ppaf.lun_offset + ln_id->ppaf.lun_len;
+    ln_id->ppaf.ch_len = qemu_fls(cpu_to_le16(ln->params.num_ch) - 1);
 }
 
 static int lightnvm_init(NvmeCtrl *n)
@@ -2874,7 +2875,26 @@ static int lightnvm_init(NvmeCtrl *n)
         ln->params.sec_per_blk = ln->params.secs_per_pg * ln->params.pgs_per_blk;
         ln->params.sec_per_lun = ln->params.sec_per_blk * c->num_blk;
         ln->params.sec_per_log_pl = ln->params.sec_per_lun * c->num_lun;
-        ln->params.total_secs = ln->params.sec_per_log_pl * c->num_pln;;
+        ln->params.total_secs = ln->params.sec_per_log_pl * c->num_pln;
+
+        /* Address format */
+        ln->ppaf.blk_offset = 0;
+        ln->ppaf.pg_offset = ln->id_ctrl.ppaf.blk_len;
+        ln->ppaf.sec_offset = ln->ppaf.pg_offset + ln->id_ctrl.ppaf.pg_len;
+        ln->ppaf.pln_offset = ln->ppaf.sec_offset + ln->id_ctrl.ppaf.sect_len;
+        ln->ppaf.lun_offset = ln->ppaf.pln_offset + ln->id_ctrl.ppaf.pln_len;
+        ln->ppaf.ch_offset = ln->ppaf.lun_offset + ln->id_ctrl.ppaf.lun_len;
+	ln->ppaf.blk_mask = ((1 << ln->id_ctrl.ppaf.blk_len) - 1);
+	ln->ppaf.pg_mask = ((1 << ln->id_ctrl.ppaf.pg_len) - 1) <<
+							ln->ppaf.pg_offset;
+	ln->ppaf.sec_mask = ((1 << ln->id_ctrl.ppaf.sect_len) - 1) <<
+                                                        ln->ppaf.sec_offset;
+	ln->ppaf.pln_mask = ((1 << ln->id_ctrl.ppaf.pln_len) - 1) <<
+							ln->ppaf.pln_offset;
+	ln->ppaf.lun_mask = ((1 << ln->id_ctrl.ppaf.lun_len) -1) <<
+							ln->ppaf.lun_offset;
+	ln->ppaf.ch_mask = ((1 << ln->id_ctrl.ppaf.ch_len) - 1) <<
+							ln->ppaf.ch_offset;
     }
 
     if (!ln->bb_tbl_name) {
@@ -2976,7 +2996,7 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     NVME_CAP_SET_CSS(n->bar.cap, 1);
     if (lightnvm_dev(n)) {
         NVME_CAP_SET_LIGHTNVM(n->bar.cap, 1);
-        lightnvm_init_id_ctrl(&n->lightnvm_ctrl.id_ctrl);
+        lightnvm_init_id_ctrl(&n->lightnvm_ctrl);
     }
     NVME_CAP_SET_MPSMIN(n->bar.cap, n->mpsmin);
     NVME_CAP_SET_MPSMAX(n->bar.cap, n->mpsmax);

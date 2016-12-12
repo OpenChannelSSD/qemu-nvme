@@ -675,6 +675,21 @@ typedef struct LnvmIdAddrFormat {
     uint8_t  res[4];
 } QEMU_PACKED LnvmIdAddrFormat;
 
+typedef struct LnvmAddrF {
+	uint64_t	ch_mask;
+	uint64_t	lun_mask;
+	uint64_t	pln_mask;
+	uint64_t	blk_mask;
+	uint64_t	pg_mask;
+	uint64_t	sec_mask;
+	uint8_t	ch_offset;
+	uint8_t	lun_offset;
+	uint8_t	pln_offset;
+	uint8_t	blk_offset;
+	uint8_t	pg_offset;
+	uint8_t	sec_offset;
+} LnvmAddrF;
+
 typedef struct LnvmIdGroup {
     uint8_t    mtype;
     uint8_t    fmtype;
@@ -997,25 +1012,10 @@ typedef struct NvmeNamespace {
 #define NVME(obj) \
         OBJECT_CHECK(NvmeCtrl, (obj), TYPE_NVME)
 
-struct ppa_addr {
-    /* Generic structure for all addresses */
-    union {
-        struct {
-        uint64_t blk    : 16;
-        uint64_t pg     : 16;
-        uint64_t sec    : 8;
-        uint64_t pl     : 8;
-        uint64_t lun    : 8;
-        uint64_t ch     : 8;
-    } g;
-
-    uint64_t ppa;
-    };
-};
-
 typedef struct LnvmCtrl {
     LnvmParams     params;
     LnvmIdCtrl     id_ctrl;
+    LnvmAddrF      ppaf;
     uint8_t        read_l2p_tbl;
     uint8_t        bb_gen_freq;
     uint8_t        bb_auto_gen;
