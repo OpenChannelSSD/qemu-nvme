@@ -28,6 +28,10 @@
 
 #include <sys/time.h>
 
+#ifdef CONFIG_SYSMACROS
+#include <sys/sysmacros.h>
+#endif
+
 void os_set_line_buffering(void);
 void os_set_proc_name(const char *s);
 void os_setup_signal_handling(void);
