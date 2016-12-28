@@ -4062,6 +4062,20 @@ if compile_prog "" "" ; then
 fi
 
 ##########################################
+# check for sysmacros.h
+
+have_sysmacros=no
+cat > $TMPC << EOF
+#include <sys/sysmacros.h>
+int main(void) {
+    return makedev(0, 0);
+}
+EOF
+if compile_prog "" "" ; then
+    have_sysmacros=yes
+fi
+
+##########################################
 # End of CC checks
 # After here, no more $cc or $ld runs
 
@@ -4844,6 +4858,22 @@ echo "CONFIG_TRACE_FILE=$trace_file" >> $config_host_mak
 
 if test "$rdma" = "yes" ; then
   echo "CONFIG_RDMA=y" >> $config_host_mak
+fi
+
+if test "$have_rtnetlink" = "yes" ; then
+  echo "CONFIG_RTNETLINK=y" >> $config_host_mak
+fi
+
+if test "$replication" = "yes" ; then
+  echo "CONFIG_REPLICATION=y" >> $config_host_mak
+fi
+
+if test "$have_af_vsock" = "yes" ; then
+  echo "CONFIG_AF_VSOCK=y" >> $config_host_mak
+fi
+
+if test "$have_sysmacros" = "yes" ; then
+  echo "CONFIG_SYSMACROS=y" >> $config_host_mak
 fi
 
 # Hold two types of flag:
