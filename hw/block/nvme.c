@@ -713,7 +713,8 @@ static inline int nvme_write_meta(LnvmCtrl *ln, void *meta, uint64_t ppa)
         return -1;
     }
 
-    fflush(fp);
+    if (fflush(fp))
+        printf("Could not write to metadata file:%d\n", errno);
 
     return 0;
 }
@@ -729,8 +730,8 @@ static inline int nvme_read_meta(LnvmCtrl *ln, void *meta, uint64_t ppa)
         return -1;
     }
 
-    ret = fread(meta, 1, meta_len, fp);
-    if (ret != meta_len) {
+    ret = fread(meta, meta_len, 1, fp);
+    if (ret != 1) {
         if (errno == EAGAIN)
             return 0;
         printf("Could not read to metadata file - ppa:%lu (ret:%lu)\n", ppa, ret);
@@ -842,8 +843,6 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             psl[0] = spba;
     }
 
-    nvme_addr_read(n, meta, (void *)msl, n_pages * ln->params.sos);
-
     if (spba == LNVM_PBA_UNMAPPED) {
         printf("lnvm: unmapped PBA\n");
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
@@ -878,6 +877,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                     ns->start_block + (ppa << (data_shift - BDRV_SECTOR_BITS));
 
         if (is_write) {
+            nvme_addr_read(n, meta, (void *)msl, n_pages * ln->params.sos);
             if (nvme_write_meta(ln, nvme_index_meta(ln, msl, i), ppa)) {
                 printf("lnvm: write metadata failed\n");
                 return NVME_INVALID_FIELD | NVME_DNR;
@@ -887,6 +887,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 printf("lnvm: read metadata failed\n");
                 return NVME_INVALID_FIELD | NVME_DNR;
             }
+            nvme_addr_write(n, meta, (void *)msl, n_pages * ln->params.sos);
         }
     }
 
