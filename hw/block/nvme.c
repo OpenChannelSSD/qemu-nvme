@@ -891,7 +891,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         }
     }
 
-    if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {;
+    if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         printf("lnvm: malformed prp (size:%lu)\n", data_size);
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
             offsetof(NvmeRwCmd, prp1), 0, ns->id);
