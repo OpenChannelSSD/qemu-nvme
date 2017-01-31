@@ -747,6 +747,19 @@ static inline void *nvme_index_meta(LnvmCtrl *ln, void *meta, uint32_t index)
     return meta + (index * ln->params.sos);
 }
 
+static void print_ppa(LnvmCtrl *ln, uint64_t ppa)
+{
+    uint64_t ch = (ppa & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
+    uint64_t lun = (ppa & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
+    uint64_t blk = (ppa & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
+    uint64_t pg = (ppa & ln->ppaf.pg_mask) >> ln->ppaf.pg_offset;
+    uint64_t pln = (ppa & ln->ppaf.pln_mask) >> ln->ppaf.pln_offset;
+    uint64_t sec = (ppa & ln->ppaf.sec_mask) >> ln->ppaf.sec_offset;
+
+    printf("ppa:ch:%lu,lun:%lu,blk:%lu,pg:%lu,pl:%lu,sec:%lu\n",
+                                            ch, lun, blk, pg, pln, sec);
+}
+
 static inline int64_t nvme_gen_to_dev_addr(LnvmCtrl *ln, uint64_t r)
 {
     uint64_t ch = (r & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
@@ -800,8 +813,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                                           lrw->opcode == LNVM_CMD_HYBRID_WRITE);
     uint16_t ctrl = 0;
     uint16_t err;
-
-   uint8_t i;
+    uint8_t i;
 
     sector_list = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
     if (!sector_list)
@@ -866,6 +878,9 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (err)
         return err;
 
+    if (meta && is_write)
+        nvme_addr_read(n, meta, (void *)msl, n_pages * ln->params.sos);
+
     /* If several LUNs are set up, the ppa list sent by the host will not be
      * sequential. In this case, we need to pass on the list of ppas to the dma
      * handlers to write/read data to/from the right physical sector
@@ -876,23 +891,28 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         aio_sector_list[i] =
                     ns->start_block + (ppa << (data_shift - BDRV_SECTOR_BITS));
 
-        if (is_write) {
-            nvme_addr_read(n, meta, (void *)msl, n_pages * ln->params.sos);
+        /* Read/Write to metadata buffer if given one */
+        if (meta && is_write) {
             if (nvme_write_meta(ln, nvme_index_meta(ln, msl, i), ppa)) {
                 printf("lnvm: write metadata failed\n");
                 return NVME_INVALID_FIELD | NVME_DNR;
             }
-        } else {
+        } else if (meta && !is_write){
             if (nvme_read_meta(ln, nvme_index_meta(ln, msl, i), ppa)) {
                 printf("lnvm: read metadata failed\n");
                 return NVME_INVALID_FIELD | NVME_DNR;
             }
-            nvme_addr_write(n, meta, (void *)msl, n_pages * ln->params.sos);
         }
     }
 
+    if (meta && !is_write)
+        nvme_addr_write(n, meta, (void *)msl, n_pages * ln->params.sos);
+
     if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
-        printf("lnvm: malformed prp (size:%lu)\n", data_size);
+        printf("lnvm: malformed prp (size:%lu), w:%d\n", data_size, is_write);
+        for (i = 0; i < n_pages; i++)
+            print_ppa(ln, psl[i]);
+
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
             offsetof(NvmeRwCmd, prp1), 0, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
