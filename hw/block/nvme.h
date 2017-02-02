@@ -747,7 +747,7 @@ typedef struct LnvmParams {
     /* configurable device characteristics */
     uint16_t    pgs_per_blk;
     uint16_t    sec_size;
-    uint8_t     secs_per_pg;
+    uint8_t     sec_per_pg;
     uint8_t     max_sec_per_rq;
     /* configurable parameters for LnvmIdGroup */
     uint8_t     mtype;
@@ -757,8 +757,7 @@ typedef struct LnvmParams {
     uint8_t     num_lun;
     uint16_t    sos;
     /* calculated values */
-    uint32_t    sec_per_phys_pl;
-    uint32_t    sec_per_log_pl;
+    uint32_t    sec_per_pl;
     uint32_t    sec_per_blk;
     uint32_t    sec_per_lun;
     uint32_t    total_secs;

@@ -768,13 +768,13 @@ static inline int64_t nvme_gen_to_dev_addr(LnvmCtrl *ln, uint64_t r)
     uint64_t blk = (r & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
     uint64_t pg = (r & ln->ppaf.pg_mask) >> ln->ppaf.pg_offset;
     uint64_t sec = (r & ln->ppaf.sec_mask) >> ln->ppaf.sec_offset;
-    uint64_t pln_off = pln * ln->params.sec_per_log_pl;
-    uint64_t lun_of = lun * ln->params.sec_per_lun;
+    uint64_t lun_off = lun * ln->params.sec_per_lun;
     uint64_t blk_off = blk * ln->params.sec_per_blk;
-    uint64_t pg_off = pg * ln->params.secs_per_pg;
+    uint64_t pg_off = pg * ln->params.sec_per_pl;
+    uint64_t pln_off = pln * ln->params.sec_per_pg;
     uint32_t ret;
 
-    ret = sec + pg_off + blk_off + lun_of + pln_off;
+    ret = sec + pg_off + blk_off + lun_off + pln_off;
     if (ret > ln->params.total_secs) {
         printf("Lnvm: ppa OOB:ch:%lu,lun:%lu,blk:%lu,pg:%lu,pl:%lu,sec:%lu\n",
                 ch, lun, blk, pg, pln, sec);
@@ -840,10 +840,11 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         g_free(aio_sector_list);
         g_free(sector_list);
         return NVME_INVALID_FIELD | NVME_DNR;
-    } else if ((is_write) && (!ln->id_ctrl.dom) && (n_pages < ln->params.sec_per_phys_pl)) {
+    } else if ((is_write) && (!ln->id_ctrl.dom)
+                                && (n_pages < ln->params.sec_per_pl)) {
         printf("lnvm: I/O does not respect device write constrains."
                 "Sectors send: (%u). Min:%u sectors required\n",
-                                        n_pages, ln->params.sec_per_phys_pl);
+                                        n_pages, ln->params.sec_per_pl);
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                 offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
         g_free(aio_sector_list);
@@ -2797,7 +2798,7 @@ static void lightnvm_init_id_ctrl(LnvmCtrl *ln)
     ln_id->ppaf.pg_offset = ln_id->ppaf.blk_offset + ln_id->ppaf.blk_len;
     ln_id->ppaf.pg_len = qemu_fls(cpu_to_le16(ln->params.pgs_per_blk) - 1);
     ln_id->ppaf.sect_offset = ln_id->ppaf.pg_offset + ln_id->ppaf.pg_len;
-    ln_id->ppaf.sect_len = qemu_fls(cpu_to_le16(ln->params.secs_per_pg) - 1);
+    ln_id->ppaf.sect_len = qemu_fls(cpu_to_le16(ln->params.sec_per_pg) - 1);
     ln_id->ppaf.pln_offset = ln_id->ppaf.sect_offset + ln_id->ppaf.sect_len;
     ln_id->ppaf.pln_len = qemu_fls(cpu_to_le16(ln->params.num_pln) - 1);
     ln_id->ppaf.lun_offset = ln_id->ppaf.pln_offset + ln_id->ppaf.pln_len;
@@ -2829,7 +2830,7 @@ static int lightnvm_init(NvmeCtrl *n)
 
     for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
-        chnl_blks = ns->ns_blks / (ln->params.secs_per_pg * ln->params.pgs_per_blk);
+        chnl_blks = ns->ns_blks / (ln->params.sec_per_pg * ln->params.pgs_per_blk);
 
         c = &ln->id_ctrl.groups[0];
         c->mtype = ln->params.mtype;
@@ -2841,7 +2842,7 @@ static int lightnvm_init(NvmeCtrl *n)
         c->num_blk = cpu_to_le16(chnl_blks) / (c->num_lun * c->num_pln);
         c->num_pg = cpu_to_le16(ln->params.pgs_per_blk);
         c->csecs = cpu_to_le16(ln->params.sec_size);
-        c->fpg_sz = cpu_to_le16(ln->params.sec_size * ln->params.secs_per_pg);
+        c->fpg_sz = cpu_to_le16(ln->params.sec_size * ln->params.sec_per_pg);
         c->sos = cpu_to_le16(ln->params.sos);
 
         c->trdt = cpu_to_le32(70000);
@@ -2874,8 +2875,7 @@ static int lightnvm_init(NvmeCtrl *n)
 
         /* We devide the address space linearly to be able to fit into the 4KB
          * sectors that the nvme driver divides the backend file. We do the
-         * division in LUNS - BLOCKS - PAGES - SECTORS. If there is 2 or 4
-         * planes, each LUN is unfolded into planes.
+         * division in LUNS - BLOCKS - PLANES - PAGES - SECTORS.
          *
          * For example a quad plane configuration is layed out as:
          * -----------------------------------------------------------
@@ -2883,20 +2883,21 @@ static int lightnvm_init(NvmeCtrl *n)
          * -------------- -------------- -------------- --------------
          * |   LUN 00   | |   LUN 01   | |   LUN 02   | |   LUN 03   |
          * -------------- -------------- -------------- --------------
-         * |   BLOCKS  |               ...               |   BLOCKS  |
-         * -------------
-         * |   PAGES   |               ...               |   PAGES   |
+         * |   BLOCKS            |          ...          |   BLOCKS  |
+         * ----------------------
+         * |   PLANES   |              ...               |   PLANES  |
+         * -------------                                 -------------
+         * | PAGES |                 ...                 |   PAGES   |
          * -----------------------------------------------------------
          * |                        ALL SECTORS                      |
          * -----------------------------------------------------------
          */
 
         /* calculated values */
-        ln->params.sec_per_phys_pl = ln->params.secs_per_pg * c->num_pln;
-        ln->params.sec_per_blk = ln->params.secs_per_pg * ln->params.pgs_per_blk;
+        ln->params.sec_per_pl = ln->params.sec_per_pg * c->num_pln;
+        ln->params.sec_per_blk = ln->params.sec_per_pl * ln->params.pgs_per_blk;
         ln->params.sec_per_lun = ln->params.sec_per_blk * c->num_blk;
-        ln->params.sec_per_log_pl = ln->params.sec_per_lun * c->num_lun;
-        ln->params.total_secs = ln->params.sec_per_log_pl * c->num_pln;
+        ln->params.total_secs = ln->params.sec_per_lun * c->num_lun;
 
         /* Address format */
         ln->ppaf.blk_offset = 0;
@@ -3171,7 +3172,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("lver", NvmeCtrl, lightnvm_ctrl.id_ctrl.ver_id, 0),
     DEFINE_PROP_UINT32("ll2pmode", NvmeCtrl, lightnvm_ctrl.id_ctrl.dom, 1),
     DEFINE_PROP_UINT16("lsec_size", NvmeCtrl, lightnvm_ctrl.params.sec_size, 4096),
-    DEFINE_PROP_UINT8("lsecs_per_pg", NvmeCtrl, lightnvm_ctrl.params.secs_per_pg, 1),
+    DEFINE_PROP_UINT8("lsecs_per_pg", NvmeCtrl, lightnvm_ctrl.params.sec_per_pg, 1),
     DEFINE_PROP_UINT16("lpgs_per_blk", NvmeCtrl, lightnvm_ctrl.params.pgs_per_blk, 256),
     DEFINE_PROP_UINT8("lmax_sec_per_rq", NvmeCtrl, lightnvm_ctrl.params.max_sec_per_rq, 64),
     DEFINE_PROP_UINT8("lmtype", NvmeCtrl, lightnvm_ctrl.params.mtype, 0),
