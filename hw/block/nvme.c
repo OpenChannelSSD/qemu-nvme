@@ -696,57 +696,6 @@ static uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return 0;
 }
 
-static inline int nvme_write_meta(LnvmCtrl *ln, void *meta, uint64_t ppa)
-{
-    FILE *fp = ln->metadata;
-    size_t meta_len = ln->params.sos;
-    size_t ret;
-
-    if (fseek(fp, ppa * meta_len , SEEK_SET)) {
-        printf("Could not write to metadata file\n");
-        return -1;
-    }
-
-    ret = fwrite(meta, meta_len, 1, fp);
-    if (ret != 1) {
-        printf("Could not write to metadata file\n");
-        return -1;
-    }
-
-    if (fflush(fp))
-        printf("Could not write to metadata file:%d\n", errno);
-
-    return 0;
-}
-
-static inline int nvme_read_meta(LnvmCtrl *ln, void *meta, uint64_t ppa)
-{
-    FILE *fp = ln->metadata;
-    size_t meta_len = ln->params.sos;
-    size_t ret;
-
-    if (fseek(fp, ppa * meta_len, SEEK_SET)) {
-        printf("Could not read to metadata file (SEEK)\n");
-        return -1;
-    }
-
-    ret = fread(meta, meta_len, 1, fp);
-    if (ret != 1) {
-        if (errno == EAGAIN)
-            return 0;
-        printf("Could not read to metadata file - ppa:%lu (ret:%lu)\n", ppa, ret);
-        perror("read");
-        return -1;
-    }
-
-    return 0;
-}
-
-static inline void *nvme_index_meta(LnvmCtrl *ln, void *meta, uint32_t index)
-{
-    return meta + (index * ln->params.sos);
-}
-
 static void print_ppa(LnvmCtrl *ln, uint64_t ppa)
 {
     uint64_t ch = (ppa & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
@@ -758,6 +707,178 @@ static void print_ppa(LnvmCtrl *ln, uint64_t ppa)
 
     printf("ppa:ch:%lu,lun:%lu,blk:%lu,pg:%lu,pl:%lu,sec:%lu\n",
                                             ch, lun, blk, pg, pln, sec);
+}
+
+struct lnvm_metadata_format {
+    uint32_t state;
+    uint64_t rsv[2];
+} __attribute__((__packed__));
+
+struct lnvm_tgt_meta {
+    uint64_t lba;
+    uint64_t rsvd;
+} __attribute__((__packed__));
+
+/* Must be used after nvme_set_write_state to have the right file offset */
+static inline int nvme_write_meta(LnvmCtrl *ln, void *meta, uint64_t ppa)
+{
+    FILE *fp = ln->metadata;
+    size_t tgt_oob_len = ln->params.sos;
+    size_t ret;
+
+    ret = fwrite(meta, tgt_oob_len, 1, fp);
+    if (ret != 1) {
+        printf("Could not write to metadata file\n");
+        return -1;
+    }
+
+    if (fflush(fp))
+        printf("Could not write to metadata file:%d\n", errno);
+
+    return 0;
+}
+
+/* Must be used after nvme_check_state to have the right file offset */
+static inline int nvme_read_meta(LnvmCtrl *ln, void *meta, uint64_t ppa)
+{
+    FILE *fp = ln->metadata;
+    size_t tgt_oob_len = ln->params.sos;
+    size_t ret;
+
+    ret = fread(meta, tgt_oob_len, 1, fp);
+    if (ret != 1) {
+        if (errno == EAGAIN)
+            return 0;
+        printf("Could not read metadata file - ppa:%lu (ret:%lu)\n", ppa, ret);
+        perror("read");
+        return -1;
+    }
+
+    return 0;
+}
+
+static inline int nvme_erase_meta(LnvmCtrl *ln, uint64_t *psl, int nr_ppas)
+{
+    LnvmIdGroup *c = &ln->id_ctrl.groups[0];
+    FILE *fp = ln->metadata;
+    struct lnvm_metadata_format meta;
+    size_t tgt_oob_len = ln->params.sos;
+    size_t int_oob_len = ln->int_meta_size;
+    size_t meta_len = tgt_oob_len + int_oob_len;
+    uint64_t r = psl[0];
+    uint64_t ch = (r & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
+    uint64_t lun = (r & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
+    uint64_t blk = (r & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
+    uint64_t lun_off = lun * ln->params.sec_per_lun;
+    uint64_t blk_off = blk * ln->params.sec_per_blk;
+    uint64_t ppa = blk_off + lun_off;
+    int ret;
+    int i, j;
+
+    meta.state = LNVM_SEC_ERASED;
+
+    if (nr_ppas != c->num_pln) {
+        printf("lnvm: Erase not performed to all planes (%d)\n", nr_ppas);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    for (i = 0; i < c->num_pln; i++) {
+        if (fseek(fp, ppa * meta_len , SEEK_SET)) {
+            printf("Could not write OOB to metadata file\n");
+            return -1;
+        }
+
+        for (j = 0; j < ln->params.sec_per_blk; j++) {
+            ret = fwrite(&meta, meta_len, 1, fp);
+            if (ret != 1) {
+                printf("Failed to erase ch:%lu,lun:%lu,blk:%lu - ret:%d/%d\n",
+                                    ch, lun, blk, ret, ln->params.sec_per_blk);
+                return -1;
+            }
+        }
+    }
+
+    if (fflush(fp))
+        printf("Could not write to metadata file:%d\n", errno);
+
+    return 0;
+}
+
+static inline int nvme_set_written_state(LnvmCtrl *ln, uint64_t ppa)
+{
+    FILE *fp = ln->metadata;
+    size_t tgt_oob_len = ln->params.sos;
+    size_t int_oob_len = ln->int_meta_size;
+    size_t meta_len = tgt_oob_len + int_oob_len;
+    uint32_t state;
+    uint32_t seek = ppa * meta_len;
+    size_t ret;
+
+    if (fseek(fp, seek, SEEK_SET)) {
+        printf("Could not write OOB to metadata file\n");
+        return -1;
+    }
+
+    ret = fread(&state, int_oob_len, 1, fp);
+    if (ret != 1) {
+        if (errno == EAGAIN)
+            return 0;
+        printf("Could not read metadata file - ppa:%lu (ret:%lu)\n", ppa, ret);
+        perror("read");
+        return -1;
+    }
+
+    if (state != LNVM_SEC_ERASED) {
+        printf("Attempting to write to non erased block (%d)\n", state);
+        return -1;
+    }
+
+    if (fseek(fp, seek, SEEK_SET)) {
+        printf("Could not write OOB to metadata file\n");
+        return -1;
+    }
+
+    state = LNVM_SEC_WRITTEN;
+    ret = fwrite(&state, int_oob_len, 1, fp);
+    if (ret != 1) {
+        printf("Could not write state to metadata file\n");
+        return -1;
+    }
+
+    if (fflush(fp))
+        printf("Could not write to metadata file:%d\n", errno);
+
+    return 0;
+}
+
+static inline int nvme_check_state(LnvmCtrl *ln, uint64_t ppa, uint32_t *state)
+{
+    FILE *fp = ln->metadata;
+    size_t tgt_oob_len = ln->params.sos;
+    size_t int_oob_len = ln->int_meta_size;
+    size_t meta_len = tgt_oob_len + int_oob_len;
+    size_t ret;
+
+    if (fseek(fp, ppa * meta_len , SEEK_SET)) {
+        printf("Could not write OOB to metadata file\n");
+        return -1;
+    }
+
+    ret = fread(state, int_oob_len, 1, fp);
+    if (ret != 1) {
+        if (errno == EAGAIN)
+            return 0;
+        printf("Could not read metadata file - ppa:%lu (ret:%lu)\n", ppa, ret);
+        perror("read");
+        return -1;
+    }
+
+    return 0;
+}
+
+static inline void *nvme_index_meta(LnvmCtrl *ln, void *meta, uint32_t index)
+{
+    return meta + (index * ln->params.sos);
 }
 
 static inline int64_t nvme_gen_to_dev_addr(LnvmCtrl *ln, uint64_t r)
@@ -791,6 +912,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      * physical block address is stored in Command Dword 11-10. */
     LnvmCtrl *ln = &n->lightnvm_ctrl;
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
+    NvmeCqe *cqe = &req->cqe;
     uint64_t psl[ln->params.max_sec_per_rq];
     void *msl;
     uint64_t sppa;
@@ -893,17 +1015,48 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                     ns->start_block + (ppa << (data_shift - BDRV_SECTOR_BITS));
 
         /* Read/Write to metadata buffer if given one */
-        if (meta && is_write) {
-            if (nvme_write_meta(ln, nvme_index_meta(ln, msl, i), ppa)) {
-                printf("lnvm: write metadata failed\n");
+        if (is_write) {
+            if (nvme_set_written_state(ln, ppa)) {
+                printf("lnvm: set written status failed\n");
+                print_ppa(ln, psl[i]);
                 return NVME_INVALID_FIELD | NVME_DNR;
             }
-        } else if (meta && !is_write){
-            if (nvme_read_meta(ln, nvme_index_meta(ln, msl, i), ppa)) {
-                printf("lnvm: read metadata failed\n");
+
+            if (meta) {
+                if (nvme_write_meta(ln, nvme_index_meta(ln, msl, i), ppa)) {
+                    printf("lnvm: write metadata failed\n");
+                    print_ppa(ln, psl[i]);
+                    return NVME_INVALID_FIELD | NVME_DNR;
+                }
+            }
+        } else if (!is_write){
+            uint32_t state;
+
+            if (nvme_check_state(ln, ppa, &state)) {
+                printf("lnvm: read status failed\n");
+                print_ppa(ln, psl[i]);
                 return NVME_INVALID_FIELD | NVME_DNR;
             }
-        }
+
+            if (state != LNVM_SEC_WRITTEN) {
+                bitmap_set(&cqe->res64, i, n_pages - i);
+                req->status = 0x42ff;
+
+                /* Copy what has been read from the OOB area */
+                if (meta)
+                    nvme_addr_write(n, meta, (void *)msl,
+                                                    n_pages * ln->params.sos);
+                return 0x42ff;
+            }
+
+            if (meta) {
+                if (nvme_read_meta(ln, nvme_index_meta(ln, msl, i), ppa)) {
+                    printf("lnvm: read metadata failed\n");
+                    print_ppa(ln, psl[i]);
+                    return NVME_INVALID_FIELD | NVME_DNR;
+                }
+            }
+         }
     }
 
     if (meta && !is_write)
@@ -1445,105 +1598,55 @@ static int lightnvm_read_tbls(NvmeCtrl *n)
     return 0;
 }
 
-static uint16_t lightnvm_erase_sync(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
-{
-    LnvmCtrl *ln = &n->lightnvm_ctrl;
-    LnvmIdGroup *c = &ln->id_ctrl.groups[0];
-    LnvmRwCmd *dm = (LnvmRwCmd *)cmd;
-    uint64_t spba = le64_to_cpu(dm->spba);
-    uint32_t blk, lun;
-    uint64_t ppa;
-    uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
-    const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
-    uint32_t nlb_blk = nlb << (data_shift - BDRV_SECTOR_BITS);
-    uint64_t start;
-    int offset;
-
-    /* Do not implement erase until we have simulated planes, since block
-     * mapping will chenge then too
-     */
-    return NVME_SUCCESS;
-
-    ppa = nvme_gen_to_dev_addr(ln, spba);
-    start = ns->start_block + (ppa << (data_shift - BDRV_SECTOR_BITS));
-    if (nlb != 1) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-            offsetof(LnvmRwCmd, nlb), ppa + nlb, ns->id);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    lun = (spba & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
-    blk = (spba & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
-    offset = blk + lun * c->num_blk;
-    bitmap_set(ns->util, offset, nlb);
-    bitmap_clear(ns->uncorrectable, offset, nlb);
-
-    if (bdrv_write_zeroes(blk_bs(n->conf.blk), start, nlb_blk, 0)) {
-        nvme_set_error_page(n, req->sq->sqid, req->cqe.cid,
-        NVME_INTERNAL_DEV_ERROR, offsetof(LnvmRwCmd, spba), spba, ns->id);
-        bitmap_clear(ns->util, offset, nlb);
-        return NVME_INTERNAL_DEV_ERROR;
-    }
-    return NVME_SUCCESS;
-}
-
-#if 0
 static void erase_io_complete_cb(void *opaque, int ret)
 {
     NvmeRequest *req = opaque;
     NvmeSQueue *sq = req->sq;
     NvmeCtrl *n = sq->ctrl;
     NvmeCQueue *cq = n->cq[sq->cqid];
-    NvmeNamespace *ns = req->ns;
 
     block_acct_done(blk_get_stats(n->conf.blk), &req->acct);
     if (!ret) {
         req->status = NVME_SUCCESS;
     } else {
-        req->status = NVME_INTERNAL_DEV_ERROR;
+        req->status = 0x40ff;
     }
 
-    if (req->status != NVME_SUCCESS) {
-        nvme_set_error_page(n, sq->sqid, req->cqe.cid, req->status,
-            offsetof(NvmeRwCmd, slba), req->slba, ns->id);
-        bitmap_clear(ns->util, req->slba, req->nlb);
-    }
     nvme_enqueue_req_completion(cq, req);
 }
 
 static uint16_t lightnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
-    LnvmDmCmd *dm = (LnvmDmCmd *)cmd;
-    const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
+    LnvmCtrl *ln = &n->lightnvm_ctrl;
+    LnvmRwCmd *dm = (LnvmRwCmd *)cmd;
     uint64_t spba = le64_to_cpu(dm->spba);
-    uint64_t start = ns->start_block + (spba << (data_shift - BDRV_SECTOR_BITS));
+    uint64_t psl[ln->params.max_sec_per_rq];
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
-    uint32_t nlb_blk = nlb << (data_shift - BDRV_SECTOR_BITS);
 
-    if ((spba + nlb) <= ns->tbl_entries) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-        offsetof(LnvmDmCmd, nlb), spba + nlb, ns->id);
-            return NVME_INVALID_FIELD | NVME_DNR;
+    if (nlb > 1) {
+        nvme_addr_read(n, spba, (void *)psl, nlb * sizeof(void *));
+    } else {
+        psl[0] = spba;
     }
 
-    bitmap_set(ns->util, spba, nlb);
-    bitmap_clear(ns->uncorrectable, spba, nlb);
-
-    block_acct_start(blk_get_stats(n->conf.blk), &req->acct,
-                        nlb_blk << BDRV_SECTOR_BITS, BLOCK_ACCT_WRITE);
-
+    req->slba = spba;
+    req->meta_size = 0;
+    req->status = NVME_SUCCESS;
     req->nlb = nlb;
     req->ns = ns;
-    req->aiocb = blk_aio_write_zeroes(n->conf.blk, start, nlb_blk, 0,
-        erase_io_complete_cb, req);
 
+    if (nvme_erase_meta(ln, psl, nlb)) {
+        printf("Erased failed\n");
+        print_ppa(ln, psl[0]);
+        req->status = 0x40ff;
+
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    erase_io_complete_cb(req, 0);
     return NVME_NO_COMPLETE;
 }
-#endif
 
 static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
@@ -1592,9 +1695,9 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             return nvme_write_uncor(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
-    case LNVM_CMD_ERASE_SYNC:
+    case LNVM_CMD_ERASE_ASYNC:
         if (lightnvm_dev(n))
-            return lightnvm_erase_sync(n, ns, cmd, req);
+            return lightnvm_erase_async(n, ns, cmd, req);
         return NVME_INVALID_OPCODE | NVME_DNR;
 
     default:
@@ -2944,6 +3047,8 @@ static int lightnvm_init(NvmeCtrl *n)
         error_report("nvme: could not open metadata file: %s\n", ln->meta_name);
         return -EEXIST;
     }
+
+    ln->int_meta_size = 4;
 
     ret = (n->lightnvm_ctrl.read_l2p_tbl) ? lightnvm_read_tbls(n) : 0;
     if (ret) {

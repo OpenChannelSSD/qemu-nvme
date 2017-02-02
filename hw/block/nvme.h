@@ -265,7 +265,12 @@ enum LnvmDmCommands {
     LNVM_CMD_HYBRID_READ       = 0x02,
     LNVM_CMD_PHYS_WRITE        = 0x91,
     LNVM_CMD_PHYS_READ         = 0x92,
-    LNVM_CMD_ERASE_SYNC        = 0x90,
+    LNVM_CMD_ERASE_ASYNC        = 0x90,
+};
+
+enum LnvmMetaState {
+    LNVM_SEC_WRITTEN = 0xAC,
+    LNVM_SEC_ERASED = 0xDC,
 };
 
 typedef struct LnvmGetL2PTbl {
@@ -1027,6 +1032,7 @@ typedef struct LnvmCtrl {
     uint32_t       n_err_write;
     uint32_t       err_write_cnt;
     FILE           *metadata;
+    uint8_t        int_meta_size;
 } LnvmCtrl;
 
 typedef struct NvmeCtrl {
