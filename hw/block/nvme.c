@@ -189,6 +189,11 @@ static uint8_t lightnvm_dev(NvmeCtrl *n)
     return (n->lightnvm_ctrl.id_ctrl.ver_id != 0);
 }
 
+static uint8_t lightnvm_hybrid_dev(NvmeCtrl *n)
+{
+    return (n->lightnvm_ctrl.id_ctrl.dom == 1);
+}
+
 static void lightnvm_tbl_initialize(NvmeNamespace *ns)
 {
     uint32_t len = ns->tbl_entries;
@@ -639,16 +644,17 @@ static void nvme_rw_cb(void *opaque, int ret)
             bitmap_clear(ns->util, req->slba, req->nlb);
         }
     } else {
-        if (lightnvm_dev(n) && req->is_write) {
-            if (req->nlb > 1) {
-                int i;
-                for (i = 0; i < req->nlb; i++)
-                    ns->tbl[req->lightnvm_slba + i] = req->lightnvm_ppa_list[i];
-
-            } else {
-                ns->tbl[req->lightnvm_slba] = req->slba;
+        if (lightnvm_dev(n)) {
+            if (lightnvm_hybrid_dev(n) && req->is_write) {
+                if (req->nlb > 1) {
+                    int i;
+                    for (i = 0; i < req->nlb; i++)
+                        ns->tbl[req->lightnvm_slba + i] =
+                                                    req->lightnvm_ppa_list[i];
+                    } else {
+                        ns->tbl[req->lightnvm_slba] = req->slba;
+                    }
             }
-
             g_free(req->lightnvm_ppa_list);
         }
     }
@@ -953,15 +959,14 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     aio_sector_list = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
     if (!aio_sector_list) {
-        g_free(sector_list);
-        return -ENOMEM;
+        err = -ENOMEM;
+        goto fail_free_sector_list;
     }
 
     msl = g_malloc0(ln->params.sos * ln->params.max_sec_per_rq);
     if (!msl) {
-        g_free(aio_sector_list);
-        g_free(sector_list);
-        return -ENOMEM;
+        err = -ENOMEM;
+        goto fail_free_aio_sector_list;
     }
 
     if (n_pages > ln->params.max_sec_per_rq) {
@@ -969,9 +974,8 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                                         n_pages, ln->params.max_sec_per_rq);
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                 offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
-        g_free(aio_sector_list);
-        g_free(sector_list);
-        return NVME_INVALID_FIELD | NVME_DNR;
+        err = NVME_INVALID_FIELD | NVME_DNR;
+        goto fail_free_msl;
     } else if ((is_write) && (!ln->id_ctrl.dom)
                                 && (n_pages < ln->params.sec_per_pl)) {
         printf("lnvm: I/O does not respect device write constrains."
@@ -979,9 +983,8 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                                         n_pages, ln->params.sec_per_pl);
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                 offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
-        g_free(aio_sector_list);
-        g_free(sector_list);
-        return NVME_INVALID_FIELD | NVME_DNR;
+        err = NVME_INVALID_FIELD | NVME_DNR;
+        goto fail_free_msl;
     } else if (n_pages > 1) {
             nvme_addr_read(n, spba, (void *)psl, n_pages * sizeof(void *));
     } else {
@@ -992,7 +995,8 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         printf("lnvm: unmapped PBA\n");
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                 offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
-        return NVME_INVALID_FIELD | NVME_DNR;
+        err = NVME_INVALID_FIELD | NVME_DNR;
+        goto fail_free_msl;
     }
 
     ctrl = le16_to_cpu(lrw->control);
@@ -1003,13 +1007,15 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     /* Reuse check logic from nvme_rw */
     sppa = nvme_gen_to_dev_addr(ln, psl[0]);
     eppa = nvme_gen_to_dev_addr(ln, psl[n_pages - 1]);
-    if (sppa == -1 || eppa == -1)
-        return -EINVAL;
+    if (sppa == -1 || eppa == -1) {
+        err = -EINVAL;
+        goto fail_free_msl;
+    }
 
     err = nvme_rw_check_req(n, ns, cmd, req, sppa, eppa, nlb, ctrl,
                                                         data_size, meta_size);
     if (err)
-        return err;
+        goto fail_free_msl;
 
     if (meta && is_write)
         nvme_addr_read(n, meta, (void *)msl, n_pages * ln->params.sos);
@@ -1029,14 +1035,16 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             if (nvme_set_written_state(ln, ppa)) {
                 printf("lnvm: set written status failed\n");
                 print_ppa(ln, psl[i]);
-                return NVME_INVALID_FIELD | NVME_DNR;
+                err = NVME_INVALID_FIELD | NVME_DNR;
+                goto fail_free_msl;
             }
 
             if (meta) {
                 if (nvme_write_meta(ln, nvme_index_meta(ln, msl, i), ppa)) {
                     printf("lnvm: write metadata failed\n");
                     print_ppa(ln, psl[i]);
-                    return NVME_INVALID_FIELD | NVME_DNR;
+                    err = NVME_INVALID_FIELD | NVME_DNR;
+                    goto fail_free_msl;
                 }
             }
         } else if (!is_write){
@@ -1045,7 +1053,8 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             if (nvme_check_state(ln, ppa, &state)) {
                 printf("lnvm: read status failed\n");
                 print_ppa(ln, psl[i]);
-                return NVME_INVALID_FIELD | NVME_DNR;
+                err = NVME_INVALID_FIELD | NVME_DNR;
+                goto fail_free_msl;
             }
 
             if (state != LNVM_SEC_WRITTEN) {
@@ -1056,14 +1065,16 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 if (meta)
                     nvme_addr_write(n, meta, (void *)msl,
                                                     n_pages * ln->params.sos);
-                return 0x42ff;
+                err = 0x42ff;
+                goto fail_free_msl;
             }
 
             if (meta) {
                 if (nvme_read_meta(ln, nvme_index_meta(ln, msl, i), ppa)) {
                     printf("lnvm: read metadata failed\n");
                     print_ppa(ln, psl[i]);
-                    return NVME_INVALID_FIELD | NVME_DNR;
+                    err = NVME_INVALID_FIELD | NVME_DNR;
+                    goto fail_free_msl;
                 }
             }
          }
@@ -1072,6 +1083,8 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (meta && !is_write)
         nvme_addr_write(n, meta, (void *)msl, n_pages * ln->params.sos);
 
+    g_free(msl);
+
     if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         printf("lnvm: malformed prp (size:%lu), w:%d\n", data_size, is_write);
         for (i = 0; i < n_pages; i++)
@@ -1079,7 +1092,8 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
             offsetof(NvmeRwCmd, prp1), 0, ns->id);
-        return NVME_INVALID_FIELD | NVME_DNR;
+        err = NVME_INVALID_FIELD | NVME_DNR;
+        goto fail_free_msl;
     }
     req->slba = sppa;
     req->meta_size = 0;
@@ -1108,6 +1122,14 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     return NVME_NO_COMPLETE;
+
+fail_free_msl:
+        g_free(msl);
+fail_free_aio_sector_list:
+        g_free(aio_sector_list);
+fail_free_sector_list:
+        g_free(sector_list);
+    return err;
 }
 
 static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -2312,7 +2334,7 @@ static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
     blks = ns->ns_blks;
     bdrv_blks = ns_bdrv_blks(ns, ns->ns_blks, lba_idx);
 
-    if (lightnvm_dev(n)) {
+    if (lightnvm_dev(n) && lightnvm_hybrid_dev(n)) {
         ns->tbl_dsk_start_offset =
             (ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS;
         ns->tbl_entries = blks;
@@ -2584,7 +2606,8 @@ static void nvme_clear_ctrl(NvmeCtrl *n)
     }
 
     blk_flush(n->conf.blk);
-    lightnvm_flush_tbls(n);
+    if (lightnvm_hybrid_dev(n))
+        lightnvm_flush_tbls(n);
     n->bar.cc = 0;
     n->features.temp_thresh = 0x14d;
     n->temp_warn_issued = 0;
