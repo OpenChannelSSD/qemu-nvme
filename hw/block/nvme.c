@@ -77,6 +77,7 @@
  *  lb_err_write       : First ppa to inject write error. Default: 0 (disabled)
  *  ln_err_write       : Number of ppas affected by write error injection
  *  ldebug             : Enable LightNVM debugging. Default: 0 (disabled)
+ *  lstrict            : Enable strict checks. Necessary for pblk (disabled)
  *  to file. If no file is provided a bad block table will be generation. Look
  *  at lbbfrequency. Default: Null (no file).
  *  lbbfrequency:<int> : Bad block frequency for generating bad block table. If
@@ -765,35 +766,44 @@ static inline int nvme_erase_meta(LnvmCtrl *ln, uint64_t *psl, int nr_ppas)
     size_t tgt_oob_len = ln->params.sos;
     size_t int_oob_len = ln->int_meta_size;
     size_t meta_len = tgt_oob_len + int_oob_len;
-    uint64_t r = psl[0];
-    uint64_t ch = (r & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
-    uint64_t lun = (r & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
-    uint64_t blk = (r & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
-    uint64_t lun_off = lun * ln->params.sec_per_lun;
-    uint64_t blk_off = blk * ln->params.sec_per_blk;
-    uint64_t ppa = blk_off + lun_off;
+    uint8_t nr_blks = nr_ppas / c->num_pln;
     int ret;
-    int i, j;
+    int blk, i, j;
 
     meta.state = LNVM_SEC_ERASED;
 
-    if (nr_ppas != c->num_pln) {
+    if (ln->strict && nr_ppas != c->num_pln) {
+        printf("lnvm: Strict erase not performed to all planes (%d)\n", nr_ppas);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (nr_ppas % c->num_pln) {
         printf("lnvm: Erase not performed to all planes (%d)\n", nr_ppas);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    for (i = 0; i < c->num_pln; i++) {
-        if (fseek(fp, ppa * meta_len , SEEK_SET)) {
-            printf("Could not write OOB to metadata file\n");
-            return -1;
-        }
+    for (blk = 0; blk < nr_blks; blk++) {
+        uint64_t r = psl[blk * c->num_pln];
+        uint64_t ch = (r & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
+        uint64_t lun = (r & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
+        uint64_t blk = (r & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
+        uint64_t lun_off = lun * ln->params.sec_per_lun;
+        uint64_t blk_off = blk * ln->params.sec_per_blk;
+        uint64_t ppa = blk_off + lun_off;
 
-        for (j = 0; j < ln->params.sec_per_blk; j++) {
-            ret = fwrite(&meta, meta_len, 1, fp);
-            if (ret != 1) {
-                printf("Failed to erase ch:%lu,lun:%lu,blk:%lu - ret:%d/%d\n",
-                                    ch, lun, blk, ret, ln->params.sec_per_blk);
+        for (i = 0; i < c->num_pln; i++) {
+            if (fseek(fp, ppa * meta_len , SEEK_SET)) {
+                printf("Could not write OOB to metadata file\n");
                 return -1;
+            }
+
+            for (j = 0; j < ln->params.sec_per_blk; j++) {
+                ret = fwrite(&meta, meta_len, 1, fp);
+                if (ret != 1) {
+                    printf("Failed to erase ch:%lu,lun:%lu,blk:%lu - ret:%d/%d\n",
+                                    ch, lun, blk, ret, ln->params.sec_per_blk);
+                    return -1;
+                }
             }
         }
     }
@@ -3293,6 +3303,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT32("lb_err_write", NvmeCtrl, lightnvm_ctrl.err_write, 0),
     DEFINE_PROP_UINT32("ln_err_write", NvmeCtrl, lightnvm_ctrl.n_err_write, 0),
     DEFINE_PROP_UINT8("ldebug", NvmeCtrl, lightnvm_ctrl.debug, 0),
+    DEFINE_PROP_UINT8("lstrict", NvmeCtrl, lightnvm_ctrl.strict, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 

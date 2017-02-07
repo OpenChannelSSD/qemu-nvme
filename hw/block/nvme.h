@@ -1025,6 +1025,7 @@ typedef struct LnvmCtrl {
     uint8_t        bb_auto_gen;
     uint8_t        meta_auto_gen;
     uint8_t        debug;
+    uint8_t        strict;
     char           *bb_tbl_name;
     char           *meta_name;
     FILE           *bb_tbl;
