@@ -764,7 +764,20 @@ static inline int nvme_read_meta(LnvmCtrl *ln, void *meta, uint64_t ppa)
     return 0;
 }
 
-static inline int nvme_erase_meta(LnvmCtrl *ln, uint64_t *psl, int nr_ppas)
+static inline int64_t nvme_get_bb_pos(LnvmCtrl *ln, uint64_t r)
+{
+    LnvmIdGroup *c = &ln->id_ctrl.groups[0];
+    uint64_t lun = (r & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
+    uint64_t blk = (r & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
+    uint64_t pln = (r & ln->ppaf.pln_mask) >> ln->ppaf.pln_offset;
+    uint64_t lun_off = lun * c->num_blk * c->num_pln;
+    uint64_t blk_off = blk * c->num_pln;
+
+    return pln + blk_off + lun_off;
+}
+
+static inline int nvme_erase_meta(NvmeNamespace *ns, LnvmCtrl *ln,
+                                  uint64_t *psl, int nr_ppas)
 {
     LnvmIdGroup *c = &ln->id_ctrl.groups[0];
     FILE *fp = ln->metadata;
@@ -789,15 +802,22 @@ static inline int nvme_erase_meta(LnvmCtrl *ln, uint64_t *psl, int nr_ppas)
     }
 
     for (blk = 0; blk < nr_blks; blk++) {
-        uint64_t r = psl[blk * c->num_pln];
+        uint8_t blk_pos = blk * c->num_pln;
+        uint64_t r = psl[blk_pos];
         uint64_t ch = (r & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
         uint64_t lun = (r & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
         uint64_t blk = (r & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
         uint64_t lun_off = lun * ln->params.sec_per_lun;
         uint64_t blk_off = blk * ln->params.sec_per_blk;
         uint64_t ppa = blk_off + lun_off;
+        uint64_t bb_pos;
 
         for (i = 0; i < c->num_pln; i++) {
+            /* Fail erase if the block is marked as bad */
+            bb_pos = nvme_get_bb_pos(ln, psl[blk_pos + i]);
+            if (ns->bbtbl[bb_pos])
+                return -1;
+
             if (fseek(fp, ppa * meta_len , SEEK_SET)) {
                 printf("Could not write OOB to metadata file\n");
                 return -1;
@@ -1544,7 +1564,7 @@ static uint16_t lightnvm_set_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint64_t spba = le64_to_cpu(bbtbl->spba);
     uint8_t value = bbtbl->value;
     uint32_t nr_blocks;
-    uint64_t blk, pln, lun;
+    uint64_t pos;
     int i;
     FILE *fp;
     size_t ret;
@@ -1562,9 +1582,8 @@ static uint16_t lightnvm_set_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
     if (nlb == 1) {
         ppas[0] = spba;
-        blk = (ppas[0] & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
-        pln = (ppas[0] & ln->ppaf.pln_mask) >> ln->ppaf.pln_offset;
-        ns->bbtbl[(blk * c->num_pln) + pln] = value;
+        pos = nvme_get_bb_pos(ln, spba);
+        ns->bbtbl[pos] = value;
     } else {
         if (nvme_dma_write_prp(n, (uint8_t *)ppas, nlb * 8, spba, prp2)) {
             nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
@@ -1572,16 +1591,9 @@ static uint16_t lightnvm_set_bb_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
-        uint64_t lun_of;
-        uint64_t pln_off;
-        uint64_t blks_per_lun = c->num_blk * c->num_pln;
         for (i = 0; i < nlb; i++) {
-            lun = (ppas[i] & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
-            blk = (ppas[i] & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
-            pln = (ppas[i] & ln->ppaf.pln_mask) >> ln->ppaf.pln_offset;
-            lun_of = lun * blks_per_lun;
-            pln_off = blk * c->num_pln;
-            ns->bbtbl[lun_of + pln_off + pln] = value;
+            pos = nvme_get_bb_pos(ln, ppas[i]);
+            ns->bbtbl[pos] = value;
         }
     }
 
@@ -1668,7 +1680,7 @@ static uint16_t lightnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cm
     req->nlb = nlb;
     req->ns = ns;
 
-    if (nvme_erase_meta(ln, psl, nlb)) {
+    if (nvme_erase_meta(ns, ln, psl, nlb)) {
         printf("Erased failed\n");
         print_ppa(ln, psl[0]);
         req->status = 0x40ff;
@@ -3008,6 +3020,10 @@ static int lightnvm_init(NvmeCtrl *n)
         c->mccap = 1;
         ns->bbtbl = qemu_blockalign(blk_bs(n->conf.blk), nr_total_blocks);
         memset(ns->bbtbl, 0, nr_total_blocks);
+
+        ret = (lightnvm_read_bbtbl(ns, nr_total_blocks, 0, ns->bbtbl));
+        if (ret)
+            return ret;
 
         /* We devide the address space linearly to be able to fit into the 4KB
          * sectors that the nvme driver divides the backend file. We do the
