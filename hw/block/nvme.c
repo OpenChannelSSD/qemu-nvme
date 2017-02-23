@@ -651,11 +651,13 @@ static void nvme_rw_cb(void *opaque, int ret)
                     for (i = 0; i < req->nlb; i++)
                         ns->tbl[req->lightnvm_slba + i] =
                                                     req->lightnvm_ppa_list[i];
-                    } else {
-                        ns->tbl[req->lightnvm_slba] = req->slba;
-                    }
+                } else {
+                    ns->tbl[req->lightnvm_slba] = req->slba;
+                }
             }
-            g_free(req->lightnvm_ppa_list);
+
+            if (!lightnvm_hybrid_dev(n))
+                g_free(req->lightnvm_ppa_list);
         }
     }
 
@@ -1050,9 +1052,8 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         aio_sector_list[i] =
                     ns->start_block + (ppa << (data_shift - BDRV_SECTOR_BITS));
 
-        /* Read/Write to metadata buffer if given one */
         if (is_write) {
-            if (nvme_set_written_state(ln, ppa)) {
+            if (!lightnvm_hybrid_dev(n) && nvme_set_written_state(ln, ppa)) {
                 printf("lnvm: set written status failed\n");
                 print_ppa(ln, psl[i]);
                 err = NVME_INVALID_FIELD | NVME_DNR;
@@ -1070,7 +1071,7 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         } else if (!is_write){
             uint32_t state;
 
-            if (nvme_check_state(ln, ppa, &state)) {
+            if (!lightnvm_hybrid_dev(n) && nvme_check_state(ln, ppa, &state)) {
                 printf("lnvm: read status failed\n");
                 print_ppa(ln, psl[i]);
                 err = NVME_INVALID_FIELD | NVME_DNR;
