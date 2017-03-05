@@ -72,16 +72,16 @@
  *  dual (2) and quad (4) plane modes. Defult: 1
  *  lreadl2ptbl=<int>  : Load logical to physical table. 1: yes, 0: no. Default: 1
  *  lbbtable=<file>    : Load bad block table from file destination (Provide path
+ *  to file. If no file is provided a bad block table will be generated. Look
+ *  at lbbfrequency. Default: Null (no file).
+ *  lbbfrequency:<int> : Bad block frequency for generating bad block table. If
+ *  no frequency is provided LNVM_DEFAULT_BB_FREQ will be used.
  *  lmetadata=<file>   : Load metadata from file destination
  *  lmetasize=<int>    : LightNVM metadata (OOB) size. Default: 16
  *  lb_err_write       : First ppa to inject write error. Default: 0 (disabled)
  *  ln_err_write       : Number of ppas affected by write error injection
  *  ldebug             : Enable LightNVM debugging. Default: 0 (disabled)
  *  lstrict            : Enable strict checks. Necessary for pblk (disabled)
- *  to file. If no file is provided a bad block table will be generation. Look
- *  at lbbfrequency. Default: Null (no file).
- *  lbbfrequency:<int> : Bad block frequency for generating bad block table. If
- *  no frequency is provided LNVM_DEFAULT_BB_FREQ will be used.
  *
  *
  * The logical block formats all start at 512 byte blocks and double for the
