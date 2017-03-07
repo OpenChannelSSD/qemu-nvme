@@ -582,7 +582,7 @@ static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
     NvmeAsyncEvent *event;
 
     if (!(n->bar.csts & NVME_CSTS_READY))
-	return;
+        return;
 
     event = (NvmeAsyncEvent *)g_malloc0(sizeof(*event));
     event->result.event_type = event_type;
