@@ -26,7 +26,7 @@ enum NvmeCapShift {
     CAP_DSTRD_SHIFT    = 32,
     CAP_NSSRS_SHIFT    = 33,
     CAP_CSS_SHIFT      = 37,
-    CAP_LIGHTNVM_SHIFT = 44,
+    CAP_LNVM_SHIFT = 44,
     CAP_MPSMIN_SHIFT   = 48,
     CAP_MPSMAX_SHIFT   = 52,
 };
@@ -39,7 +39,7 @@ enum NvmeCapMask {
     CAP_DSTRD_MASK     = 0xf,
     CAP_NSSRS_MASK     = 0x1,
     CAP_CSS_MASK       = 0xff,
-    CAP_LIGHTNVM_MASK  = 0x1,
+    CAP_LNVM_MASK  = 0x1,
     CAP_MPSMIN_MASK    = 0xf,
     CAP_MPSMAX_MASK    = 0xf,
 };
@@ -51,7 +51,7 @@ enum NvmeCapMask {
 #define NVME_CAP_DSTRD(cap) (((cap) >> CAP_DSTRD_SHIFT)  & CAP_DSTRD_MASK)
 #define NVME_CAP_NSSRS(cap) (((cap) >> CAP_NSSRS_SHIFT)  & CAP_NSSRS_MASK)
 #define NVME_CAP_CSS(cap)   (((cap) >> CAP_CSS_SHIFT)    & CAP_CSS_MASK)
-#define NVME_CAP_LIGHTNVM(cap)(((cap) >> CAP_LIGHTNVM_SHIFT) & CAP_LIGHTNVM_MASK)
+#define NVME_CAP_LNVM(cap)(((cap) >> CAP_LNVM_SHIFT) & CAP_LNVM_MASK)
 #define NVME_CAP_MPSMIN(cap)(((cap) >> CAP_MPSMIN_SHIFT) & CAP_MPSMIN_MASK)
 #define NVME_CAP_MPSMAX(cap)(((cap) >> CAP_MPSMAX_SHIFT) & CAP_MPSMAX_MASK)
 
@@ -69,8 +69,8 @@ enum NvmeCapMask {
                                                            << CAP_NSSRS_SHIFT)
 #define NVME_CAP_SET_CSS(cap, val)    (cap |= (uint64_t)(val & CAP_CSS_MASK)   \
                                                            << CAP_CSS_SHIFT)
-#define NVME_CAP_SET_LIGHTNVM(cap, val) (cap |= (uint64_t)(val & CAP_LIGHTNVM_MASK)\
-                                                            << CAP_LIGHTNVM_SHIFT)
+#define NVME_CAP_SET_LNVM(cap, val) (cap |= (uint64_t)(val & CAP_LNVM_MASK)\
+                                                            << CAP_LNVM_SHIFT)
 #define NVME_CAP_SET_MPSMIN(cap, val) (cap |= (uint64_t)(val & CAP_MPSMIN_MASK)\
                                                            << CAP_MPSMIN_SHIFT)
 #define NVME_CAP_SET_MPSMAX(cap, val) (cap |= (uint64_t)(val & CAP_MPSMAX_MASK)\
@@ -286,7 +286,7 @@ typedef struct LnvmGetL2PTbl {
     uint16_t rsvd2[6];
 } LnvmGetL2PTbl;
 
-typedef struct LnvmGetBBTbl {
+typedef struct LnvmBbtGet {
   uint8_t opcode;
   uint8_t flags;
   uint16_t cid;
@@ -296,9 +296,9 @@ typedef struct LnvmGetBBTbl {
   uint64_t prp2;
   uint64_t spba;
   uint32_t rsvd4[4]; // DW15, 14, 13, 12
-} LnvmGetBBTbl;
+} LnvmBbtGet;
 
-typedef struct LnvmSetBBTbl {
+typedef struct LnvmBbtSet {
   uint8_t opcode;
   uint8_t flags;
   uint16_t cid;
@@ -311,7 +311,7 @@ typedef struct LnvmSetBBTbl {
   uint8_t value;
   uint8_t rsvd3;
   uint32_t rsvd4[3];
-} LnvmSetBBTbl;
+} LnvmBbtSet;
 
 typedef struct NvmeDeleteQ {
     uint8_t     opcode;
@@ -733,7 +733,7 @@ typedef struct LnvmIdCtrl {
     LnvmIdGroup   groups[4];
 } QEMU_PACKED LnvmIdCtrl;
 
-typedef struct LnvmBBTbl {
+typedef struct LnvmBbt {
     uint8_t     tblid[4];
     uint16_t    verid;
     uint16_t    revid;
@@ -745,7 +745,7 @@ typedef struct LnvmBBTbl {
     uint32_t    thresv;
     uint32_t    rsvd2[8];
     uint8_t     blk[0];
-} QEMU_PACKED LnvmBBTbl;
+} QEMU_PACKED LnvmBbt;
 
 /* Parameters passed on to QEMU to configure the characteristics of the drive */
 typedef struct LnvmParams {
@@ -891,8 +891,8 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeDsmRange) != 16);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(LnvmGetL2PTbl) != 64);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmGetBBTbl) != 64);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmSetBBTbl) != 64);
+    QEMU_BUILD_BUG_ON(sizeof(LnvmBbtGet) != 64);
+    QEMU_BUILD_BUG_ON(sizeof(LnvmBbtSet) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeDeleteQ) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCreateCq) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCreateSq) != 64);
@@ -930,8 +930,8 @@ typedef struct NvmeRequest {
     uint64_t                meta_size;
     uint64_t                mptr;
     void                    *meta_buf;
-    uint64_t                lightnvm_slba;
-    uint64_t                *lightnvm_ppa_list;
+    uint64_t                lnvm_slba;
+    uint64_t                *lnvm_ppa_list;
     NvmeCqe                 cqe;
     BlockAcctCookie         acct;
     QEMUSGList              qsg;
@@ -1021,19 +1021,19 @@ typedef struct LnvmCtrl {
     LnvmIdCtrl     id_ctrl;
     LnvmAddrF      ppaf;
     uint8_t        read_l2p_tbl;
-    uint8_t        bb_gen_freq;
-    uint8_t        bb_auto_gen;
+    uint8_t        bbt_gen_freq;
+    uint8_t        bbt_auto_gen;
     uint8_t        meta_auto_gen;
     uint8_t        debug;
     uint8_t        strict;
-    char           *bb_tbl_name;
-    char           *meta_name;
-    FILE           *bb_tbl;
+    char           *bbt_fname;
+    char           *meta_fname;
+    FILE           *bbt_fp;
     uint32_t       err_write;
     uint32_t       n_err_write;
     uint32_t       err_write_cnt;
     FILE           *metadata;
-    uint8_t        int_meta_size;
+    uint8_t        int_meta_size;       // # of bytes for "internal" metadata
 } LnvmCtrl;
 
 typedef struct NvmeCtrl {
@@ -1105,7 +1105,7 @@ typedef struct NvmeCtrl {
     QEMUTimer   *aer_timer;
     uint8_t     aer_mask;
 
-    LnvmCtrl     lightnvm_ctrl;
+    LnvmCtrl     lnvm_ctrl;
 } NvmeCtrl;
 
 typedef struct NvmeDifTuple {
