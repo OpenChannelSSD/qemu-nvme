@@ -3029,6 +3029,7 @@ static void lnvm_init_id_ctrl(LnvmCtrl *ln)
     ln_id->cgrps = 1;
     ln_id->cap = cpu_to_le32(0x3);
 
+    /* Previous format
     ln_id->ppaf.blk_offset = 0;
     ln_id->ppaf.blk_len = 12;
     ln_id->ppaf.pg_offset = ln_id->ppaf.blk_offset + ln_id->ppaf.blk_len;
@@ -3038,6 +3039,22 @@ static void lnvm_init_id_ctrl(LnvmCtrl *ln)
     ln_id->ppaf.pln_offset = ln_id->ppaf.sect_offset + ln_id->ppaf.sect_len;
     ln_id->ppaf.pln_len = qemu_fls(cpu_to_le16(ln->params.num_pln) - 1);
     ln_id->ppaf.lun_offset = ln_id->ppaf.pln_offset + ln_id->ppaf.pln_len;
+    ln_id->ppaf.lun_len = qemu_fls(cpu_to_le16(ln->params.num_lun) - 1);
+    ln_id->ppaf.ch_offset = ln_id->ppaf.lun_offset + ln_id->ppaf.lun_len;
+    ln_id->ppaf.ch_len = qemu_fls(cpu_to_le16(ln->params.num_ch) - 1);
+    */
+
+    /* new format: CHANNEL | LUN | BLOCK | PAGE | PLANE | SECTOR */
+    int num_blk = 64;
+    ln_id->ppaf.sect_offset = 0;
+    ln_id->ppaf.sect_len = qemu_fls(cpu_to_le16(ln->params.sec_per_pg) - 1);
+    ln_id->ppaf.pln_offset = ln_id->ppaf.sect_offset + ln_id->ppaf.sect_len;
+    ln_id->ppaf.pln_len = qemu_fls(cpu_to_le16(ln->params.num_pln) - 1);
+    ln_id->ppaf.pg_offset = ln_id->ppaf.pln_offset + ln_id->ppaf.pln_len;
+    ln_id->ppaf.pg_len = qemu_fls(cpu_to_le16(ln->params.pgs_per_blk) - 1);
+    ln_id->ppaf.blk_offset = ln_id->ppaf.pg_offset + ln_id->ppaf.pg_len;
+    ln_id->ppaf.blk_len = qemu_fls(cpu_to_le16(num_blk) - 1);
+    ln_id->ppaf.lun_offset = ln_id->ppaf.blk_offset + ln_id->ppaf.blk_len;
     ln_id->ppaf.lun_len = qemu_fls(cpu_to_le16(ln->params.num_lun) - 1);
     ln_id->ppaf.ch_offset = ln_id->ppaf.lun_offset + ln_id->ppaf.lun_len;
     ln_id->ppaf.ch_len = qemu_fls(cpu_to_le16(ln->params.num_ch) - 1);
@@ -3210,24 +3227,36 @@ static int lnvm_init(NvmeCtrl *n)
         ln->params.sec_per_lun = ln->params.sec_per_blk * c->num_blk;
         ln->params.total_secs = ln->params.sec_per_lun * c->num_lun;
 
-        /* Address format */
+        /* previous address format 
         ln->ppaf.blk_offset = 0;
         ln->ppaf.pg_offset = ln->id_ctrl.ppaf.blk_len;
         ln->ppaf.sec_offset = ln->ppaf.pg_offset + ln->id_ctrl.ppaf.pg_len;
         ln->ppaf.pln_offset = ln->ppaf.sec_offset + ln->id_ctrl.ppaf.sect_len;
         ln->ppaf.lun_offset = ln->ppaf.pln_offset + ln->id_ctrl.ppaf.pln_len;
         ln->ppaf.ch_offset = ln->ppaf.lun_offset + ln->id_ctrl.ppaf.lun_len;
-	ln->ppaf.blk_mask = ((1 << ln->id_ctrl.ppaf.blk_len) - 1);
-	ln->ppaf.pg_mask = ((1 << ln->id_ctrl.ppaf.pg_len) - 1) <<
-							ln->ppaf.pg_offset;
-	ln->ppaf.sec_mask = ((1 << ln->id_ctrl.ppaf.sect_len) - 1) <<
+        */
+
+        /* Address format: CH | LUN | BLK | PG | PL | SEC */
+        ln->ppaf.sec_offset = ln->id_ctrl.ppaf.sect_offset;
+        ln->ppaf.pln_offset = ln->id_ctrl.ppaf.pln_offset;
+        ln->ppaf.pg_offset = ln->id_ctrl.ppaf.pg_offset;
+        ln->ppaf.blk_offset = ln->id_ctrl.ppaf.blk_offset;
+        ln->ppaf.lun_offset = ln->id_ctrl.ppaf.lun_offset;
+        ln->ppaf.ch_offset = ln->id_ctrl.ppaf.ch_offset;
+
+        /* Address component selection MASK */
+        ln->ppaf.sec_mask = ((1 << ln->id_ctrl.ppaf.sect_len) - 1) <<
                                                         ln->ppaf.sec_offset;
-	ln->ppaf.pln_mask = ((1 << ln->id_ctrl.ppaf.pln_len) - 1) <<
-							ln->ppaf.pln_offset;
-	ln->ppaf.lun_mask = ((1 << ln->id_ctrl.ppaf.lun_len) -1) <<
-							ln->ppaf.lun_offset;
-	ln->ppaf.ch_mask = ((1 << ln->id_ctrl.ppaf.ch_len) - 1) <<
-							ln->ppaf.ch_offset;
+        ln->ppaf.pln_mask = ((1 << ln->id_ctrl.ppaf.pln_len) - 1) <<
+                                                        ln->ppaf.pln_offset;
+        ln->ppaf.pg_mask = ((1 << ln->id_ctrl.ppaf.pg_len) - 1) <<
+                                                        ln->ppaf.pg_offset;
+        ln->ppaf.blk_mask = ((1 << ln->id_ctrl.ppaf.blk_len) - 1) <<
+                                                        ln->ppaf.blk_offset;
+        ln->ppaf.lun_mask = ((1 << ln->id_ctrl.ppaf.lun_len) -1) <<
+                                                        ln->ppaf.lun_offset;
+        ln->ppaf.ch_mask = ((1 << ln->id_ctrl.ppaf.ch_len) - 1) <<
+                                                        ln->ppaf.ch_offset;
     }
 
     if (!ln->bbt_fname) {       // Default bbt file
