@@ -767,6 +767,12 @@ typedef struct LnvmParams {
     uint32_t    sec_per_blk;
     uint32_t    sec_per_lun;
     uint32_t    total_secs;
+    /* Calculated unit values for ordering */
+    uint32_t    pl_units;
+    uint32_t    pg_units;
+    uint32_t    blk_units;
+    uint32_t    lun_units;
+    uint32_t    total_units;
 } QEMU_PACKED LnvmParams;
 
 enum LnvmPmode {

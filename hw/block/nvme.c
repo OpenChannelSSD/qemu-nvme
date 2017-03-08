@@ -3227,6 +3227,13 @@ static int lnvm_init(NvmeCtrl *n)
         ln->params.sec_per_lun = ln->params.sec_per_blk * c->num_blk;
         ln->params.total_secs = ln->params.sec_per_lun * c->num_lun;
 
+        /* Calculated unit values for ordering */
+        ln->params.pl_units = ln->params.sec_per_pg;
+        ln->params.pg_units = ln->params.pl_units * c->num_pln;
+        ln->params.blk_units = ln->params.pg_units * ln->params.pgs_per_blk;
+        ln->params.lun_units = ln->params.blk_units * c->num_blk;
+        ln->params.total_units = ln->params.lun_units * c->num_lun;
+
         /* previous address format 
         ln->ppaf.blk_offset = 0;
         ln->ppaf.pg_offset = ln->id_ctrl.ppaf.blk_len;
