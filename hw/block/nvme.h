@@ -769,6 +769,12 @@ typedef struct LnvmParams {
     uint32_t    total_secs;
 } QEMU_PACKED LnvmParams;
 
+enum LnvmPmode {
+    LNVM_PMODE_SNGL = 0x0,      ///< Single-plane
+    LNVM_PMODE_DUAL = 0x1,      ///< Dual-plane (NVM_IO_DUAL_ACCESS)
+    LNVM_PMODE_QUAD = 0x2       ///< Quad-plane (NVM_IO_QUAD_ACCESS)
+};
+
 enum LnvmResponsibility {
     LNVM_RSP_L2P       = 1 << 0,
     LNVM_RSP_ECC       = 1 << 1,
