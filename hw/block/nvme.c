@@ -826,8 +826,40 @@ static inline int64_t lnvm_ppa_to_off(LnvmCtrl *ln, uint64_t r)
     return off;
 }
 
+static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t ppa,
+                                        uint32_t *state)
+{
+    FILE *meta_fp = ln->metadata;
+    size_t tgt_oob_len = ln->params.sos;
+    size_t int_oob_len = ln->int_meta_size;
+    size_t meta_len = tgt_oob_len + int_oob_len;
+    uint32_t seek = ppa * meta_len;
+    size_t ret;
 
-/*
+    if (fseek(meta_fp, seek, SEEK_SET)) {
+        perror("lnvm_meta_state_get: fseek");
+        printf("Could not seek to offset in metadata file\n");
+        return -1;
+    }
+
+    ret = fread(state, int_oob_len, 1, meta_fp);
+    if (ret != 1) {
+        if (errno == EAGAIN) {
+            printf("lnvm_meta_state_get: Why is this not an error?\n");
+            return 0;
+        }
+        perror("lnvm_meta_state_get: fread");
+        printf("lnvm_meta_state_get: ppa(%lu), ret(%lu)\n", ppa, ret);
+        return -1;
+    }
+
+    return 0;
+}
+
+/**
+ * Similar to lnvm_meta_set_written, however, this function sets not a single
+ * but multiple ppas, also checks if a block is marked bad
+ */
 static inline int lnvm_meta_blk_set_erased(NvmeNamespace *ns, LnvmCtrl *ln,
                                   uint64_t *psl, int nr_ppas)
 {
@@ -890,36 +922,6 @@ static inline int lnvm_meta_blk_set_erased(NvmeNamespace *ns, LnvmCtrl *ln,
 
     if (fflush(meta_fp))
         printf("Could not write to metadata file:%d\n", errno);
-
-    return 0;
-}
-
-static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t ppa,
-                                        uint32_t *state)
-{
-    FILE *meta_fp = ln->metadata;
-    size_t tgt_oob_len = ln->params.sos;
-    size_t int_oob_len = ln->int_meta_size;
-    size_t meta_len = tgt_oob_len + int_oob_len;
-    uint32_t seek = ppa * meta_len;
-    size_t ret;
-
-    if (fseek(meta_fp, seek, SEEK_SET)) {
-        perror("lnvm_meta_state_get: fseek");
-        printf("Could not seek to offset in metadata file\n");
-        return -1;
-    }
-
-    ret = fread(state, int_oob_len, 1, meta_fp);
-    if (ret != 1) {
-        if (errno == EAGAIN) {
-            printf("lnvm_meta_state_get: Why is this not an error?\n");
-            return 0;
-        }
-        perror("lnvm_meta_state_get: fread");
-        printf("lnvm_meta_state_get: ppa(%lu), ret(%lu)\n", ppa, ret);
-        return -1;
-    }
 
     return 0;
 }
