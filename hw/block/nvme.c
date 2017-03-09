@@ -801,6 +801,33 @@ static inline int64_t lnvm_bbt_pos_get(LnvmCtrl *ln, uint64_t r)
     return pln + blk_off + lun_off;
 }
 
+static inline int64_t lnvm_ppa_to_off(LnvmCtrl *ln, uint64_t r)
+{
+    uint64_t ch = (r & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
+    uint64_t lun = (r & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
+    uint64_t pln = (r & ln->ppaf.pln_mask) >> ln->ppaf.pln_offset;
+    uint64_t blk = (r & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
+    uint64_t pg = (r & ln->ppaf.pg_mask) >> ln->ppaf.pg_offset;
+    uint64_t sec = (r & ln->ppaf.sec_mask) >> ln->ppaf.sec_offset;
+
+    uint64_t off = sec;
+
+    off += pln * ln->params.sec_per_pg;
+    off += pg * ln->params.sec_per_pl;
+    off += blk * ln->params.sec_per_blk;
+    off += lun * ln->params.sec_per_lun;
+
+    if (off > ln->params.total_secs) {
+        printf("lnvm: ppa OOB:ch:%lu,lun:%lu,blk:%lu,pg:%lu,pl:%lu,sec:%lu\n",
+                ch, lun, blk, pg, pln, sec);
+        return -1;
+    }
+
+    return off;
+}
+
+
+/*
 static inline int lnvm_meta_blk_set_erased(NvmeNamespace *ns, LnvmCtrl *ln,
                                   uint64_t *psl, int nr_ppas)
 {
@@ -942,31 +969,6 @@ static inline void *lnvm_meta_index(LnvmCtrl *ln, void *meta, uint32_t index)
     return meta + (index * ln->params.sos);
 }
 
-static inline int64_t lnvm_addr_to_sec_off(LnvmCtrl *ln, uint64_t r)
-{
-    uint64_t ch = (r & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
-    uint64_t lun = (r & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
-    uint64_t pln = (r & ln->ppaf.pln_mask) >> ln->ppaf.pln_offset;
-    uint64_t blk = (r & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
-    uint64_t pg = (r & ln->ppaf.pg_mask) >> ln->ppaf.pg_offset;
-    uint64_t sec = (r & ln->ppaf.sec_mask) >> ln->ppaf.sec_offset;
-
-    uint64_t off = sec;
-
-    off += pln * ln->params.sec_per_pg;
-    off += pg * ln->params.sec_per_pl;
-    off += blk * ln->params.sec_per_blk;
-    off += lun * ln->params.sec_per_lun;
-
-    if (off > ln->params.total_secs) {
-        printf("lnvm: ppa OOB:ch:%lu,lun:%lu,blk:%lu,pg:%lu,pl:%lu,sec:%lu\n",
-                ch, lun, blk, pg, pln, sec);
-        return -1;
-    }
-
-    return off;
-}
-
 static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
@@ -1054,8 +1056,8 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->lnvm_slba = le64_to_cpu(lrw->slba);
     req->is_write = is_write;
 
-    sppa = lnvm_addr_to_sec_off(ln, psl[0]);
-    eppa = lnvm_addr_to_sec_off(ln, psl[n_pages - 1]);
+    sppa = lnvm_ppa_to_off(ln, psl[0]);
+    eppa = lnvm_ppa_to_off(ln, psl[n_pages - 1]);
     if (sppa == -1 || eppa == -1) {
         printf("lnvm_rw: EINVAL\n");
         err = -EINVAL;
@@ -1078,7 +1080,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      * handlers to write/read data to/from the right physical sector
      */
     for (i = 0; i < n_pages; i++) {
-        ppa = lnvm_addr_to_sec_off(ln, psl[i]);
+        ppa = lnvm_ppa_to_off(ln, psl[i]);
         sector_list[i] = ppa;
         aio_sector_list[i] =
                     ns->start_block + (ppa << (data_shift - BDRV_SECTOR_BITS));
