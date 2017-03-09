@@ -887,9 +887,21 @@ static inline int lnvm_meta_blk_set_erased(NvmeNamespace *ns, LnvmCtrl *ln,
     for (i = 0; i < nr_ppas; ++i) {
         size_t pg, sec;
         uint64_t ppa = psl[i];
+        uint32_t cur_state = 0;
 
+        // Check bad-block-table to error on bad blocks
         if (ns->bbtbl[lnvm_bbt_pos_get(ln, ppa)]) {
             printf("_erase_meta: failed -- block is bad\n");
+            return -1;
+        }
+
+        // Check state of first sector to error on double-erase
+        if (lnvm_meta_state_get(ln, ppa, &cur_state)) {
+            printf("_erase_meta: failed -- could not retrieve current state\n");
+            return -1;
+        }
+        if (cur_state == LNVM_SEC_ERASED) {
+            printf("_erase_meta: failed -- already erased\n");
             return -1;
         }
 
