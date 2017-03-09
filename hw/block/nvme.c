@@ -903,49 +903,34 @@ static inline int lnvm_meta_state_set_written(LnvmCtrl *ln, uint64_t ppa)
     size_t tgt_oob_len = ln->params.sos;
     size_t int_oob_len = ln->int_meta_size;
     size_t meta_len = tgt_oob_len + int_oob_len;
-    uint32_t state;
     uint32_t seek = ppa * meta_len;
+    uint32_t state;
     size_t ret;
 
-    if (fseek(meta_fp, seek, SEEK_SET)) {
-        perror("_set_written_state: fseek");
-        printf("_set_written_state: Could not seek to position\n");
-        return -1;
-    }
-
-    ret = fread(&state, int_oob_len, 1, meta_fp);
-    if (ret != 1) {
-        if (errno == EAGAIN) {
-            perror("_set_written_state: Why is this not an error?\n");
-            return 0;
-        }
-        perror("_set_written_state: fread");
-        printf("_set_written_state: ppa:%lu (ret:%lu)\n", ppa, ret);
+    if (lnvm_meta_state_get(ln, ppa, &state)) {
+        printf("_set_written: lnvm_meta_state_get failed\n");
         return -1;
     }
 
     if (state != LNVM_SEC_ERASED) {
-        printf("_set_written_state: Writing to non-erased block (%d)\n", state);
+        printf("_set_written: Invalid block state(%d)\n", state);
         return -1;
     }
 
     if (fseek(meta_fp, seek, SEEK_SET)) {
-        perror("_set_written_state: fseek");
-        printf("_set_written_state: Could not write OOB to metadata file\n");
+        perror("_set_written: fseek");
         return -1;
     }
 
     state = LNVM_SEC_WRITTEN;
     ret = fwrite(&state, int_oob_len, 1, meta_fp);
     if (ret != 1) {
-        perror("_set_written_state: fwrite");
-        printf("_set_written_state: Could not write state to metadata file\n");
+        perror("_set_written: fwrite");
         return -1;
     }
 
     if (fflush(meta_fp)) {
-        perror("_set_written_state: fflush");
-        printf("_set_written_state: Could not write to metadata file\n");
+        perror("_set_written: fflush");
         return -1;
     }
 
