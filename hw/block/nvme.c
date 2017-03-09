@@ -863,65 +863,63 @@ static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t ppa,
 static inline int lnvm_meta_blk_set_erased(NvmeNamespace *ns, LnvmCtrl *ln,
                                   uint64_t *psl, int nr_ppas)
 {
+    struct lnvm_metadata_format meta = {.state = LNVM_SEC_ERASED};
     LnvmIdGroup *c = &ln->id_ctrl.groups[0];
     FILE *meta_fp = ln->metadata;
-    struct lnvm_metadata_format meta = {.state = LNVM_SEC_ERASED};
     size_t tgt_oob_len = ln->params.sos;
     size_t int_oob_len = ln->int_meta_size;
     size_t meta_len = tgt_oob_len + int_oob_len;
-    uint8_t nr_blks = nr_ppas / c->num_pln;
-    int ret;
-    int blk, i, j;
+    int i;
+
+    uint64_t mask = 0;
+
+    mask |= ln->ppaf.ch_mask;
+    mask |= ln->ppaf.lun_mask;
+    mask |= ln->ppaf.blk_mask;
+    mask |= ln->ppaf.pln_mask;
 
     if (ln->strict && nr_ppas != c->num_pln) {
-        printf("lnvm: Strict erase not performed to all planes (%d)\n", nr_ppas);
+        printf("_erase_meta: Strict erase not performed to all planes (%d)\n",
+                                                                    nr_ppas);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    if (nr_ppas % c->num_pln) {
-        printf("lnvm: Erase not performed to all planes (%d)\n", nr_ppas);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
+    for (i = 0; i < nr_ppas; ++i) {
+        size_t pg, sec;
+        uint64_t ppa = psl[i];
 
-    for (blk = 0; blk < nr_blks; blk++) {
-        uint8_t blk_pos = blk * c->num_pln;
-        uint64_t r = psl[blk_pos];
-        uint64_t ch = (r & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
-        uint64_t lun = (r & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
-        uint64_t blk = (r & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
+        if (ns->bbtbl[lnvm_bbt_pos_get(ln, ppa)]) {
+            printf("_erase_meta: failed -- block is bad\n");
+            return -1;
+        }
 
-        uint64_t lun_off = lun * ln->params.sec_per_lun;
-        uint64_t blk_off = blk * ln->params.sec_per_blk;
-        uint64_t ppa = blk_off + lun_off;
+        for (pg = 0; pg < ln->params.pgs_per_blk; ++pg) {
+            for (sec = 0; sec < ln->params.sec_per_pg; ++sec) {
+                uint64_t ppa_sec, off;
 
-        uint64_t bb_pos;
+                ppa_sec = ppa & mask;
+                ppa_sec |= pg << ln->ppaf.pg_offset;
+                ppa_sec |= sec << ln->ppaf.sec_offset;
 
-        for (i = 0; i < c->num_pln; i++) {
-            /* Fail erase if the block is marked as bad */
-            bb_pos = lnvm_bbt_pos_get(ln, psl[blk_pos + i]);
-            if (ns->bbtbl[bb_pos]) {
-                printf("_erase_meta: failed -- block is bad\n");
-                return -1;
-            }
+                off = lnvm_ppa_to_off(ln, ppa_sec);
 
-            if (fseek(meta_fp, ppa * meta_len , SEEK_SET)) {
-                printf("_erase_meta: Could not write OOB to metadata file\n");
-                return -1;
-            }
-
-            for (j = 0; j < ln->params.sec_per_blk; j++) {
-                ret = fwrite(&meta, meta_len, 1, meta_fp);
-                if (ret != 1) {
-                    printf("Failed to erase ch:%lu,lun:%lu,blk:%lu - ret:%d/%d\n",
-                                    ch, lun, blk, ret, ln->params.sec_per_blk);
+                if (fseek(meta_fp, off * meta_len, SEEK_SET)) {
+                    perror("_set_erased: fseek");
                     return -1;
+                }
+
+                if (fwrite(&meta, meta_len, 1, meta_fp) != 1) {
+                    perror("_erase_meta: fwrite");
+                    printf("_erase_meta: ppa(%016lx), off(%lu)\n", ppa_sec, off);
                 }
             }
         }
     }
 
-    if (fflush(meta_fp))
-        printf("Could not write to metadata file:%d\n", errno);
+    if (fflush(meta_fp)) {
+        perror("_erase_meta: fflush");
+        return -1;
+    }
 
     return 0;
 }
