@@ -861,7 +861,7 @@ static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t ppa,
  * but multiple ppas, also checks if a block is marked bad
  */
 static inline int lnvm_meta_blk_set_erased(NvmeNamespace *ns, LnvmCtrl *ln,
-                                  uint64_t *psl, int nr_ppas)
+                                  uint64_t *psl, int nr_ppas, int pmode)
 {
     struct lnvm_metadata_format meta = {.state = LNVM_SEC_ERASED};
     LnvmIdGroup *c = &ln->id_ctrl.groups[0];
@@ -873,56 +873,95 @@ static inline int lnvm_meta_blk_set_erased(NvmeNamespace *ns, LnvmCtrl *ln,
 
     uint64_t mask = 0;
 
-    mask |= ln->ppaf.ch_mask;
-    mask |= ln->ppaf.lun_mask;
-    mask |= ln->ppaf.blk_mask;
-    mask |= ln->ppaf.pln_mask;
-
     if (ln->strict && nr_ppas != c->num_pln) {
         printf("_erase_meta: Strict erase not performed to all planes (%d)\n",
                                                                     nr_ppas);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
+    switch(pmode) {     // Check that pmode is supported
+    case LNVM_PMODE_DUAL:
+        if (c->num_pln != 2) {
+            printf("_erase_meta: Unsupported pmode(%d) for num_pln(%d)\n",
+                   pmode, c->num_pln);
+            return -1;
+        }
+        break;
+    case LNVM_PMODE_QUAD:
+        if (c->num_pln != 4) {
+            printf("_erase_meta: Unsupported pmode(%d) for num_pln(%d)\n",
+                   pmode, c->num_pln);
+            return -1;
+        }
+        break;
+    case LNVM_PMODE_SNGL:
+        break;
+    default:
+        printf("_erase_meta: Unsupported pmode(%d)\n", pmode);
+    }
+
+    mask |= ln->ppaf.ch_mask;   // Construct mask
+    mask |= ln->ppaf.lun_mask;
+    mask |= ln->ppaf.blk_mask;
+
     for (i = 0; i < nr_ppas; ++i) {
-        size_t pg, sec;
         uint64_t ppa = psl[i];
-        uint32_t cur_state = 0;
+        size_t pl_bgn, pl_end;
+        size_t pl;
 
-        // Check bad-block-table to error on bad blocks
-        if (ns->bbtbl[lnvm_bbt_pos_get(ln, ppa)]) {
-            printf("_erase_meta: failed -- block is bad\n");
-            return -1;
+        if (pmode) {
+            pl_bgn = 0;
+            pl_end = c->num_pln - 1;
+        } else {
+            pl_bgn = (ppa & ln->ppaf.pln_mask) >> ln->ppaf.pln_offset;
+            pl_end = pl_bgn;
         }
 
-        // Check state of first sector to error on double-erase
-        if (lnvm_meta_state_get(ln, ppa, &cur_state)) {
-            printf("_erase_meta: failed -- could not retrieve current state\n");
-            return -1;
-        }
-        if (cur_state == LNVM_SEC_ERASED) {
-            printf("_erase_meta: failed -- already erased\n");
-            return -1;
-        }
+        for (pl = pl_bgn; pl <= pl_end; ++pl) {
+            uint32_t cur_state = 0;
+            uint64_t ppa_pl;
+            size_t pg, sec;
 
-        for (pg = 0; pg < ln->params.pgs_per_blk; ++pg) {
-            for (sec = 0; sec < ln->params.sec_per_pg; ++sec) {
-                uint64_t ppa_sec, off;
+            ppa_pl = ppa & mask;
+            ppa_pl |= pl << ln->ppaf.pln_offset;
 
-                ppa_sec = ppa & mask;
-                ppa_sec |= pg << ln->ppaf.pg_offset;
-                ppa_sec |= sec << ln->ppaf.sec_offset;
+            // Check bad-block-table to error on bad blocks
+            if (ns->bbtbl[lnvm_bbt_pos_get(ln, ppa_pl)]) {
+                printf("_erase_meta: failed -- block is bad\n");
+                return -1;
+            }
 
-                off = lnvm_ppa_to_off(ln, ppa_sec);
+            // Check state of first sector to error on double-erase
+            if (lnvm_meta_state_get(ln, ppa_pl, &cur_state)) {
+                printf("_erase_meta: failed: reading current state\n");
+                return -1;
+            }
+            if (cur_state == LNVM_SEC_ERASED) {
+                printf("_erase_meta: failed -- already erased\n");
+                return -1;
+            }
 
-                if (fseek(meta_fp, off * meta_len, SEEK_SET)) {
-                    perror("_set_erased: fseek");
-                    return -1;
-                }
+            for (pg = 0; pg < ln->params.pgs_per_blk; ++pg) {
+                for (sec = 0; sec < ln->params.sec_per_pg; ++sec) {
+                    uint64_t ppa_sec, off;
 
-                if (fwrite(&meta, meta_len, 1, meta_fp) != 1) {
-                    perror("_erase_meta: fwrite");
-                    printf("_erase_meta: ppa(%016lx), off(%lu)\n", ppa_sec, off);
+                    ppa_sec = ppa & mask;
+                    ppa_sec |= pg << ln->ppaf.pg_offset;
+                    ppa_sec |= pl << ln->ppaf.pln_offset;
+                    ppa_sec |= sec << ln->ppaf.sec_offset;
+
+                    off = lnvm_ppa_to_off(ln, ppa_sec);
+
+                    if (fseek(meta_fp, off * meta_len, SEEK_SET)) {
+                        perror("_set_erased: fseek");
+                        return -1;
+                    }
+
+                    if (fwrite(&meta, meta_len, 1, meta_fp) != 1) {
+                        perror("_erase_meta: fwrite");
+                        printf("_erase_meta: ppa(%016lx), off(%lu)\n", ppa_sec,
+                                                                        off);
+                    }
                 }
             }
         }
@@ -1713,6 +1752,7 @@ static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t spba = le64_to_cpu(dm->spba);
     uint64_t psl[ln->params.max_sec_per_rq];
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
+    int pmode = le16_to_cpu(dm->control) & (LNVM_PMODE_DUAL|LNVM_PMODE_QUAD);
 
     if (nlb > 1) {
         nvme_addr_read(n, spba, (void *)psl, nlb * sizeof(void *));
@@ -1726,8 +1766,8 @@ static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->nlb = nlb;
     req->ns = ns;
 
-    if (lnvm_meta_blk_set_erased(ns, ln, psl, nlb)) {
-        printf("Erased failed\n");
+    if (lnvm_meta_blk_set_erased(ns, ln, psl, nlb, pmode)) {
+        printf("lnvm_erase_async: failed: ");
         print_ppa(ln, psl[0]);
         req->status = 0x40ff;
 
