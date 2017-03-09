@@ -269,6 +269,7 @@ enum LnvmDmCommands {
 };
 
 enum LnvmMetaState {
+    LNVM_SEC_UNKNOWN = 0x0,
     LNVM_SEC_WRITTEN = 0xAC,
     LNVM_SEC_ERASED = 0xDC,
 };

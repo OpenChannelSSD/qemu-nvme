@@ -3005,6 +3005,77 @@ static void lnvm_init_id_ctrl(LnvmCtrl *ln)
     ln_id->ppaf.ch_len = qemu_fls(cpu_to_le16(ln->params.num_ch) - 1);
 }
 
+static int lnvm_init_meta(LnvmCtrl *ln)
+{
+    char *state = NULL;
+    struct stat buf;
+    size_t meta_tbytes, res;
+
+    ln->int_meta_size = 4;      // Internal meta (state: ERASED / WRITTEN)
+
+    //
+    // Internal meta are the first "ln->int_meta_size" bytes
+    // Then comes the tgt_oob_len with is the following ln->param.sos bytes
+    //
+
+    meta_tbytes = (ln->int_meta_size + ln->params.sos) * \
+                  ln->params.total_secs;
+
+    if (!ln->meta_fname) {      // Default meta file
+        ln->meta_auto_gen = 1;
+        ln->meta_fname = malloc(10);
+        if (!ln->meta_fname)
+            return -ENOMEM;
+        strncpy(ln->meta_fname, "meta.qemu\0", 10);
+    } else {
+        ln->meta_auto_gen = 0;
+    }
+
+    ln->metadata = fopen(ln->meta_fname, "w+"); // Open the metadata file
+    if (!ln->metadata) {
+        error_report("nvme: lnvm_init_meta: fopen(%s)\n", ln->meta_fname);
+        return -EEXIST;
+    }
+
+    if (fstat(fileno(ln->metadata), &buf)) {
+        error_report("nvme: lnvm_init_meta: fstat(%s)\n", ln->meta_fname);
+        return -1;
+    }
+
+    if (buf.st_size == meta_tbytes)             // All good
+        return 0;
+
+    //
+    // Create meta-data file when it is empty or invalid
+    //
+    if (ftruncate(fileno(ln->metadata), 0)) {
+        error_report("nvme: lnvm_init_meta: ftrunca(%s)\n", ln->meta_fname);
+        return -1;
+    }
+
+    state = malloc(meta_tbytes);
+    if (!state) {
+        error_report("nvme: lnvm_init_meta: malloc f(%s)\n", ln->meta_fname);
+        return -ENOMEM;
+    }
+
+    memset(state, LNVM_SEC_UNKNOWN, meta_tbytes);
+
+    res = fwrite(state, 1, meta_tbytes, ln->metadata);
+
+    free(state);
+
+    if (res != meta_tbytes) {
+        error_report("nvme: lnvm_init_meta: fwrite(%s), res(%lu)\n",
+                     ln->meta_fname, res);
+        return -1;
+    }
+
+    rewind(ln->metadata);
+
+    return 0;
+}
+
 static int lnvm_init(NvmeCtrl *n)
 {
     LnvmCtrl *ln;
@@ -3121,7 +3192,7 @@ static int lnvm_init(NvmeCtrl *n)
 							ln->ppaf.ch_offset;
     }
 
-    if (!ln->bbt_fname) {
+    if (!ln->bbt_fname) {       // Default bbt file
         ln->bbt_auto_gen = 1;
         ln->bbt_fname = malloc(13);
         if (!ln->bbt_fname)
@@ -3131,23 +3202,11 @@ static int lnvm_init(NvmeCtrl *n)
         ln->bbt_auto_gen = 0;
     }
 
-    if (!ln->meta_fname) {
-        ln->meta_auto_gen = 1;
-        ln->meta_fname = malloc(10);
-        if (!ln->meta_fname)
-            return -ENOMEM;
-        strncpy(ln->meta_fname, "meta.qemu\0", 10);
-    } else {
-        ln->meta_auto_gen = 0;
+    ret = lnvm_init_meta(ln);   // Initialize metadata file
+    if (ret) {
+        error_report("nvme: lnvm_init_meta: failed\n");
+        return ret;
     }
-
-    ln->metadata = fopen(ln->meta_fname, "w+");
-    if (!ln->metadata) {
-        error_report("nvme: could not open metadata file: %s\n", ln->meta_fname);
-        return -EEXIST;
-    }
-
-    ln->int_meta_size = 4;
 
     ret = (n->lnvm_ctrl.read_l2p_tbl) ? lnvm_read_tbls(n) : 0;
     if (ret) {
