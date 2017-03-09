@@ -817,11 +817,13 @@ static inline int nvme_erase_meta(NvmeNamespace *ns, LnvmCtrl *ln,
         for (i = 0; i < c->num_pln; i++) {
             /* Fail erase if the block is marked as bad */
             bb_pos = nvme_get_bb_pos(ln, psl[blk_pos + i]);
-            if (ns->bbtbl[bb_pos])
+            if (ns->bbtbl[bb_pos]) {
+                printf("_erase_meta: failed -- already erased\n");
                 return -1;
+            }
 
             if (fseek(fp, ppa * meta_len , SEEK_SET)) {
-                printf("Could not write OOB to metadata file\n");
+                printf("_erase_meta: Could not write OOB to metadata file\n");
                 return -1;
             }
 
@@ -976,17 +978,21 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint8_t i;
 
     sector_list = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
-    if (!sector_list)
+    if (!sector_list) {
+        printf("nvme_lnvm_rw: ENOMEM\n");
         return -ENOMEM;
+    }
 
     aio_sector_list = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
     if (!aio_sector_list) {
+        printf("nvme_lnvm_rw: ENOMEM\n");
         err = -ENOMEM;
         goto fail_free_sector_list;
     }
 
     msl = g_malloc0(ln->params.sos * ln->params.max_sec_per_rq);
     if (!msl) {
+        printf("nvme_lnvm_rw: ENOMEM\n");
         err = -ENOMEM;
         goto fail_free_aio_sector_list;
     }
@@ -1030,14 +1036,17 @@ static uint16_t nvme_lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     sppa = nvme_gen_to_dev_addr(ln, psl[0]);
     eppa = nvme_gen_to_dev_addr(ln, psl[n_pages - 1]);
     if (sppa == -1 || eppa == -1) {
+        printf("nvme_lnvm_rw: ENOMEM\n");
         err = -EINVAL;
         goto fail_free_msl;
     }
 
     err = nvme_rw_check_req(n, ns, cmd, req, sppa, eppa, nlb, ctrl,
                                                         data_size, meta_size);
-    if (err)
+    if (err) {
+        printf("nvme_lnvm_rw: failed nvme_rw_check_rw\n");
         goto fail_free_msl;
+    }
 
     if (meta && is_write)
         nvme_addr_read(n, meta, (void *)msl, n_pages * ln->params.sos);
