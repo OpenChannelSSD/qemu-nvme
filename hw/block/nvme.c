@@ -812,12 +812,12 @@ static inline int64_t lnvm_ppa_to_off(LnvmCtrl *ln, uint64_t r)
 
     uint64_t off = sec;
 
-    off += pln * ln->params.sec_per_pg;
-    off += pg * ln->params.sec_per_pl;
-    off += blk * ln->params.sec_per_blk;
-    off += lun * ln->params.sec_per_lun;
+    off += pln * ln->params.pl_units;
+    off += pg * ln->params.pg_units;
+    off += blk * ln->params.blk_units;
+    off += lun * ln->params.lun_units;
 
-    if (off > ln->params.total_secs) {
+    if (off > ln->params.total_units) {
         printf("lnvm: ppa OOB:ch:%lu,lun:%lu,blk:%lu,pg:%lu,pl:%lu,sec:%lu\n",
                 ch, lun, blk, pg, pln, sec);
         return -1;
