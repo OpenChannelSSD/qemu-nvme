@@ -867,6 +867,36 @@ static inline int lnvm_meta_blk_set_erased(NvmeNamespace *ns, LnvmCtrl *ln,
     return 0;
 }
 
+static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t ppa,
+                                        uint32_t *state)
+{
+    FILE *meta_fp = ln->metadata;
+    size_t tgt_oob_len = ln->params.sos;
+    size_t int_oob_len = ln->int_meta_size;
+    size_t meta_len = tgt_oob_len + int_oob_len;
+    uint32_t seek = ppa * meta_len;
+    size_t ret;
+
+    if (fseek(meta_fp, seek, SEEK_SET)) {
+        perror("lnvm_meta_state_get: fseek");
+        printf("Could not seek to offset in metadata file\n");
+        return -1;
+    }
+
+    ret = fread(state, int_oob_len, 1, meta_fp);
+    if (ret != 1) {
+        if (errno == EAGAIN) {
+            printf("lnvm_meta_state_get: Why is this not an error?\n");
+            return 0;
+        }
+        perror("lnvm_meta_state_get: fread");
+        printf("lnvm_meta_state_get: ppa(%lu), ret(%lu)\n", ppa, ret);
+        return -1;
+    }
+
+    return 0;
+}
+
 static inline int lnvm_meta_state_set_written(LnvmCtrl *ln, uint64_t ppa)
 {
     FILE *meta_fp = ln->metadata;
@@ -916,36 +946,6 @@ static inline int lnvm_meta_state_set_written(LnvmCtrl *ln, uint64_t ppa)
     if (fflush(meta_fp)) {
         perror("_set_written_state: fflush");
         printf("_set_written_state: Could not write to metadata file\n");
-        return -1;
-    }
-
-    return 0;
-}
-
-static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t ppa,
-                                        uint32_t *state)
-{
-    FILE *meta_fp = ln->metadata;
-    size_t tgt_oob_len = ln->params.sos;
-    size_t int_oob_len = ln->int_meta_size;
-    size_t meta_len = tgt_oob_len + int_oob_len;
-    uint32_t seek = ppa * meta_len;
-    size_t ret;
-
-    if (fseek(meta_fp, seek, SEEK_SET)) {
-        perror("lnvm_meta_state_get: fseek");
-        printf("Could not seek to offset in metadata file\n");
-        return -1;
-    }
-
-    ret = fread(state, int_oob_len, 1, meta_fp);
-    if (ret != 1) {
-        if (errno == EAGAIN) {
-            printf("lnvm_meta_state_get: Why is this not an error?\n");
-            return 0;
-        }
-        perror("lnvm_meta_state_get: fread");
-        printf("lnvm_meta_state_get: ppa(%lu), ret(%lu)\n", ppa, ret);
         return -1;
     }
 
