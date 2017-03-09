@@ -922,9 +922,6 @@ static inline int lnvm_meta_state_set_written(LnvmCtrl *ln, uint64_t ppa)
     return 0;
 }
 
-/**
- * Retrieve the state of sector at the given ppa and store it in state
- */
 static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t ppa,
                                         uint32_t *state)
 {
