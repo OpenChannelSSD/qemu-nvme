@@ -647,17 +647,23 @@ static void nvme_rw_cb(void *opaque, int ret)
         if (lnvm_dev(n)) {
             if (lnvm_hybrid_dev(n) && req->is_write) {
                 if (req->nlb > 1) {
+                /* NOTE: This causes segfault with rpc
                     int i;
                     for (i = 0; i < req->nlb; i++)
                         ns->tbl[req->lnvm_slba + i] =
                                                     req->lnvm_ppa_list[i];
+
+                */
                 } else {
                     ns->tbl[req->lnvm_slba] = req->slba;
                 }
             }
 
+            /*
+             * NOTE: This causes segfault without rpc
             if (!lnvm_hybrid_dev(n))
                 g_free(req->lnvm_ppa_list);
+            */
         }
     }
 
