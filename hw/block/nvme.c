@@ -1600,13 +1600,13 @@ static uint16_t lnvm_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     NvmeNamespace *ns;
     LnvmCtrl *ln;
     LnvmIdGroup *c;
-    LnvmBbtSet *bbtbl = (LnvmBbtSet*)cmd;
+    LnvmBbtSet *bbt_cmd = (LnvmBbtSet*)cmd;
 
-    uint32_t nsid = le32_to_cpu(bbtbl->nsid);
-    uint64_t prp2 = le64_to_cpu(bbtbl->prp2);
-    uint32_t nlb  = le16_to_cpu(bbtbl->nlb) + 1;
-    uint64_t spba = le64_to_cpu(bbtbl->spba);
-    uint8_t value = bbtbl->value;
+    uint32_t nsid = le32_to_cpu(bbt_cmd->nsid);
+    uint64_t prp2 = le64_to_cpu(bbt_cmd->prp2);
+    uint32_t nlb  = le16_to_cpu(bbt_cmd->nlb) + 1;
+    uint64_t spba = le64_to_cpu(bbt_cmd->spba);
+    uint8_t value = bbt_cmd->value;
     uint32_t nr_blocks;
     uint64_t pos;
     int i;
