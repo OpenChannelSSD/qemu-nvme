@@ -991,7 +991,7 @@ static inline int lnvm_meta_state_set_written(LnvmCtrl *ln, uint64_t ppa)
     }
 
     if (state != LNVM_SEC_ERASED) {
-        printf("_set_written: Invalid block state(%d)\n", state);
+        printf("_set_written: Invalid block state(%02x)\n", state);
         return -1;
     }
 
@@ -1163,6 +1163,8 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             }
 
             if (state != LNVM_SEC_WRITTEN) {
+                printf("lnvm_rw: failed: block is not written, state(%02x)\n",
+                                                                        state);
                 bitmap_set(&cqe->res64, i, n_pages - i);
                 req->status = 0x42ff;
 
