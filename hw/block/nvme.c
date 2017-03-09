@@ -714,8 +714,8 @@ static void print_ppa(LnvmCtrl *ln, uint64_t ppa)
     uint64_t pln = (ppa & ln->ppaf.pln_mask) >> ln->ppaf.pln_offset;
     uint64_t sec = (ppa & ln->ppaf.sec_mask) >> ln->ppaf.sec_offset;
 
-    printf("ppa:ch:%lu,lun:%lu,blk:%lu,pg:%lu,pl:%lu,sec:%lu\n",
-                                            ch, lun, blk, pg, pln, sec);
+    printf("ppa: ch(%lu), lun(%lu), blk(%lu), pg(%lu), pl(%lu), sec(%lu)\n",
+                                                    ch, lun, blk, pg, pln, sec);
 }
 
 struct lnvm_metadata_format {
