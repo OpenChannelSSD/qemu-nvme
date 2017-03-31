@@ -938,7 +938,6 @@ static inline int lnvm_meta_blk_set_erased(NvmeNamespace *ns, LnvmCtrl *ln,
             }
             if (cur_state == LNVM_SEC_ERASED) {
                 printf("_erase_meta: failed -- already erased\n");
-                return -1;
             }
 
             for (pg = 0; pg < ln->params.pgs_per_blk; ++pg) {
