@@ -845,7 +845,7 @@ static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t ppa,
     ret = fread(state, int_oob_len, 1, meta_fp);
     if (ret != 1) {
         if (errno == EAGAIN) {
-            printf("lnvm_meta_state_get: Why is this not an error?\n");
+            //printf("lnvm_meta_state_get: Why is this not an error?\n");
             return 0;
         }
         perror("lnvm_meta_state_get: fread");
