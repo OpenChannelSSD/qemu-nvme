@@ -873,9 +873,8 @@ static inline int lnvm_meta_blk_set_erased(NvmeNamespace *ns, LnvmCtrl *ln,
 
     uint64_t mask = 0;
 
-    if (ln->strict && nr_ppas != c->num_pln) {
-        printf("_erase_meta: Strict erase not performed to all planes (%d)\n",
-                                                                    nr_ppas);
+    if (ln->strict && nr_ppas != 1) {
+        printf("_erase_meta: Erase command unfolds on device\n");
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
