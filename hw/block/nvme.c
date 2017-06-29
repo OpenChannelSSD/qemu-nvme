@@ -3044,7 +3044,7 @@ static void lnvm_init_id_ctrl(LnvmCtrl *ln)
     */
 
     /* new format: CHANNEL | LUN | BLOCK | PAGE | PLANE | SECTOR */
-    int num_blk = 64;
+
     ln_id->ppaf.sect_offset = 0;
     ln_id->ppaf.sect_len = qemu_fls(cpu_to_le16(ln->params.sec_per_pg) - 1);
     ln_id->ppaf.pln_offset = ln_id->ppaf.sect_offset + ln_id->ppaf.sect_len;
@@ -3052,7 +3052,7 @@ static void lnvm_init_id_ctrl(LnvmCtrl *ln)
     ln_id->ppaf.pg_offset = ln_id->ppaf.pln_offset + ln_id->ppaf.pln_len;
     ln_id->ppaf.pg_len = qemu_fls(cpu_to_le16(ln->params.pgs_per_blk) - 1);
     ln_id->ppaf.blk_offset = ln_id->ppaf.pg_offset + ln_id->ppaf.pg_len;
-    ln_id->ppaf.blk_len = qemu_fls(cpu_to_le16(num_blk) - 1);
+    ln_id->ppaf.blk_len = qemu_fls(cpu_to_le16(ln->id_ctrl.groups[0].num_blk) - 1);
     ln_id->ppaf.lun_offset = ln_id->ppaf.blk_offset + ln_id->ppaf.blk_len;
     ln_id->ppaf.lun_len = qemu_fls(cpu_to_le16(ln->params.num_lun) - 1);
     ln_id->ppaf.ch_offset = ln_id->ppaf.lun_offset + ln_id->ppaf.lun_len;
@@ -3242,6 +3242,7 @@ static int lnvm_init(NvmeCtrl *n)
         ln->ppaf.ch_offset = ln->ppaf.lun_offset + ln->id_ctrl.ppaf.lun_len;
         */
 
+	lnvm_init_id_ctrl(ln);
         /* Address format: CH | LUN | BLK | PG | PL | SEC */
         ln->ppaf.sec_offset = ln->id_ctrl.ppaf.sect_offset;
         ln->ppaf.pln_offset = ln->id_ctrl.ppaf.pln_offset;
@@ -3352,10 +3353,9 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     NVME_CAP_SET_DSTRD(n->bar.cap, n->db_stride);
     NVME_CAP_SET_NSSRS(n->bar.cap, 0);
     NVME_CAP_SET_CSS(n->bar.cap, 1);
-    if (lnvm_dev(n)) {
+    if (lnvm_dev(n))
         NVME_CAP_SET_LNVM(n->bar.cap, 1);
-        lnvm_init_id_ctrl(&n->lnvm_ctrl);
-    }
+
     NVME_CAP_SET_MPSMIN(n->bar.cap, n->mpsmin);
     NVME_CAP_SET_MPSMAX(n->bar.cap, n->mpsmax);
 
