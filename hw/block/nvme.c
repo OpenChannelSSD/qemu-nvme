@@ -659,11 +659,9 @@ static void nvme_rw_cb(void *opaque, int ret)
                 }
             }
 
-            /*
-             * NOTE: This causes segfault without rpc
-            if (!lnvm_hybrid_dev(n))
+            /* TODO: Check this on spec 2.0 format */
+            if (!lnvm_hybrid_dev(n) && req->lnvm_ppa_list)
                 g_free(req->lnvm_ppa_list);
-            */
         }
     }
 
