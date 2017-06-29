@@ -1537,6 +1537,9 @@ static int lnvm_bbt_load(NvmeNamespace *ns, uint32_t nr_blocks,
     FILE *fp;
     size_t ret;
 
+    if (!ln->bbt_fname)
+        return 0;
+
     fp = fopen(ln->bbt_fname, "r");
     if (!fp) {
         memcpy(blks, ns->bbtbl, nr_blocks);
