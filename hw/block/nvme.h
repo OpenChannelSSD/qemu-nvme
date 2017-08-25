@@ -258,14 +258,10 @@ enum NvmeIoCommands {
     NVME_CMD_COMPARE            = 0x05,
     NVME_CMD_WRITE_ZEROS        = 0x08,
     NVME_CMD_DSM                = 0x09,
-};
 
-enum LnvmDmCommands {
-    LNVM_CMD_HYBRID_WRITE      = 0x81,
-    LNVM_CMD_HYBRID_READ       = 0x02,
-    LNVM_CMD_PHYS_WRITE        = 0x91,
-    LNVM_CMD_PHYS_READ         = 0x92,
-    LNVM_CMD_ERASE_ASYNC        = 0x90,
+    LNVM_CMD_VECT_ERASE_ASYNC  = 0x90,
+    LNVM_CMD_VECT_WRITE        = 0x91,
+    LNVM_CMD_VECT_READ         = 0x92,
 };
 
 enum LnvmMetaState {
@@ -665,73 +661,62 @@ typedef struct NvmeIdCtrl {
     uint8_t     vs[1024];
 } NvmeIdCtrl;
 
-typedef struct LnvmIdAddrFormat {
-    uint8_t  ch_offset;
-    uint8_t  ch_len;
-    uint8_t  lun_offset;
-    uint8_t  lun_len;
-    uint8_t  pln_offset;
-    uint8_t  pln_len;
-    uint8_t  blk_offset;
-    uint8_t  blk_len;
-    uint8_t  pg_offset;
-    uint8_t  pg_len;
-    uint8_t  sect_offset;
-    uint8_t  sect_len;
-    uint8_t  res[4];
-} QEMU_PACKED LnvmIdAddrFormat;
-
 typedef struct LnvmAddrF {
 	uint64_t	ch_mask;
 	uint64_t	lun_mask;
-	uint64_t	pln_mask;
-	uint64_t	blk_mask;
-	uint64_t	pg_mask;
+	uint64_t	chk_mask;
 	uint64_t	sec_mask;
 	uint8_t	ch_offset;
 	uint8_t	lun_offset;
-	uint8_t	pln_offset;
-	uint8_t	blk_offset;
-	uint8_t	pg_offset;
-	uint8_t	sec_offset;
+	uint8_t	chk_offset;
+    uint8_t sec_offset;
 } LnvmAddrF;
 
-typedef struct LnvmIdGroup {
-    uint8_t    mtype;
-    uint8_t    fmtype;
-    uint16_t   res16;
-    uint8_t    num_ch;
-    uint8_t    num_lun;
-    uint8_t    num_pln;
-    uint8_t    rsvd1;
-    uint16_t   num_blk;
-    uint16_t   num_pg;
-    uint16_t   fpg_sz;
-    uint16_t   csecs;
-    uint16_t   sos;
-    uint16_t   rsvd2;
-    uint32_t   trdt;
-    uint32_t   trdm;
-    uint32_t   tprt;
-    uint32_t   tprm;
-    uint32_t   tbet;
-    uint32_t   tbem;
-    uint32_t   mpos;
-    uint32_t   mccap;
-    uint16_t   cpar;
-    uint8_t    res[906];
-} QEMU_PACKED LnvmIdGroup;
+typedef struct Lnvm_IdGeo {
+	uint16_t        num_ch;
+	uint16_t        num_lun;
+	uint32_t        num_chk;
+	uint32_t        clba;
+	uint32_t        csecs;
+	uint32_t        sos;
+	uint8_t         resv[44];
+} Lnvm_IdGeo;
+
+typedef struct Lnvm_IdWrt {
+	uint32_t        mw_min;
+	uint32_t        mw_opt;
+	uint32_t        mw_cunits;
+	uint8_t         resv[52];
+} Lnvm_IdWrt;
+
+typedef struct Lnvm_IdPerf {
+	uint32_t        trdt;
+	uint32_t        trdm;
+	uint32_t        tprt;
+	uint32_t        tprm;
+	uint32_t        tbet;
+	uint32_t        tbem;
+	uint8_t			resv[40];
+} Lnvm_IdPerf;
+
+typedef struct LnvmIdLBAF {
+	uint8_t         ch_len;
+	uint8_t         lun_len;
+	uint8_t         chk_len;
+	uint8_t         sec_len;
+    uint8_t         resv[4];
+} QEMU_PACKED LnvmIdLBAF;
 
 typedef struct LnvmIdCtrl {
-    uint8_t       ver_id;
-    uint8_t       vmnt;
-    uint8_t       cgrps;
-    uint8_t       res;
-    uint32_t      cap;
-    uint32_t      dom;
-    struct LnvmIdAddrFormat ppaf;
-    uint8_t       resv[228];
-    LnvmIdGroup   groups[4];
+	uint8_t         major_verid;
+    uint8_t         minor_verid;
+	uint8_t         resv[6];
+	LnvmIdLBAF      lbaf;
+	uint32_t			mccap;
+	uint8_t			resv3[44];
+	Lnvm_IdGeo	    geo;
+	Lnvm_IdWrt	    wrt;
+	Lnvm_IdPerf	    perf;
 } QEMU_PACKED LnvmIdCtrl;
 
 typedef struct LnvmBbt {
@@ -751,40 +736,22 @@ typedef struct LnvmBbt {
 /* Parameters passed on to QEMU to configure the characteristics of the drive */
 typedef struct LnvmParams {
     /* configurable device characteristics */
-    uint16_t    pgs_per_blk;
-    uint16_t    sec_size;
-    uint8_t     sec_per_pg;
+    uint32_t    sec_size;
     uint8_t     max_sec_per_rq;
     /* configurable parameters for LnvmIdGroup */
-    uint8_t     mtype;
-    uint8_t     fmtype;
-    uint8_t     num_ch;
-    uint8_t     num_pln;
-    uint8_t     num_lun;
+    uint32_t    num_ch;
+    uint32_t    num_lun;
+    uint32_t    num_chk;
     uint16_t    sos;
     /* calculated values */
-    uint32_t    sec_per_pl;
-    uint32_t    sec_per_blk;
+    uint32_t    sec_per_chk;
     uint32_t    sec_per_lun;
     uint32_t    total_secs;
     /* Calculated unit values for ordering */
-    uint32_t    pl_units;
-    uint32_t    pg_units;
-    uint32_t    blk_units;
+    uint32_t    chk_units;
     uint32_t    lun_units;
     uint32_t    total_units;
 } QEMU_PACKED LnvmParams;
-
-enum LnvmPmode {
-    LNVM_PMODE_SNGL = 0x0,      ///< Single-plane
-    LNVM_PMODE_DUAL = 0x1,      ///< Dual-plane (NVM_IO_DUAL_ACCESS)
-    LNVM_PMODE_QUAD = 0x2       ///< Quad-plane (NVM_IO_QUAD_ACCESS)
-};
-
-enum LnvmResponsibility {
-    LNVM_RSP_L2P       = 1 << 0,
-    LNVM_RSP_ECC       = 1 << 1,
-};
 
 enum NvmeIdCtrlOacs {
     NVME_OACS_SECURITY  = 1 << 0,
@@ -920,9 +887,6 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeSmartLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrl) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNs) != 4096);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmIdCtrl) != 4096);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmIdAddrFormat) != 16);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmIdGroup) != 960);
 }
 
 typedef struct NvmeAsyncEvent {
@@ -1032,8 +996,7 @@ typedef struct NvmeNamespace {
 typedef struct LnvmCtrl {
     LnvmParams     params;
     LnvmIdCtrl     id_ctrl;
-    LnvmAddrF      ppaf;
-    uint8_t        read_l2p_tbl;
+    LnvmAddrF      lbaf;
     uint8_t        bbt_gen_freq;
     uint8_t        bbt_auto_gen;
     uint8_t        meta_auto_gen;
