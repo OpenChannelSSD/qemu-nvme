@@ -683,40 +683,40 @@ typedef struct Lnvm_IdGeo {
 } Lnvm_IdGeo;
 
 typedef struct Lnvm_IdWrt {
-	uint32_t        mw_min;
-	uint32_t        mw_opt;
-	uint32_t        mw_cunits;
-	uint8_t         resv[52];
+  uint32_t        mw_min;
+  uint32_t        mw_opt;
+  uint32_t        mw_cunits;
+  uint8_t         resv[52];
 } Lnvm_IdWrt;
 
 typedef struct Lnvm_IdPerf {
-	uint32_t        trdt;
-	uint32_t        trdm;
-	uint32_t        tprt;
-	uint32_t        tprm;
-	uint32_t        tbet;
-	uint32_t        tbem;
-	uint8_t			resv[40];
+  uint32_t        trdt;
+  uint32_t        trdm;
+  uint32_t        tprt;
+  uint32_t        tprm;
+  uint32_t        tbet;
+  uint32_t        tbem;
+  uint8_t			resv[40];
 } Lnvm_IdPerf;
 
 typedef struct LnvmIdLBAF {
-	uint8_t         ch_len;
-	uint8_t         lun_len;
-	uint8_t         chk_len;
-	uint8_t         sec_len;
-    uint8_t         resv[4];
+  uint8_t         ch_len;
+  uint8_t         lun_len;
+  uint8_t         chk_len;
+  uint8_t         sec_len;
+  uint8_t         resv[4];
 } QEMU_PACKED LnvmIdLBAF;
 
 typedef struct LnvmIdCtrl {
-	uint8_t         major_verid;
-    uint8_t         minor_verid;
-	uint8_t         resv[6];
-	LnvmIdLBAF      lbaf;
-	uint32_t			mccap;
-	uint8_t			resv3[44];
-	Lnvm_IdGeo	    geo;
-	Lnvm_IdWrt	    wrt;
-	Lnvm_IdPerf	    perf;
+  uint8_t         major_verid;
+  uint8_t         minor_verid;
+  uint8_t         resv[6];
+  LnvmIdLBAF      lbaf;
+  uint32_t			mccap;
+  uint8_t			resv3[44];
+  Lnvm_IdGeo	    geo;
+  Lnvm_IdWrt	    wrt;
+  Lnvm_IdPerf	    perf;
 } QEMU_PACKED LnvmIdCtrl;
 
 typedef struct LnvmBbt {

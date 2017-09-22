@@ -2812,9 +2812,9 @@ static int lnvm_init(NvmeCtrl *n)
         ln->id_ctrl.major_verid = 2;
 
         geo = &ln->id_ctrl.geo;
-        geo->num_ch = cpu_to_le32(ln->params.num_ch);
-        geo->num_lun = cpu_to_le32(ln->params.num_lun);
-        geo->num_chk = cpu_to_le32(chnl_chks / (geo->num_lun));
+        geo->num_ch = cpu_to_le16(ln->params.num_ch);
+        geo->num_lun = cpu_to_le16(ln->params.num_lun);
+        geo->num_chk = cpu_to_le32(chnl_chks / ln->params.num_lun);
         geo->clba = cpu_to_le32(ln->params.sec_per_chk);
         geo->csecs = cpu_to_le32(ln->params.sec_size);
         geo->sos = cpu_to_le32(ln->params.sos);
@@ -2865,12 +2865,10 @@ static int lnvm_init(NvmeCtrl *n)
         ln->params.total_units = ln->params.lun_units * geo->num_lun;
 
 
-        /* new format: CHANNEL | LUN | BLOCK | PAGE | PLANE | SECTOR */
-
-        ln->id_ctrl.lbaf.sec_len = qemu_fls(cpu_to_le32(ln->params.sec_per_chk) - 1);
-        ln->id_ctrl.lbaf.chk_len = qemu_fls(cpu_to_le32(ln->params.chk_units) - 1);
-        ln->id_ctrl.lbaf.lun_len = qemu_fls(cpu_to_le32(ln->params.num_lun) - 1);
-        ln->id_ctrl.lbaf.ch_len = qemu_fls(cpu_to_le32(ln->params.num_ch) - 1);
+        ln->id_ctrl.lbaf.sec_len = qemu_fls(ln->params.sec_per_chk - 1);
+        ln->id_ctrl.lbaf.chk_len = qemu_fls((chnl_chks / ln->params.num_lun) - 1);
+        ln->id_ctrl.lbaf.lun_len = qemu_fls(ln->params.num_lun - 1);
+        ln->id_ctrl.lbaf.ch_len = qemu_fls(ln->params.num_ch - 1);
 
         /* Address format: CH | LUN | CHK | SEC */
         ln->lbaf.sec_offset = 0;
@@ -3126,7 +3124,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("lver", NvmeCtrl, lnvm_ctrl.id_ctrl.major_verid, 0),
     DEFINE_PROP_UINT32("lsec_size", NvmeCtrl, lnvm_ctrl.params.sec_size, 4096),
-    DEFINE_PROP_UINT32("lsecs_per_chk", NvmeCtrl, lnvm_ctrl.params.sec_per_chk, 65536),
+    DEFINE_PROP_UINT32("lsecs_per_chk", NvmeCtrl, lnvm_ctrl.params.sec_per_chk, 4096),
     DEFINE_PROP_UINT8("lmax_sec_per_rq", NvmeCtrl, lnvm_ctrl.params.max_sec_per_rq, 64),
     DEFINE_PROP_UINT32("lnum_ch", NvmeCtrl, lnvm_ctrl.params.num_ch, 1),
     DEFINE_PROP_UINT32("lnum_lun", NvmeCtrl, lnvm_ctrl.params.num_lun, 1),
