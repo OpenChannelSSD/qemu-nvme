@@ -61,7 +61,7 @@
  *  lver=<int>         : version of the LightNVM standard to use, 
  *                     : Default:0 to disable 2 for enabling 2.0
  *  lsec_size=<int>    : Controller Sector Size. Default: 4096
- *  lsecs_per_cnk=<int> : Number of sectors in a chunk. Default: 65536
+ *  lsecs_per_chk=<int> : Number of sectors in a chunk. Default: 65536
  *  lmax_sec_per_rq=<int> : Maximum number of sectors per I/O request. Default: 64
  *  lnum_ch=<int>      : Number of controller channels. Default: 1
  *  lnum_lun=<int>     : Number of LUNs per channel, Default:1
