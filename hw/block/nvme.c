@@ -994,10 +994,10 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
         err = NVME_INVALID_FIELD | NVME_DNR;
         goto fail_free_msl;
-    } else if ((is_write) && (n_pages < wrt->mw_min)) {
+    } else if ((is_write) && (n_pages < wrt->ws_min)) {
         printf("lnvm_rw: I/O does not respect device write constrains."
                 "Sectors send: (%u). Min:%u sectors required\n",
-                                        n_pages, wrt->mw_min);
+                                        n_pages, wrt->ws_min);
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                 offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
         err = NVME_INVALID_FIELD | NVME_DNR;
@@ -2820,8 +2820,8 @@ static int lnvm_init(NvmeCtrl *n)
         geo->sos = cpu_to_le32(ln->params.sos);
 
         wrt = &ln->id_ctrl.wrt;
-        wrt->mw_min = cpu_to_le32(4); /* Minimum write size is 16k */
-        wrt->mw_opt = cpu_to_le32(8); /* Optimal write size is 32k */
+        wrt->ws_min = cpu_to_le32(4); /* Minimum write size is 16k */
+        wrt->ws_opt = cpu_to_le32(8); /* Optimal write size is 32k */
         wrt->mw_cunits = cpu_to_le32(32); /* Cache 32 pages in host */
 
         perf = &ln->id_ctrl.perf;
