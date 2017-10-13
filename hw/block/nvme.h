@@ -662,29 +662,29 @@ typedef struct NvmeIdCtrl {
 } NvmeIdCtrl;
 
 typedef struct LnvmAddrF {
-	uint64_t	ch_mask;
-	uint64_t	lun_mask;
-	uint64_t	chk_mask;
-	uint64_t	sec_mask;
-	uint8_t	ch_offset;
-	uint8_t	lun_offset;
-	uint8_t	chk_offset;
-    uint8_t sec_offset;
+    uint64_t    ch_mask;
+    uint64_t    lun_mask;
+    uint64_t    chk_mask;
+    uint64_t    sec_mask;
+    uint8_t     ch_offset;
+    uint8_t     lun_offset;
+    uint8_t     chk_offset;
+    uint8_t     sec_offset;
 } LnvmAddrF;
 
 typedef struct Lnvm_IdGeo {
-	uint16_t        num_ch;
-	uint16_t        num_lun;
-	uint32_t        num_chk;
-	uint32_t        clba;
-	uint32_t        csecs;
-	uint32_t        sos;
-	uint8_t         resv[44];
+    uint16_t        num_ch;
+    uint16_t        num_lun;
+    uint32_t        num_chk;
+    uint32_t        clba;
+    uint32_t        csecs;
+    uint32_t        sos;
+    uint8_t         resv[44];
 } Lnvm_IdGeo;
 
 typedef struct Lnvm_IdWrt {
-  uint32_t        mw_min;
-  uint32_t        mw_opt;
+  uint32_t        ws_min;
+  uint32_t        ws_opt;
   uint32_t        mw_cunits;
   uint8_t         resv[52];
 } Lnvm_IdWrt;
@@ -696,7 +696,7 @@ typedef struct Lnvm_IdPerf {
   uint32_t        tprm;
   uint32_t        tbet;
   uint32_t        tbem;
-  uint8_t			resv[40];
+  uint8_t       resv[40];
 } Lnvm_IdPerf;
 
 typedef struct LnvmIdLBAF {
@@ -712,11 +712,11 @@ typedef struct LnvmIdCtrl {
   uint8_t         minor_verid;
   uint8_t         resv[6];
   LnvmIdLBAF      lbaf;
-  uint32_t			mccap;
-  uint8_t			resv3[44];
-  Lnvm_IdGeo	    geo;
-  Lnvm_IdWrt	    wrt;
-  Lnvm_IdPerf	    perf;
+  uint32_t        mccap;
+  uint8_t         resv3[44];
+  Lnvm_IdGeo      geo;
+  Lnvm_IdWrt      wrt;
+  Lnvm_IdPerf     perf;
 } QEMU_PACKED LnvmIdCtrl;
 
 typedef struct LnvmBbt {
@@ -741,12 +741,15 @@ typedef struct LnvmParams {
     /* configurable parameters for LnvmIdGroup */
     uint32_t    num_ch;
     uint32_t    num_lun;
-    uint32_t    num_chk;
+    uint32_t    sec_per_chk;
+    uint8_t     ws_min;
+    uint8_t     ws_opt;
+    uint8_t     mw_cunits;
     uint16_t    sos;
     /* calculated values */
-    uint32_t    sec_per_chk;
     uint32_t    sec_per_lun;
     uint32_t    total_secs;
+    uint32_t    num_chk;
     /* Calculated unit values for ordering */
     uint32_t    chk_units;
     uint32_t    lun_units;

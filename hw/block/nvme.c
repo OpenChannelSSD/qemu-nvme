@@ -58,10 +58,13 @@
  *  oacs=<oacs>      : Optional Admin command support, Default:Format
  *  cmbsz=<cmbsz>    : Controller Memory Buffer CMBSZ register, Default:0
  *  cmbloc=<cmbloc>  : Controller Memory Buffer CMBLOC register, Default:0
- *  lver=<int>         : version of the LightNVM standard to use, 
+ *  lver=<int>         : version of the LightNVM standard to use,
  *                     : Default:0 to disable 2 for enabling 2.0
+ *  lsec_per_chk=<int> : Number of sectors in a chunk. Default: 65536
  *  lsec_size=<int>    : Controller Sector Size. Default: 4096
- *  lsecs_per_chk=<int> : Number of sectors in a chunk. Default: 65536
+ *  lws_min=<int>      : Mininum write size for device in sectors. Default: 4
+ *  lws_opt=<int>      : Optimal write size for device in sectors. Default: 8
+ *  lmw_cunits=<int>   : Number of written sectors required in chunk before read. Default: 32
  *  lmax_sec_per_rq=<int> : Maximum number of sectors per I/O request. Default: 64
  *  lnum_ch=<int>      : Number of controller channels. Default: 1
  *  lnum_lun=<int>     : Number of LUNs per channel, Default:1
@@ -2820,9 +2823,9 @@ static int lnvm_init(NvmeCtrl *n)
         geo->sos = cpu_to_le32(ln->params.sos);
 
         wrt = &ln->id_ctrl.wrt;
-        wrt->ws_min = cpu_to_le32(4); /* Minimum write size is 16k */
-        wrt->ws_opt = cpu_to_le32(8); /* Optimal write size is 32k */
-        wrt->mw_cunits = cpu_to_le32(32); /* Cache 32 pages in host */
+        wrt->ws_min = cpu_to_le32(ln->params.ws_min);
+        wrt->ws_opt = cpu_to_le32(ln->params.ws_opt);
+        wrt->mw_cunits = cpu_to_le32(ln->params.mw_cunits);
 
         perf = &ln->id_ctrl.perf;
         perf->trdt = cpu_to_le32(70000);
@@ -3126,6 +3129,9 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT32("lsec_size", NvmeCtrl, lnvm_ctrl.params.sec_size, 4096),
     DEFINE_PROP_UINT32("lsecs_per_chk", NvmeCtrl, lnvm_ctrl.params.sec_per_chk, 4096),
     DEFINE_PROP_UINT8("lmax_sec_per_rq", NvmeCtrl, lnvm_ctrl.params.max_sec_per_rq, 64),
+    DEFINE_PROP_UINT8("lws_min", NvmeCtrl, lnvm_ctrl.params.ws_min, 4),
+    DEFINE_PROP_UINT8("lws_opt", NvmeCtrl, lnvm_ctrl.params.ws_opt, 8),
+    DEFINE_PROP_UINT8("lmw_cunits", NvmeCtrl, lnvm_ctrl.params.mw_cunits, 32),
     DEFINE_PROP_UINT32("lnum_ch", NvmeCtrl, lnvm_ctrl.params.num_ch, 1),
     DEFINE_PROP_UINT32("lnum_lun", NvmeCtrl, lnvm_ctrl.params.num_lun, 1),
     DEFINE_PROP_STRING("lbbtable", NvmeCtrl, lnvm_ctrl.bbt_fname),
