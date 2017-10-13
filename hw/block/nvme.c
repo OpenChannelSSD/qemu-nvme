@@ -2844,9 +2844,10 @@ static int lnvm_init(NvmeCtrl *n)
         if (ret)
             return ret;
 
-        /* We devide the address space linearly to be able to fit into the 4KB
-         * sectors that the nvme driver divides the backend file. We do the
-         * division in LUNS - CHUNKS - SECTORS.
+        /* We divide the address space linearly to be able to fit into the 4KB
+         * sectors in which the nvme driver divides the backend file. We do the
+         * division in LUNS - CHUNKS - SECTORS. For now, we assume a single
+         * channel.
          *
          * For example 4 LUN configuration is layed out as:
          * -------------- -------------- -------------- --------------
