@@ -299,6 +299,29 @@ typedef struct LnvmBbtGet {
   uint32_t rsvd4[4]; // DW15, 14, 13, 12
 } LnvmBbtGet;
 
+enum {
+    LNVM_CHUNK_FREE     = 1 << 0,
+    LNVM_CHUNK_CLOSED   = 1 << 1,
+    LNVM_CHUNK_OPEN     = 1 << 2,
+    LNVM_CHUNK_BAD      = 1 << 3,
+};
+
+enum {
+    LNVM_CHUNK_TYPE_SEQ = 1 << 0,
+    LNVM_CHUNK_TYPE_RAN = 1 << 1,
+    LNVM_CHUNK_TYPE_SRK = 1 << 4,
+};
+
+typedef struct LnvmChunkState {
+  uint8_t state;
+  uint8_t type;
+  uint8_t wear_index;
+  uint8_t rsvd[5];
+  uint64_t slba;
+  uint64_t cnlb;
+  uint64_t wp;
+} LnvmCS;
+
 typedef struct LnvmBbtSet {
   uint8_t opcode;
   uint8_t flags;
@@ -763,6 +786,10 @@ typedef struct LnvmParams {
     uint8_t     num_lun;
     uint16_t    sos;
     /* calculated values */
+    uint32_t    nr_blks;
+    uint32_t    blk_per_lun;
+    uint32_t    blk_per_ch;
+
     uint32_t    sec_per_pl;
     uint32_t    sec_per_blk;
     uint32_t    sec_per_lun;
@@ -784,6 +811,10 @@ enum LnvmPmode {
 enum LnvmResponsibility {
     LNVM_RSP_L2P       = 1 << 0,
     LNVM_RSP_ECC       = 1 << 1,
+};
+
+enum LnvmLogPage {
+    LNVM_REPORT_CHUNK = 0xCA,
 };
 
 enum NvmeIdCtrlOacs {
@@ -1022,7 +1053,7 @@ typedef struct NvmeNamespace {
     uint64_t        tbl_dsk_start_offset;
     uint32_t        tbl_entries;
     uint64_t        *tbl;
-    uint8_t        *bbtbl;
+    LnvmCS          *chunk_meta;
 } NvmeNamespace;
 
 #define TYPE_NVME "nvme"
@@ -1035,12 +1066,12 @@ typedef struct LnvmCtrl {
     LnvmAddrF      ppaf;
     uint8_t        read_l2p_tbl;
     uint8_t        bbt_gen_freq;
-    uint8_t        bbt_auto_gen;
     uint8_t        meta_auto_gen;
     uint8_t        debug;
     uint8_t        strict;
-    char           *bbt_fname;
+    uint8_t        state_auto_gen;
     char           *meta_fname;
+    char           *chunk_fname;
     FILE           *bbt_fp;
     uint32_t       err_write;
     uint32_t       n_err_write;

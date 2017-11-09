@@ -71,11 +71,8 @@
  *  lnum_pln=<int>     : Number of flash planes per LUN. Supported single (1),
  *  dual (2) and quad (4) plane modes. Defult: 1
  *  lreadl2ptbl=<int>  : Load logical to physical table. 1: yes, 0: no. Default: 1
- *  lbbtable=<file>    : Load bad block table from file destination (Provide path
- *  to file. If no file is provided a bad block table will be generated. Look
- *  at lbbfrequency. Default: Null (no file).
- *  lbbfrequency:<int> : Bad block frequency for generating bad block table. If
- *  no frequency is provided LNVM_DEFAULT_BB_FREQ will be used.
+ *  lchunktable=<file> : Load state table from file destination (Provide path
+ *  to file. If no file is provided a state table will be generated.
  *  lmetadata=<file>   : Load metadata from file destination
  *  lmetasize=<int>    : LightNVM metadata (OOB) size. Default: 16
  *  lb_err_write       : First ppa to inject write error. Default: 0 (disabled)
@@ -742,11 +739,19 @@ struct lnvm_tgt_meta {
  * NOTE: Ensure that `lnvm_set_written_state` has been called prior to this
  * function to ensure correct file offset of ln->metadata?
  */
-static inline int lnvm_meta_write(LnvmCtrl *ln, void *meta)
+static inline int lnvm_meta_write(LnvmCtrl *ln, uint64_t ppa, void *meta)
 {
     FILE *meta_fp = ln->metadata;
     size_t tgt_oob_len = ln->params.sos;
+    size_t int_oob_len = ln->int_meta_size;
+    size_t meta_len = tgt_oob_len + int_oob_len;
+    uint32_t seek = ppa * meta_len;
     size_t ret;
+
+    if (fseek(meta_fp, seek, SEEK_SET)) {
+        perror("_set_written: fseek");
+        return -1;
+    }
 
     ret = fwrite(meta, tgt_oob_len, 1, meta_fp);
     if (ret != 1) {
@@ -768,11 +773,20 @@ static inline int lnvm_meta_write(LnvmCtrl *ln, void *meta)
  * NOTE: Ensure that `lnvm_meta_state_get` has been called to have the correct
  * file offset in ln->metadata?
  */
-static inline int lnvm_meta_read(LnvmCtrl *ln, void *meta)
+static inline int lnvm_meta_read(LnvmCtrl *ln, uint64_t ppa, void *meta)
 {
     FILE *meta_fp = ln->metadata;
     size_t tgt_oob_len = ln->params.sos;
+    size_t int_oob_len = ln->int_meta_size;
+    size_t meta_len = tgt_oob_len + int_oob_len;
+    uint32_t seek = ppa * meta_len;
     size_t ret;
+
+    if (fseek(meta_fp, seek, SEEK_SET)) {
+        perror("lnvm_meta_state_get: fseek");
+        printf("Could not seek to offset in metadata file\n");
+        return -1;
+    }
 
     ret = fread(meta, tgt_oob_len, 1, meta_fp);
     if (ret != 1) {
@@ -854,166 +868,114 @@ static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t ppa,
     return 0;
 }
 
-/**
- * Similar to lnvm_meta_set_written, however, this function sets not a single
- * but multiple ppas, also checks if a block is marked bad
- */
-static inline int lnvm_meta_blk_set_erased(NvmeNamespace *ns, LnvmCtrl *ln,
-                                  uint64_t *psl, int nr_ppas, int pmode)
+static inline int64_t lnvm_chunk_pos_from_ppa(LnvmCtrl *ln, uint64_t ppa)
 {
-    struct lnvm_metadata_format meta = {.state = LNVM_SEC_ERASED};
-    LnvmIdGroup *c = &ln->id_ctrl.groups[0];
-    FILE *meta_fp = ln->metadata;
-    size_t tgt_oob_len = ln->params.sos;
-    size_t int_oob_len = ln->int_meta_size;
-    size_t meta_len = tgt_oob_len + int_oob_len;
-    int i;
+    uint64_t ch = (ppa & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
+    uint64_t lun = (ppa & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
+    uint64_t blk = (ppa & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
+    uint64_t pos = blk;
 
-    uint64_t mask = 0;
+    pos += lun * ln->params.blk_per_lun;
+    pos += ch * ln->params.blk_per_ch;
 
-    if (ln->strict && nr_ppas != 1) {
-        printf("_erase_meta: Erase command unfolds on device\n");
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    switch(pmode) {     // Check that pmode is supported
-    case LNVM_PMODE_DUAL:
-        if (c->num_pln != 2) {
-            printf("_erase_meta: Unsupported pmode(%d) for num_pln(%d)\n",
-                   pmode, c->num_pln);
-            return -1;
-        }
-        break;
-    case LNVM_PMODE_QUAD:
-        if (c->num_pln != 4) {
-            printf("_erase_meta: Unsupported pmode(%d) for num_pln(%d)\n",
-                   pmode, c->num_pln);
-            return -1;
-        }
-        break;
-    case LNVM_PMODE_SNGL:
-        break;
-    default:
-        printf("_erase_meta: Unsupported pmode(%d)\n", pmode);
-    }
-
-    mask |= ln->ppaf.ch_mask;   // Construct mask
-    mask |= ln->ppaf.lun_mask;
-    mask |= ln->ppaf.blk_mask;
-
-    for (i = 0; i < nr_ppas; ++i) {
-        uint64_t ppa = psl[i];
-        size_t pl_bgn, pl_end;
-        size_t pl;
-
-        if (pmode) {
-            pl_bgn = 0;
-            pl_end = c->num_pln - 1;
-        } else {
-            pl_bgn = (ppa & ln->ppaf.pln_mask) >> ln->ppaf.pln_offset;
-            pl_end = pl_bgn;
-        }
-
-        for (pl = pl_bgn; pl <= pl_end; ++pl) {
-            uint32_t cur_state = 0;
-            uint64_t ppa_pl;
-            size_t pg, sec;
-
-            ppa_pl = ppa & mask;
-            ppa_pl |= pl << ln->ppaf.pln_offset;
-
-            // Check bad-block-table to error on bad blocks
-            if (ns->bbtbl[lnvm_bbt_pos_get(ln, ppa_pl)]) {
-                printf("_erase_meta: failed -- block is bad\n");
-                return -1;
-            }
-
-            // Check state of first sector to error on double-erase
-            if (lnvm_meta_state_get(ln, ppa_pl, &cur_state)) {
-                printf("_erase_meta: failed: reading current state\n");
-                return -1;
-            }
-            if (cur_state == LNVM_SEC_ERASED) {
-                printf("_erase_meta: failed -- already erased\n");
-            }
-
-            for (pg = 0; pg < ln->params.pgs_per_blk; ++pg) {
-                for (sec = 0; sec < ln->params.sec_per_pg; ++sec) {
-                    uint64_t ppa_sec, off;
-
-                    ppa_sec = ppa & mask;
-                    ppa_sec |= pg << ln->ppaf.pg_offset;
-                    ppa_sec |= pl << ln->ppaf.pln_offset;
-                    ppa_sec |= sec << ln->ppaf.sec_offset;
-
-                    off = lnvm_ppa_to_off(ln, ppa_sec);
-
-                    if (fseek(meta_fp, off * meta_len, SEEK_SET)) {
-                        perror("_set_erased: fseek");
-                        return -1;
-                    }
-
-                    if (fwrite(&meta, meta_len, 1, meta_fp) != 1) {
-                        perror("_erase_meta: fwrite");
-                        printf("_erase_meta: ppa(%016lx), off(%lu)\n", ppa_sec,
-                                                                        off);
-                    }
-                }
-            }
-        }
-    }
-
-    if (fflush(meta_fp)) {
-        perror("_erase_meta: fflush");
+    if (pos > ln->params.nr_blks) {
+        printf("lnvm: chunk meta OOB: ch:%lu, lun:%lu, blk:%lu\n", ch, lun, blk);
         return -1;
     }
 
-    return 0;
+    return pos;
 }
 
-static inline int lnvm_meta_state_set_written(LnvmCtrl *ln, uint64_t ppa)
+static inline int32_t lnvm_chunk_sec_from_ppa(LnvmCtrl *ln, uint64_t ppa)
 {
-    FILE *meta_fp = ln->metadata;
-    size_t tgt_oob_len = ln->params.sos;
-    size_t int_oob_len = ln->int_meta_size;
-    size_t meta_len = tgt_oob_len + int_oob_len;
-    uint32_t seek = ppa * meta_len;
-    uint32_t state;
-    size_t ret;
+    uint64_t pg = (ppa & ln->ppaf.pg_mask) >> ln->ppaf.pg_offset;
+    uint64_t pln = (ppa & ln->ppaf.pln_mask) >> ln->ppaf.pln_offset;
+    uint64_t sec = (ppa & ln->ppaf.sec_mask) >> ln->ppaf.sec_offset;
+    uint64_t pos = sec;
 
-    if (lnvm_meta_state_get(ln, ppa, &state)) {
-        printf("_set_written: lnvm_meta_state_get failed\n");
+    pos += pln * ln->params.pl_units;
+    pos += pg * ln->params.pg_units;
+
+    if (pos > ln->params.sec_per_blk) {
+        uint64_t ch = (ppa & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
+        uint64_t lun = (ppa & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
+        uint64_t blk = (ppa & ln->ppaf.blk_mask) >> ln->ppaf.blk_offset;
+
+        printf("lnvm: chunk OOB: ch:%lu, lun:%lu, blk:%lu, pg:%lu, pl:%lu, sec:%lu\n",
+                                ch, lun, blk, pg, pln, sec);
         return -1;
     }
 
-    if (state != LNVM_SEC_ERASED) {
-        printf("_set_written: Invalid block state(%02x)\n", state);
-        return -1;
-    }
+    return pos;
+}
 
-    if (fseek(meta_fp, seek, SEEK_SET)) {
-        perror("_set_written: fseek");
-        return -1;
-    }
+static inline int lnvm_check_state_table(NvmeNamespace *ns, LnvmCtrl *ln,
+                                         uint64_t ppa)
+{
+    LnvmCS chunk_meta;
 
-    state = LNVM_SEC_WRITTEN;
-    ret = fwrite(&state, int_oob_len, 1, meta_fp);
-    if (ret != 1) {
-        perror("_set_written: fwrite");
-        return -1;
-    }
-
-    if (fflush(meta_fp)) {
-        perror("_set_written: fflush");
-        return -1;
-    }
-
-    return 0;
+    chunk_meta = ns->chunk_meta[lnvm_chunk_pos_from_ppa(ln, ppa)];
+    return chunk_meta.state & LNVM_CHUNK_CLOSED;
 }
 
 static inline void *lnvm_meta_index(LnvmCtrl *ln, void *meta, uint32_t index)
 {
     return meta + (index * ln->params.sos);
+}
+
+static LnvmCS *lnvm_chunk_get_state(NvmeNamespace *ns, LnvmCtrl *ln,
+                                    uint64_t ppa)
+{
+    return &ns->chunk_meta[lnvm_chunk_pos_from_ppa(ln, ppa)];
+}
+
+static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t ppa)
+{
+    LnvmCS *chunk_meta;
+
+    chunk_meta = lnvm_chunk_get_state(ns, ln, ppa);
+
+    if (!(chunk_meta->state & LNVM_CHUNK_CLOSED) ||
+                      (chunk_meta->state & (LNVM_CHUNK_OPEN ||
+                                            LNVM_CHUNK_BAD ||
+                                            LNVM_CHUNK_FREE))) {
+        printf("nvme: free: bad chunk state (%d)\n", chunk_meta->state);
+        return -1;
+    }
+
+    chunk_meta->state = LNVM_CHUNK_FREE;
+    chunk_meta->wear_index++;
+    chunk_meta->wp = 0;
+
+    //TODO: Should we save to file here?
+
+    return 0;
+}
+
+static int lnvm_chunk_advance_wp(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t ppa)
+{
+    LnvmCS *chunk_meta;
+
+    chunk_meta = lnvm_chunk_get_state(ns, ln, ppa);
+
+    if (chunk_meta->state & LNVM_CHUNK_FREE) {
+        chunk_meta->state &= ~LNVM_CHUNK_FREE;
+        chunk_meta->state |= LNVM_CHUNK_OPEN;
+    }
+
+    if (!(chunk_meta->state & LNVM_CHUNK_OPEN)) {
+        printf("nvme: advance: bad chunk state (state:%d, wp:%lu)\n",
+                                        chunk_meta->state, chunk_meta->wp);
+        return -1;
+    }
+
+    chunk_meta->wp++;
+    if (chunk_meta->wp == ln->params.sec_per_blk) {
+        chunk_meta->state &= ~LNVM_CHUNK_OPEN;
+        chunk_meta->state |= LNVM_CHUNK_CLOSED;
+    }
+
+    return 0;
 }
 
 static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -1028,7 +990,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     void *msl;
     uint64_t sppa;
     uint64_t eppa;
-    uint64_t ppa;
+    uint64_t ppa_off;
     uint64_t *sector_list;
     uint64_t *aio_sector_list;
     uint32_t nlb  = le16_to_cpu(lrw->nlb) + 1;
@@ -1127,38 +1089,43 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      * handlers to write/read data to/from the right physical sector
      */
     for (i = 0; i < n_pages; i++) {
-        ppa = lnvm_ppa_to_off(ln, psl[i]);
-        sector_list[i] = ppa;
+        ppa_off = lnvm_ppa_to_off(ln, psl[i]);
+        sector_list[i] = ppa_off;
         aio_sector_list[i] =
-                    ns->start_block + (ppa << (data_shift - BDRV_SECTOR_BITS));
+                ns->start_block + (ppa_off << (data_shift - BDRV_SECTOR_BITS));
 
         if (is_write) {
-            if (!lnvm_hybrid_dev(n) && lnvm_meta_state_set_written(ln, ppa)) {
-                printf("lnvm_rw: set written status failed\n");
+            if (!lnvm_hybrid_dev(n) && lnvm_chunk_advance_wp(ns, ln, psl[i])) {
+                printf("lnvm_rw: advance chunk wp failed\n");
                 print_ppa(ln, psl[i]);
                 err = NVME_INVALID_FIELD | NVME_DNR;
                 goto fail_free_msl;
             }
 
             if (meta) {
-                if (lnvm_meta_write(ln, lnvm_meta_index(ln, msl, i))) {
+                if (lnvm_meta_write(ln, ppa_off, lnvm_meta_index(ln, msl, i))) {
                     printf("lnvm_rw: write metadata failed\n");
                     print_ppa(ln, psl[i]);
                     err = NVME_INVALID_FIELD | NVME_DNR;
                     goto fail_free_msl;
                 }
             }
-        } else if (!is_write){
-            uint32_t state;
+        } else if (!is_write) {
+            LnvmCS *chunk_meta;
+            uint64_t write_wp;
 
-            if (!lnvm_hybrid_dev(n) && lnvm_meta_state_get(ln, ppa, &state)) {
-                printf("lnvm_rw: read status failed\n");
+            chunk_meta = lnvm_chunk_get_state(ns, ln, psl[i]);
+
+            //TODO: return predefined data on bad state and do ws_min check
+            if (chunk_meta->state & (LNVM_CHUNK_BAD || LNVM_CHUNK_FREE)) {
+                printf("lnvm_rw: read status failed (%d)\n", chunk_meta->state);
                 print_ppa(ln, psl[i]);
                 err = NVME_INVALID_FIELD | NVME_DNR;
                 goto fail_free_msl;
             }
 
-            if (state != LNVM_SEC_WRITTEN) {
+            write_wp = lnvm_chunk_sec_from_ppa(ln, psl[i]);
+            if (write_wp > chunk_meta->wp) {
                 bitmap_set(&cqe->res64, i, n_pages - i);
                 req->status = 0x42ff;
 
@@ -1171,7 +1138,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             }
 
             if (meta) {
-                if (lnvm_meta_read(ln, lnvm_meta_index(ln, msl, i))) {
+                if (lnvm_meta_read(ln, ppa_off, lnvm_meta_index(ln, msl, i))) {
                     printf("lnvm_rw: read metadata failed\n");
                     print_ppa(ln, psl[i]);
                     err = NVME_INVALID_FIELD | NVME_DNR;
@@ -1525,55 +1492,82 @@ static uint16_t lnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     return NVME_SUCCESS;
 }
 
-/* TODO: Implement for different bad block table formats. It depends on flash
- * vendors.
- */
-static int lnvm_bbt_load(NvmeNamespace *ns, uint32_t nr_blocks,
-                                             uint32_t offset, uint8_t *blks)
+static void lnvm_chunk_meta_init(LnvmCtrl *ln, LnvmCS *chunk_meta,
+                                 uint32_t nr_chunks)
+{
+    int i;
+
+    for (i = 0; i < nr_chunks; i++) {
+        chunk_meta[i].state = LNVM_CHUNK_CLOSED;
+        chunk_meta[i].type = LNVM_CHUNK_TYPE_SEQ;
+        chunk_meta[i].wear_index = 0;
+        chunk_meta[i].slba = i * ln->params.sec_per_blk;
+        chunk_meta[i].cnlb = ln->params.sec_per_blk;
+        chunk_meta[i].wp = ln->params.sec_per_blk;
+    }
+}
+
+static void lnvm_chunk_meta_save(NvmeNamespace *ns)
+{
+    LnvmCtrl *ln = &ns->ctrl->lnvm_ctrl;
+    LnvmIdGroup *c = &ln->id_ctrl.groups[0];
+    LnvmCS *chunk_meta = ns->chunk_meta;
+    uint32_t nr_chunks = c->num_blk;
+    FILE *fp;
+
+    if (!ln->chunk_fname) {
+        printf("nvme: could not save chunk metadata. File do not exist\n");
+        return;
+    }
+
+    fp = fopen(ln->chunk_fname, "w");
+    if (!fp) {
+        printf("nvme: could not save chunk metadata. Cannot open file\n");
+        return;
+    }
+
+    if (fwrite(chunk_meta, sizeof(LnvmCS), nr_chunks, fp) != nr_chunks) {
+        printf("nvme: could not save chunk metadata. Cannot write to file\n");
+        return;
+    }
+
+    fclose(fp);
+    free(ns->chunk_meta);
+}
+
+static int lnvm_chunk_meta_load(NvmeNamespace *ns, uint32_t offset,
+                                uint32_t nr_chunks)
 {
     struct LnvmCtrl *ln = &ns->ctrl->lnvm_ctrl;
+    LnvmCS *chunk_meta = ns->chunk_meta;
     FILE *fp;
     size_t ret;
 
-    if (!ln->bbt_fname)
-        return 0;
-
-    fp = fopen(ln->bbt_fname, "r");
-    if (!fp) {
-        memcpy(blks, ns->bbtbl, nr_blocks);
+    if (!ln->chunk_fname) {
+        lnvm_chunk_meta_init(ln, chunk_meta, nr_chunks);
         return 0;
     }
 
-    if (fseek(fp, offset, SEEK_SET)) {
-        printf("Could not read bb file\n");
+    fp = fopen(ln->chunk_fname, "r");
+    if (!fp) {
+        printf("nvme: could not open chunk metadata\n");
         return -1;
     }
 
-    ret = fread(blks, 1, nr_blocks, fp);
-    if (ret != nr_blocks) {
-        printf("Could not read bb file\n");
+    if (fseek(fp, offset, SEEK_SET)) {
+        printf("nvme: could not seek chunk metadata\n");
+        return -1;
+    }
+
+    ret = fread(chunk_meta, sizeof(LnvmCS), nr_chunks, fp);
+    if (ret != nr_chunks) {
+        printf("nvme: could not read chunk metadata\n");
         return -1;
     }
 
     fclose(fp);
     return 0;
 }
-
-/*static int lnvm_gen_bbtbl(LnvmCtrl *ln, uint32_t nr_blocks, uint8_t *blks)
-{
-    uint32_t i;
-
-    if (!ln->bbt_gen_freq)
-        return 0;
-
-    for (i = 0; i < nr_blocks; i++) {
-        if ((i % ln->bbt_gen_freq) == 0) {
-            blks[i] = 0x1;
-        }
-    }
-
-    return 0;
-}*/
 
 static uint16_t lnvm_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
@@ -1585,8 +1579,6 @@ static uint16_t lnvm_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t nsid = le32_to_cpu(bbt_cmd->nsid);
     uint64_t prp1 = le64_to_cpu(bbt_cmd->prp1);
     uint64_t prp2 = le64_to_cpu(bbt_cmd->prp2);
-    uint64_t ppa, lun;
-    uint64_t offset;
     uint32_t nr_blocks;
     LnvmBbt *bbt;
     int ret = NVME_SUCCESS;
@@ -1599,9 +1591,6 @@ static uint16_t lnvm_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     ln = &n->lnvm_ctrl;
     c = &ln->id_ctrl.groups[0];
     nr_blocks = c->num_blk * c->num_pln;
-
-    ppa = le64_to_cpu(bbt_cmd->spba);
-    lun = (ppa & ln->ppaf.lun_mask) >> ln->ppaf.lun_offset;
 
     bbt = calloc(sizeof(LnvmBbt) + nr_blocks, 1);
     if (!bbt) {
@@ -1617,11 +1606,7 @@ static uint16_t lnvm_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     bbt->verid = cpu_to_le16(1);
     bbt->tblks = cpu_to_le32(nr_blocks);
 
-    offset = lun * (c->num_blk * c->num_pln);
-    ret = lnvm_bbt_load(ns, nr_blocks, offset, bbt->blk);
-    if (ret)
-        goto clean;
-
+    /* While implementing report chunk, return clean bb table */
     if (nvme_dma_read_prp(n, (uint8_t*)bbt, sizeof(LnvmBbt) + nr_blocks, prp1, prp2)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid,
             NVME_INVALID_FIELD, (uint16_t)1234, 0, ns->id);
@@ -1629,12 +1614,13 @@ static uint16_t lnvm_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-clean:
     free(bbt);
 out:
     return ret; /*TODO: STUB*/
 }
 
+#if 0
+// JAVIER: TOGO
 static uint16_t lnvm_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     NvmeNamespace *ns;
@@ -1681,10 +1667,10 @@ static uint16_t lnvm_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
     }
 
-    fp = fopen(ln->bbt_fname, "w+");
+    fp = fopen(ln->state_fname, "w+");
     if (!fp) {
         error_report("nvme: could not save bad block table file: %s\n",
-                                                         ln->bbt_fname);
+                                                         ln->state_fname);
         return -EEXIST;
     }
 
@@ -1696,6 +1682,7 @@ static uint16_t lnvm_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
     return NVME_SUCCESS;
 }
+#endif
 
 static int lnvm_flush_tbls(NvmeCtrl *n)
 {
@@ -1751,7 +1738,7 @@ static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t spba = le64_to_cpu(dm->spba);
     uint64_t psl[ln->params.max_sec_per_rq];
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
-    int pmode = le16_to_cpu(dm->control) & (LNVM_PMODE_DUAL|LNVM_PMODE_QUAD);
+    int i;
 
     if (nlb > 1) {
         nvme_addr_read(n, spba, (void *)psl, nlb * sizeof(void *));
@@ -1765,12 +1752,14 @@ static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->nlb = nlb;
     req->ns = ns;
 
-    if (lnvm_meta_blk_set_erased(ns, ln, psl, nlb, pmode)) {
-        printf("lnvm_erase_async: failed: ");
-        print_ppa(ln, psl[0]);
-        req->status = 0x40ff;
+    for (i = 0; i < nlb; i++) {
+        if (lnvm_chunk_set_free(ns, ln, psl[i])) {
+            printf("lnvm_erase_async: failed: ");
+            print_ppa(ln, psl[0]);
+            req->status = 0x40ff;
 
-        return NVME_INVALID_FIELD | NVME_DNR;
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
     }
 
     erase_io_complete_cb(req, 0);
@@ -2300,6 +2289,21 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     return nvme_dma_read_prp(n, (uint8_t *)&smart, trans_len, prp1, prp2);
 }
 
+static uint16_t lnvm_report_chunk(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
+{
+    uint64_t prp1 = le64_to_cpu(cmd->prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->prp2);
+    uint32_t trans_len;
+
+    trans_len = MIN(sizeof(*n->elpes) * n->elpe, buf_len);
+    n->aer_mask &= ~(1 << NVME_AER_TYPE_ERROR);
+    if (!QSIMPLEQ_EMPTY(&n->aer_queue))
+        timer_mod(n->aer_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 10000);
+
+    //JAVIER: TODO
+    return nvme_dma_read_prp(n, 0, trans_len, prp1, prp2);
+}
+
 static uint16_t nvme_get_log(NvmeCtrl *n, NvmeCmd *cmd)
 {
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
@@ -2313,6 +2317,8 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeCmd *cmd)
         return nvme_smart_info(n, cmd, len);
     case NVME_LOG_FW_SLOT_INFO:
         return nvme_fw_log_info(n, cmd, len);
+    case LNVM_REPORT_CHUNK:
+        return lnvm_report_chunk(n, cmd, len);
     default:
         return NVME_INVALID_LOG_ID | NVME_DNR;
     }
@@ -2600,8 +2606,10 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             return lnvm_get_l2p_tbl(n, cmd, req);
     case LNVM_ADM_CMD_GET_BB_TBL:
             return lnvm_bbt_get(n, cmd, req);
+            /* printf("nvme: get bad block table deprecated\n"); */
     case LNVM_ADM_CMD_SET_BB_TBL:
-            return lnvm_bbt_set(n, cmd, req);
+            /* return lnvm_bbt_set(n, cmd, req); */
+            printf("nvme: set bad block table deprecated\n");
     case NVME_ADM_CMD_ACTIVATE_FW:
     case NVME_ADM_CMD_DOWNLOAD_FW:
     case NVME_ADM_CMD_SECURITY_SEND:
@@ -3135,7 +3143,6 @@ static int lnvm_init(NvmeCtrl *n)
     NvmeNamespace *ns;
     unsigned int i;
     uint64_t chnl_blks;
-    uint32_t nr_total_blocks;
     int ret = 0;
 
     ln = &n->lnvm_ctrl;
@@ -3188,15 +3195,8 @@ static int lnvm_init(NvmeCtrl *n)
                 return -EINVAL;
         }
 
-        nr_total_blocks = c->num_blk * c->num_pln * c->num_lun;
         c->cpar = cpu_to_le16(0);
         c->mccap = 1;
-        ns->bbtbl = qemu_blockalign(blk_bs(n->conf.blk), nr_total_blocks);
-        memset(ns->bbtbl, 0, nr_total_blocks);
-
-        ret = (lnvm_bbt_load(ns, nr_total_blocks, 0, ns->bbtbl));
-        if (ret)
-            return ret;
 
         /* We devide the address space linearly to be able to fit into the 4KB
          * sectors that the nvme driver divides the backend file. We do the
@@ -3219,6 +3219,10 @@ static int lnvm_init(NvmeCtrl *n)
          */
 
         /* calculated values */
+        ln->params.nr_blks = c->num_blk * c->num_lun;
+        ln->params.blk_per_lun = c->num_blk;
+        ln->params.blk_per_ch = c->num_blk * (c->num_lun / c->num_ch);
+
         ln->params.sec_per_pl = ln->params.sec_per_pg * c->num_pln;
         ln->params.sec_per_blk = ln->params.sec_per_pl * ln->params.pgs_per_blk;
         ln->params.sec_per_lun = ln->params.sec_per_blk * c->num_blk;
@@ -3231,16 +3235,7 @@ static int lnvm_init(NvmeCtrl *n)
         ln->params.lun_units = ln->params.blk_units * c->num_blk;
         ln->params.total_units = ln->params.lun_units * c->num_lun;
 
-        /* previous address format 
-        ln->ppaf.blk_offset = 0;
-        ln->ppaf.pg_offset = ln->id_ctrl.ppaf.blk_len;
-        ln->ppaf.sec_offset = ln->ppaf.pg_offset + ln->id_ctrl.ppaf.pg_len;
-        ln->ppaf.pln_offset = ln->ppaf.sec_offset + ln->id_ctrl.ppaf.sect_len;
-        ln->ppaf.lun_offset = ln->ppaf.pln_offset + ln->id_ctrl.ppaf.pln_len;
-        ln->ppaf.ch_offset = ln->ppaf.lun_offset + ln->id_ctrl.ppaf.lun_len;
-        */
-
-	lnvm_init_id_ctrl(ln);
+        lnvm_init_id_ctrl(ln);
         /* Address format: CH | LUN | BLK | PG | PL | SEC */
         ln->ppaf.sec_offset = ln->id_ctrl.ppaf.sect_offset;
         ln->ppaf.pln_offset = ln->id_ctrl.ppaf.pln_offset;
@@ -3262,16 +3257,25 @@ static int lnvm_init(NvmeCtrl *n)
                                                         ln->ppaf.lun_offset;
         ln->ppaf.ch_mask = ((1 << ln->id_ctrl.ppaf.ch_len) - 1) <<
                                                         ln->ppaf.ch_offset;
+
+        ns->chunk_meta = g_malloc0(ln->params.nr_blks * sizeof(LnvmCS));
+        if (!ns->chunk_meta)
+            return -ENOMEM;
+
+        memset(ns->chunk_meta, 0, ln->params.nr_blks * sizeof(LnvmCS));
+        ret = lnvm_chunk_meta_load(ns, 0, ln->params.nr_blks);
+        if (ret)
+            return ret;
     }
 
-    if (!ln->bbt_fname) {       // Default bbt file
-        ln->bbt_auto_gen = 1;
-        ln->bbt_fname = malloc(13);
-        if (!ln->bbt_fname)
+    if (!ln->chunk_fname) {
+        ln->state_auto_gen = 1;
+        ln->chunk_fname = malloc(13);
+        if (!ln->chunk_fname)
             return -ENOMEM;
-        strncpy(ln->bbt_fname, "bbtable.qemu\0", 13);
+        strncpy(ln->chunk_fname, "statetable.qemu\0", 13);
     } else {
-        ln->bbt_auto_gen = 0;
+        ln->state_auto_gen = 0;
     }
 
     ret = lnvm_init_meta(ln);   // Initialize metadata file
@@ -3437,9 +3441,13 @@ static int nvme_init(PCIDevice *pci_dev)
 static void lnvm_exit(NvmeCtrl *n)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
+    int i;
 
-    if (ln->bbt_auto_gen)
-        free(ln->bbt_fname);
+    for (i = 0; i < n->num_namespaces; i++)
+        lnvm_chunk_meta_save(&n->namespaces[i]);
+
+    if (ln->state_auto_gen)
+        free(ln->chunk_fname);
     if (ln->meta_auto_gen)
         free(ln->meta_fname);
     fclose(n->lnvm_ctrl.bbt_fp);
@@ -3515,10 +3523,9 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("lnum_lun", NvmeCtrl, lnvm_ctrl.params.num_lun, 1),
     DEFINE_PROP_UINT8("lnum_pln", NvmeCtrl, lnvm_ctrl.params.num_pln, 1),
     DEFINE_PROP_UINT8("lreadl2ptbl", NvmeCtrl, lnvm_ctrl.read_l2p_tbl, 1),
-    DEFINE_PROP_STRING("lbbtable", NvmeCtrl, lnvm_ctrl.bbt_fname),
+    DEFINE_PROP_STRING("lchunkable", NvmeCtrl, lnvm_ctrl.chunk_fname),
     DEFINE_PROP_STRING("lmetadata", NvmeCtrl, lnvm_ctrl.meta_fname),
     DEFINE_PROP_UINT16("lmetasize", NvmeCtrl, lnvm_ctrl.params.sos, 16),
-    DEFINE_PROP_UINT8("lbbfrequency", NvmeCtrl, lnvm_ctrl.bbt_gen_freq, 0),
     DEFINE_PROP_UINT32("lb_err_write", NvmeCtrl, lnvm_ctrl.err_write, 0),
     DEFINE_PROP_UINT32("ln_err_write", NvmeCtrl, lnvm_ctrl.n_err_write, 0),
     DEFINE_PROP_UINT8("ldebug", NvmeCtrl, lnvm_ctrl.debug, 0),
