@@ -706,6 +706,39 @@ static uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return 0;
 }
 
+static uint16_t lnvm_rw_check_req(NvmeCtrl *n, LnvmCtrl *ln, NvmeNamespace *ns,
+        NvmeCmd *cmd, NvmeRequest *req, uint64_t sppa, uint64_t eppa,
+        uint32_t nlb, uint16_t ctrl, uint64_t data_size, uint64_t meta_size,
+        uint16_t is_write)
+{
+    LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
+
+    if (sppa == -1 || eppa == -1) {
+        printf("lnvm_rw: EINVAL\n");
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (nlb > ln->params.max_sec_per_rq) {
+        printf("lnvm_rw: npages too large (%u). Max:%u supported\n",
+                                        nlb, ln->params.max_sec_per_rq);
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
+                offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    } else if ((is_write) && (!ln->id_ctrl.dom)
+                                && (nlb < ln->params.sec_per_pl)) {
+        printf("lnvm_rw: I/O does not respect device write constrains."
+                "Sectors send: (%u). Min:%u sectors required\n",
+                                        nlb, ln->params.sec_per_pl);
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
+                offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    /* Reuse check logic from nvme_rw */
+    return nvme_rw_check_req(n, ns, cmd, req, sppa, eppa, nlb, ctrl,
+                                                        data_size, meta_size);
+}
+
 static void print_ppa(LnvmCtrl *ln, uint64_t ppa)
 {
     uint64_t ch = (ppa & ln->ppaf.ch_mask) >> ln->ppaf.ch_offset;
@@ -1003,7 +1036,6 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
     uint64_t data_size = nlb << data_shift;
     uint64_t meta_size = nlb * ms;
-    uint32_t n_pages = data_size / ln->params.sec_size;
     uint16_t is_write = (lrw->opcode == LNVM_CMD_PHYS_WRITE ||
                                           lrw->opcode == LNVM_CMD_HYBRID_WRITE);
     uint16_t ctrl = 0;
@@ -1030,24 +1062,8 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         goto fail_free_aio_sector_list;
     }
 
-    if (n_pages > ln->params.max_sec_per_rq) {
-        printf("lnvm_rw: npages too large (%u). Max:%u supported\n",
-                                        n_pages, ln->params.max_sec_per_rq);
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
-        err = NVME_INVALID_FIELD | NVME_DNR;
-        goto fail_free_msl;
-    } else if ((is_write) && (!ln->id_ctrl.dom)
-                                && (n_pages < ln->params.sec_per_pl)) {
-        printf("lnvm_rw: I/O does not respect device write constrains."
-                "Sectors send: (%u). Min:%u sectors required\n",
-                                        n_pages, ln->params.sec_per_pl);
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
-        err = NVME_INVALID_FIELD | NVME_DNR;
-        goto fail_free_msl;
-    } else if (n_pages > 1) {
-            nvme_addr_read(n, spba, (void *)psl, n_pages * sizeof(void *));
+  else if (nlb > 1) {
+            nvme_addr_read(n, spba, (void *)psl, nlb * sizeof(void *));
     } else {
             psl[0] = spba;
     }
@@ -1066,29 +1082,23 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->is_write = is_write;
 
     sppa = lnvm_ppa_to_off(ln, psl[0]);
-    eppa = lnvm_ppa_to_off(ln, psl[n_pages - 1]);
-    if (sppa == -1 || eppa == -1) {
-        printf("lnvm_rw: EINVAL\n");
-        err = -EINVAL;
-        goto fail_free_msl;
-    }
+    eppa = lnvm_ppa_to_off(ln, psl[nlb - 1]);
 
-    /* Reuse check logic from nvme_rw */
-    err = nvme_rw_check_req(n, ns, cmd, req, sppa, eppa, nlb, ctrl,
-                                                        data_size, meta_size);
+    err = lnvm_rw_check_req(n, ln, ns, cmd, req, sppa, eppa, nlb, ctrl,
+                                                data_size, meta_size, is_write);
     if (err) {
         printf("lnvm_rw: failed nvme_rw_check\n");
         goto fail_free_msl;
     }
 
     if (meta && is_write)
-        nvme_addr_read(n, meta, (void *)msl, n_pages * ln->params.sos);
+        nvme_addr_read(n, meta, (void *)msl, nlb * ln->params.sos);
 
     /* If several LUNs are set up, the ppa list sent by the host will not be
      * sequential. In this case, we need to pass on the list of ppas to the dma
      * handlers to write/read data to/from the right physical sector
      */
-    for (i = 0; i < n_pages; i++) {
+    for (i = 0; i < nlb; i++) {
         ppa_off = lnvm_ppa_to_off(ln, psl[i]);
         sector_list[i] = ppa_off;
         aio_sector_list[i] =
@@ -1110,7 +1120,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                     goto fail_free_msl;
                 }
             }
-        } else if (!is_write) {
+        } else {
             LnvmCS *chunk_meta;
             uint64_t write_wp;
 
@@ -1126,13 +1136,12 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
             write_wp = lnvm_chunk_sec_from_ppa(ln, psl[i]);
             if (write_wp > chunk_meta->wp) {
-                bitmap_set(&cqe->res64, i, n_pages - i);
+                bitmap_set(&cqe->res64, i, nlb - i);
                 req->status = 0x42ff;
 
                 /* Copy what has been read from the OOB area */
                 if (meta)
-                    nvme_addr_write(n, meta, (void *)msl,
-                                                    n_pages * ln->params.sos);
+                    nvme_addr_write(n, meta, (void *)msl, nlb * ln->params.sos);
                 err = 0x42ff;
                 goto fail_free_msl;
             }
@@ -1149,13 +1158,13 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     if (meta && !is_write)
-        nvme_addr_write(n, meta, (void *)msl, n_pages * ln->params.sos);
+        nvme_addr_write(n, meta, (void *)msl, nlb * ln->params.sos);
 
     g_free(msl);
 
     if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         printf("lnvm_rw: malformed prp (size:%lu), w:%d\n", data_size, is_write);
-        for (i = 0; i < n_pages; i++)
+        for (i = 0; i < nlb; i++)
             print_ppa(ln, psl[i]);
 
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
