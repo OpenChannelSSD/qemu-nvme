@@ -975,7 +975,6 @@ typedef struct NvmeRequest {
     uint64_t                mptr;
     void                    *meta_buf;
     uint64_t                lnvm_slba;
-    uint64_t                *lnvm_ppa_list;
     NvmeCqe                 cqe;
     BlockAcctCookie         acct;
     QEMUSGList              qsg;
