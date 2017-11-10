@@ -617,16 +617,12 @@ static void nvme_rw_cb(void *opaque, int ret)
     } else {
         req->status = NVME_INTERNAL_DEV_ERROR;
     }
+
     if (req->status != NVME_SUCCESS) {
         nvme_set_error_page(n, sq->sqid, req->cqe.cid, req->status,
             offsetof(NvmeRwCmd, slba), req->slba, ns->id);
         if (req->is_write) {
             bitmap_clear(ns->util, req->slba, req->nlb);
-        }
-    } else {
-        if (lnvm_dev(n)) {
-            if (req->lnvm_ppa_list)
-                g_free(req->lnvm_ppa_list);
         }
     }
 
@@ -676,8 +672,7 @@ static uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
 static uint16_t lnvm_rw_check_req(NvmeCtrl *n, LnvmCtrl *ln, NvmeNamespace *ns,
         NvmeCmd *cmd, NvmeRequest *req, uint64_t sppa, uint64_t eppa,
-        uint32_t nlb, uint16_t ctrl, uint64_t data_size, uint64_t meta_size,
-        uint16_t is_write)
+        uint32_t nlb, uint16_t ctrl, uint64_t data_size, uint64_t meta_size)
 {
     Lnvm_IdWrt *wrt = &ln->id_ctrl.wrt;
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
@@ -693,7 +688,7 @@ static uint16_t lnvm_rw_check_req(NvmeCtrl *n, LnvmCtrl *ln, NvmeNamespace *ns,
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
                 offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
-    } else if ((is_write) && (nlb < wrt->ws_min)) {
+    } else if ((req->is_write) && (nlb < wrt->ws_min)) {
         printf("lnvm_rw: I/O does not respect device write constrains."
                 "Sectors send: (%u). Min:%u sectors required\n",
                                         nlb, wrt->ws_min);
@@ -716,6 +711,14 @@ static void print_ppa(LnvmCtrl *ln, uint64_t ppa)
 
     printf("ppa: ch(%lu), lun(%lu), chunk(%lu), sec(%lu)\n",
                                                     ch, lun, chk, sec);
+}
+
+static void print_rq(LnvmCtrl *ln, uint64_t *psl, uint32_t nlb)
+{
+    uint32_t i;
+
+    for (i = 0; i < nlb; i++)
+        print_ppa(ln, psl[i]);
 }
 
 struct lnvm_metadata_format {
@@ -964,48 +967,28 @@ static int lnvm_chunk_advance_wp(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t ppa)
     return 0;
 }
 
-static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
+static uint16_t lnvm_rw_free_rq(uint64_t *aio_sector_list)
 {
-    /* In the case of a LightNVM device. The slba is the logical address, while
-     * the actual physical block address is stored in Command Dword 11-10. */
-    LnvmCtrl *ln = &n->lnvm_ctrl;
-    LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
-    NvmeCqe *cqe = &req->cqe;
-    uint64_t psl[ln->params.max_sec_per_rq];
-    void *msl;
-    uint64_t sppa;
-    uint64_t eppa;
-    uint64_t ppa_off;
-    uint64_t *sector_list;
-    uint64_t *aio_sector_list;
-    uint32_t nlb  = le16_to_cpu(lrw->nlb) + 1;
-    uint64_t prp1 = le64_to_cpu(lrw->prp1);
-    uint64_t prp2 = le64_to_cpu(lrw->prp2);
-    uint64_t spba = le64_to_cpu(lrw->spba);
-    uint64_t meta = le64_to_cpu(lrw->metadata);
-    const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
-    const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
-    uint64_t data_size = nlb << data_shift;
-    uint64_t meta_size = nlb * ms;
-    uint16_t is_write = (lrw->opcode == LNVM_CMD_VECT_WRITE ||
-                                          lrw->opcode == NVME_CMD_WRITE);
-    uint16_t ctrl = 0;
-    uint16_t err;
-    uint8_t i;
+        g_free(aio_sector_list);
+        return NVME_INVALID_FIELD | NVME_DNR;
+}
 
-    sector_list = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
-    if (!sector_list) {
+static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
+                uint64_t **aio_sector_list, NvmeRequest *req,
+                uint64_t *psl, uint64_t data_shift, uint32_t nlb)
+{
+    LnvmCtrl *ln = &n->lnvm_ctrl;
+    NvmeCqe *cqe = &req->cqe;
+    void *msl;
+    uint64_t meta = le64_to_cpu(lrw->metadata);
+    uint64_t ppa_off;
+    uint8_t i;
+    uint16_t err;
+
+    *aio_sector_list = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
+    if (!*aio_sector_list) {
         printf("lnvm_rw: ENOMEM\n");
         return -ENOMEM;
-    }
-
-    aio_sector_list = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
-    if (!aio_sector_list) {
-        printf("lnvm_rw: ENOMEM\n");
-        err = -ENOMEM;
-        goto fail_free_sector_list;
     }
 
     msl = g_malloc0(ln->params.sos * ln->params.max_sec_per_rq);
@@ -1015,36 +998,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         goto fail_free_aio_sector_list;
     }
 
-    if (nlb > 1) {
-            nvme_addr_read(n, spba, (void *)psl, nlb * sizeof(void *));
-    } else {
-            psl[0] = spba;
-    }
-
-    if (spba == LNVM_PBA_UNMAPPED) {
-        printf("lnvm_rw: unmapped PBA\n");
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
-        err = NVME_INVALID_FIELD | NVME_DNR;
-        goto fail_free_msl;
-    }
-
-    ctrl = le16_to_cpu(lrw->control);
-    req->lnvm_ppa_list = sector_list;
-    req->lnvm_slba = le64_to_cpu(lrw->slba);
-    req->is_write = is_write;
-
-    sppa = lnvm_ppa_to_off(ln, psl[0]);
-    eppa = lnvm_ppa_to_off(ln, psl[nlb - 1]);
-
-    err = lnvm_rw_check_req(n, ln, ns, cmd, req, sppa, eppa, nlb, ctrl,
-                                                data_size, meta_size, is_write);
-    if (err) {
-        printf("lnvm_rw: failed nvme_rw_check\n");
-        goto fail_free_msl;
-    }
-
-    if (meta && is_write)
+    if (meta && req->is_write)
         nvme_addr_read(n, meta, (void *)msl, nlb * ln->params.sos);
 
     /* If several LUNs are set up, the ppa list sent by the host will not be
@@ -1053,11 +1007,10 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      */
     for (i = 0; i < nlb; i++) {
         ppa_off = lnvm_ppa_to_off(ln, psl[i]);
-        sector_list[i] = ppa_off;
-        aio_sector_list[i] =
+        (*aio_sector_list)[i] =
                 ns->start_block + (ppa_off << (data_shift - BDRV_SECTOR_BITS));
 
-        if (is_write) {
+        if (req->is_write) {
             if (lnvm_chunk_advance_wp(ns, ln, psl[i])) {
                 printf("lnvm_rw: advance chunk wp failed\n");
                 print_ppa(ln, psl[i]);
@@ -1110,20 +1063,84 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
          }
     }
 
-    if (meta && !is_write)
+    if (meta && !req->is_write)
         nvme_addr_write(n, meta, (void *)msl, nlb * ln->params.sos);
 
     g_free(msl);
+    return 0;
+
+fail_free_msl:
+        g_free(msl);
+fail_free_aio_sector_list:
+        g_free(*aio_sector_list);
+        return err;
+}
+
+
+static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+    NvmeRequest *req)
+{
+    /* In the case of a LightNVM device. The slba is the logical address, while
+     * the actual physical block address is stored in Command Dword 11-10. */
+    LnvmCtrl *ln = &n->lnvm_ctrl;
+    LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
+    uint64_t psl[ln->params.max_sec_per_rq];
+    uint64_t *aio_sector_list;
+    uint64_t sppa;
+    uint64_t eppa;
+    uint32_t nlb  = le16_to_cpu(lrw->nlb) + 1;
+    uint64_t prp1 = le64_to_cpu(lrw->prp1);
+    uint64_t prp2 = le64_to_cpu(lrw->prp2);
+    uint64_t spba = le64_to_cpu(lrw->spba);
+    const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
+    const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
+    uint64_t data_size = nlb << data_shift;
+    uint64_t meta_size = nlb * ms;
+    uint16_t is_write = (lrw->opcode == LNVM_CMD_VECT_WRITE ||
+                                          lrw->opcode == NVME_CMD_WRITE);
+    uint16_t ctrl = 0;
+    uint16_t err;
+
+    if (nlb > 1)
+        nvme_addr_read(n, spba, (void *)psl, nlb * sizeof(void *));
+    else
+            psl[0] = spba;
+
+    if (spba == LNVM_PBA_UNMAPPED) {
+        printf("lnvm_rw: unmapped PBA\n");
+        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
+                offsetof(LnvmRwCmd, spba), lrw->slba + nlb, ns->id);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    ctrl = le16_to_cpu(lrw->control);
+    req->lnvm_slba = le64_to_cpu(lrw->slba);
+    req->is_write = is_write;
+
+    sppa = lnvm_ppa_to_off(ln, psl[0]);
+    eppa = lnvm_ppa_to_off(ln, psl[nlb - 1]);
+
+    err = lnvm_rw_check_req(n, ln, ns, cmd, req, sppa, eppa, nlb, ctrl,
+                                                data_size, meta_size);
+    if (err) {
+        printf("lnvm_rw: failed nvme_rw_check\n");
+        return err;
+    }
+
+    err = lnvm_rw_setup_rq(n, ns, lrw, &aio_sector_list, req, psl,
+                                                            data_shift, nlb);
+    if (err)
+        return err;
 
     if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         printf("lnvm_rw: malformed prp (size:%lu), w:%d\n", data_size, is_write);
-        for (i = 0; i < nlb; i++)
-            print_ppa(ln, psl[i]);
+        print_rq(ln, psl, nlb);
 
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
             offsetof(NvmeRwCmd, prp1), 0, ns->id);
-        err = NVME_INVALID_FIELD | NVME_DNR;
-        goto fail_free_msl;
+
+        return lnvm_rw_free_rq(aio_sector_list);
     }
     req->slba = sppa;
     req->meta_size = 0;
@@ -1140,26 +1157,16 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             dma_blk_read_list(n->conf.blk, &req->qsg, aio_sector_list,
                                                             nvme_rw_cb, req);
     } else {
-        uint64_t aio_sector = aio_sector_list[0];
-
         req->aiocb = req->is_write ?
-            blk_aio_writev(n->conf.blk, aio_sector, &req->iov,
+            blk_aio_writev(n->conf.blk, aio_sector_list[0], &req->iov,
                                             data_size >> 9, nvme_rw_cb, req) :
-            blk_aio_readv(n->conf.blk, aio_sector, &req->iov,
+            blk_aio_readv(n->conf.blk, aio_sector_list[0], &req->iov,
                                             data_size >> 9, nvme_rw_cb, req);
 
         g_free(aio_sector_list);
     }
 
     return NVME_NO_COMPLETE;
-
-fail_free_msl:
-        g_free(msl);
-fail_free_aio_sector_list:
-        g_free(aio_sector_list);
-fail_free_sector_list:
-        g_free(sector_list);
-    return err;
 }
 
 static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
