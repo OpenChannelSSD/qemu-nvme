@@ -1570,121 +1570,6 @@ static int lnvm_chunk_meta_load(NvmeNamespace *ns, uint32_t offset,
     return 0;
 }
 
-static uint16_t lnvm_bbt_get(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
-{
-    NvmeNamespace *ns;
-    LnvmCtrl *ln;
-    LnvmIdGroup *c;
-    LnvmBbtGet *bbt_cmd = (LnvmBbtGet*)cmd;
-
-    uint32_t nsid = le32_to_cpu(bbt_cmd->nsid);
-    uint64_t prp1 = le64_to_cpu(bbt_cmd->prp1);
-    uint64_t prp2 = le64_to_cpu(bbt_cmd->prp2);
-    uint32_t nr_blocks;
-    LnvmBbt *bbt;
-    int ret = NVME_SUCCESS;
-
-    if (nsid == 0 || nsid > n->num_namespaces) {
-        return NVME_INVALID_NSID | NVME_DNR;
-    }
-
-    ns = &n->namespaces[nsid - 1];
-    ln = &n->lnvm_ctrl;
-    c = &ln->id_ctrl.groups[0];
-    nr_blocks = c->num_blk * c->num_pln;
-
-    bbt = calloc(sizeof(LnvmBbt) + nr_blocks, 1);
-    if (!bbt) {
-        error_report("lnvm: cannot allocate bitmap for bad block table\n");
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    bbt->tblid[0] = 'B';
-    bbt->tblid[1] = 'B';
-    bbt->tblid[2] = 'L';
-    bbt->tblid[3] = 'T';
-    bbt->verid = cpu_to_le16(1);
-    bbt->tblks = cpu_to_le32(nr_blocks);
-
-    /* While implementing report chunk, return clean bb table */
-    if (nvme_dma_read_prp(n, (uint8_t*)bbt, sizeof(LnvmBbt) + nr_blocks, prp1, prp2)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid,
-            NVME_INVALID_FIELD, (uint16_t)1234, 0, ns->id);
-        free(bbt);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    free(bbt);
-out:
-    return ret; /*TODO: STUB*/
-}
-
-#if 0
-// JAVIER: TOGO
-static uint16_t lnvm_bbt_set(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
-{
-    NvmeNamespace *ns;
-    LnvmCtrl *ln;
-    LnvmIdGroup *c;
-    LnvmBbtSet *bbt_cmd = (LnvmBbtSet*)cmd;
-
-    uint32_t nsid = le32_to_cpu(bbt_cmd->nsid);
-    uint64_t prp2 = le64_to_cpu(bbt_cmd->prp2);
-    uint32_t nlb  = le16_to_cpu(bbt_cmd->nlb) + 1;
-    uint64_t spba = le64_to_cpu(bbt_cmd->spba);
-    uint8_t value = bbt_cmd->value;
-    uint32_t nr_blocks;
-    uint64_t pos;
-    int i;
-    FILE *fp;
-    size_t ret;
-
-    if (nsid == 0 || nsid > n->num_namespaces) {
-        return NVME_INVALID_NSID | NVME_DNR;
-    }
-
-    ns = &n->namespaces[nsid - 1];
-    ln = &n->lnvm_ctrl;
-    c = &ln->id_ctrl.groups[0];
-    nr_blocks = c->num_blk * c->num_pln * c->num_lun;
-
-    uint64_t ppas[ln->params.max_sec_per_rq];
-
-    if (nlb == 1) {
-        ppas[0] = spba;
-        pos = lnvm_bbt_pos_get(ln, spba);
-        ns->bbtbl[pos] = value;
-    } else {
-        if (nvme_dma_write_prp(n, (uint8_t *)ppas, nlb * 8, spba, prp2)) {
-            nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                offsetof(LnvmBbtSet, spba), 0, ns->id);
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-
-        for (i = 0; i < nlb; i++) {
-            pos = lnvm_bbt_pos_get(ln, ppas[i]);
-            ns->bbtbl[pos] = value;
-        }
-    }
-
-    fp = fopen(ln->state_fname, "w+");
-    if (!fp) {
-        error_report("nvme: could not save bad block table file: %s\n",
-                                                         ln->state_fname);
-        return -EEXIST;
-    }
-
-    ret = fwrite(ns->bbtbl, 1, nr_blocks, fp);
-    if (ret != nr_blocks)
-        printf("Could not read file\n");
-
-    fclose(fp);
-
-    return NVME_SUCCESS;
-}
-#endif
-
 static int lnvm_flush_tbls(NvmeCtrl *n)
 {
     uint32_t i;
@@ -2620,10 +2505,8 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     case LNVM_ADM_CMD_GET_L2P_TBL:
             return lnvm_get_l2p_tbl(n, cmd, req);
     case LNVM_ADM_CMD_GET_BB_TBL:
-            return lnvm_bbt_get(n, cmd, req);
-            /* printf("nvme: get bad block table deprecated\n"); */
+            printf("nvme: get bad block table deprecated\n");
     case LNVM_ADM_CMD_SET_BB_TBL:
-            /* return lnvm_bbt_set(n, cmd, req); */
             printf("nvme: set bad block table deprecated\n");
     case NVME_ADM_CMD_ACTIVATE_FW:
     case NVME_ADM_CMD_DOWNLOAD_FW:
