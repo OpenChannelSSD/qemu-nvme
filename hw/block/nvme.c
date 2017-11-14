@@ -2231,6 +2231,7 @@ static uint16_t nvme_fw_log_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     NvmeFwSlotInfoLog fw_log;
 
     trans_len = MIN(sizeof(fw_log), buf_len);
+
     return nvme_dma_read_prp(n, (uint8_t *)&fw_log, trans_len, prp1, prp2);
 }
 
@@ -2260,6 +2261,7 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     BlockAcctStats *stats = blk_get_stats(n->conf.blk);
 
     trans_len = MIN(sizeof(smart), buf_len);
+
     memset(&smart, 0x0, sizeof(smart));
     smart.data_units_read[0] = cpu_to_le64(stats->nr_bytes[BLOCK_ACCT_READ]);
     smart.data_units_written[0] = cpu_to_le64(stats->nr_bytes[BLOCK_ACCT_WRITE]);
@@ -2290,26 +2292,38 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
     return nvme_dma_read_prp(n, (uint8_t *)&smart, trans_len, prp1, prp2);
 }
 
-static uint16_t lnvm_report_chunk(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
+static uint16_t lnvm_report_chunk(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                                  uint32_t buf_len)
 {
+    LnvmCtrl *ln = &n->lnvm_ctrl;
     uint64_t prp1 = le64_to_cpu(cmd->prp1);
     uint64_t prp2 = le64_to_cpu(cmd->prp2);
-    uint32_t trans_len;
+    uint32_t log_len, trans_len;
+    uint32_t nsid;
 
-    trans_len = MIN(sizeof(*n->elpes) * n->elpe, buf_len);
-    n->aer_mask &= ~(1 << NVME_AER_TYPE_ERROR);
-    if (!QSIMPLEQ_EMPTY(&n->aer_queue))
-        timer_mod(n->aer_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 10000);
+    nsid = le32_to_cpu(cmd->nsid);
+    if (nsid == 0 || nsid > n->num_namespaces)
+        return NVME_INVALID_NSID | NVME_DNR;
 
-    //JAVIER: TODO
-    return nvme_dma_read_prp(n, 0, trans_len, prp1, prp2);
+    ns = &n->namespaces[nsid - 1];
+
+    log_len = ln->params.nr_blks * sizeof(LnvmCS);
+    trans_len = MIN(log_len, buf_len);
+
+    return nvme_dma_read_prp(n, (uint8_t *)ns->chunk_meta, trans_len, prp1, prp2);
 }
 
-static uint16_t nvme_get_log(NvmeCtrl *n, NvmeCmd *cmd)
+static uint16_t nvme_get_log(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 {
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
-    uint16_t lid = dw10 & 0xffff;
-    uint32_t len = ((dw10 >> 16) & 0xff) << 2;
+    uint32_t dw11 = le32_to_cpu(cmd->cdw11);
+    uint16_t lid = dw10 & 0xff;
+    uint32_t numdl, numdu, len;
+
+    /* NVMe R1.3 */
+    numdl = (dw10 >> 16) << 2;
+    numdu = (dw11 & 0xffff) << 2;
+    len = numdl + numdu;
 
     switch (lid) {
     case NVME_LOG_ERROR_INFO:
@@ -2319,7 +2333,7 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeCmd *cmd)
     case NVME_LOG_FW_SLOT_INFO:
         return nvme_fw_log_info(n, cmd, len);
     case LNVM_REPORT_CHUNK:
-        return lnvm_report_chunk(n, cmd, len);
+        return lnvm_report_chunk(n, ns, cmd, len);
     default:
         return NVME_INVALID_LOG_ID | NVME_DNR;
     }
@@ -2589,7 +2603,7 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     case NVME_ADM_CMD_GET_FEATURES:
         return nvme_get_feature(n, cmd, req);
     case NVME_ADM_CMD_GET_LOG_PAGE:
-        return nvme_get_log(n, cmd);
+        return nvme_get_log(n, req->ns, cmd);
     case NVME_ADM_CMD_ASYNC_EV_REQ:
         return nvme_async_req(n, cmd, req);
     case NVME_ADM_CMD_ABORT:
