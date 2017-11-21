@@ -1332,12 +1332,12 @@ static void lnvm_chunk_meta_init(LnvmCtrl *ln, LnvmCS *chunk_meta,
     int i;
 
     for (i = 0; i < nr_chunks; i++) {
-        chunk_meta[i].state = LNVM_CHUNK_CLOSED;
+        chunk_meta[i].state = LNVM_CHUNK_FREE;
         chunk_meta[i].type = LNVM_CHUNK_TYPE_SEQ;
         chunk_meta[i].wear_index = 0;
         chunk_meta[i].slba = i * ln->params.sec_per_chk;
         chunk_meta[i].cnlb = ln->params.sec_per_chk;
-        chunk_meta[i].wp = ln->params.sec_per_chk;
+        chunk_meta[i].wp = 0;
     }
 }
 
@@ -1963,9 +1963,10 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 }
 
 static uint16_t lnvm_report_chunk(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-                                  uint32_t buf_len)
+                                  uint32_t buf_len, uint32_t off)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
+    uint8_t *log_page;
     uint64_t prp1 = le64_to_cpu(cmd->prp1);
     uint64_t prp2 = le64_to_cpu(cmd->prp2);
     uint32_t log_len, trans_len;
@@ -1980,20 +1981,27 @@ static uint16_t lnvm_report_chunk(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     log_len = ln->params.total_chks * sizeof(LnvmCS);
     trans_len = MIN(log_len, buf_len);
 
-    return nvme_dma_read_prp(n, (uint8_t *)ns->chunk_meta, trans_len, prp1, prp2);
+    log_page = ((void *)ns->chunk_meta) + off;
+    return nvme_dma_read_prp(n, log_page, trans_len, prp1, prp2);
 }
 
 static uint16_t nvme_get_log(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 {
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
     uint32_t dw11 = le32_to_cpu(cmd->cdw11);
+    uint32_t dw12 = le32_to_cpu(cmd->cdw12);
+    uint32_t dw13 = le32_to_cpu(cmd->cdw13);
     uint16_t lid = dw10 & 0xff;
-    uint32_t numdl, numdu, len;
+    uint32_t numdl, numdu, lpol, lpou, len, off;
 
     /* NVMe R1.3 */
     numdl = (dw10 >> 16) << 2;
     numdu = (dw11 & 0xffff) << 2;
+    lpol = dw12 << 2;
+    lpou = dw13 << 2;
+
     len = numdl + numdu;
+    off = lpol + lpou;
 
     switch (lid) {
     case NVME_LOG_ERROR_INFO:
@@ -2003,7 +2011,7 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     case NVME_LOG_FW_SLOT_INFO:
         return nvme_fw_log_info(n, cmd, len);
     case LNVM_REPORT_CHUNK:
-        return lnvm_report_chunk(n, ns, cmd, len);
+        return lnvm_report_chunk(n, ns, cmd, len, off);
     default:
         return NVME_INVALID_LOG_ID | NVME_DNR;
     }
