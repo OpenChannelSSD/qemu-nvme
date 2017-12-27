@@ -245,7 +245,6 @@ enum NvmeAdminCommands {
 
 enum LnvmAdminCommands {
     LNVM_ADM_CMD_IDENTITY          = 0xe2,
-    LNVM_ADM_CMD_GET_L2P_TBL       = 0xea,
     LNVM_ADM_CMD_GET_BB_TBL        = 0xf2,
     LNVM_ADM_CMD_SET_BB_TBL        = 0xf1,
 };
@@ -261,8 +260,6 @@ enum NvmeIoCommands {
 };
 
 enum LnvmDmCommands {
-    LNVM_CMD_HYBRID_WRITE      = 0x81,
-    LNVM_CMD_HYBRID_READ       = 0x02,
     LNVM_CMD_PHYS_WRITE        = 0x91,
     LNVM_CMD_PHYS_READ         = 0x92,
     LNVM_CMD_ERASE_ASYNC        = 0x90,

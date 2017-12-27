@@ -478,11 +478,8 @@ static void lnvm_post_cqe(NvmeCtrl *n, NvmeRequest *req)
    /* Do post-completion processing depending on the type of command. This is
      * used primarily to inject different types of errors.
      */
-    switch (req->cmd_opcode) {
-    case LNVM_CMD_HYBRID_WRITE:
-    case LNVM_CMD_PHYS_WRITE:
+    if (req->cmd_opcode == LNVM_CMD_PHYS_WRITE)
          lnvm_inject_w_err(ln, req, cqe);
-    }
 }
 
 static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
@@ -1042,8 +1039,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t data_size = nlb << data_shift;
     uint64_t meta_size = nlb * ms;
     uint32_t n_pages = data_size / ln->params.sec_size;
-    uint16_t is_write = (lrw->opcode == LNVM_CMD_PHYS_WRITE ||
-                                          lrw->opcode == LNVM_CMD_HYBRID_WRITE);
+    uint16_t is_write = (lrw->opcode == LNVM_CMD_PHYS_WRITE);
     uint16_t ctrl = 0;
     uint16_t err;
     uint8_t i;
@@ -1489,42 +1485,6 @@ static uint16_t lnvm_identity(NvmeCtrl *n, NvmeCmd *cmd)
                                     sizeof(LnvmIdCtrl), prp1, prp2);
 }
 
-static uint16_t lnvm_get_l2p_tbl(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
-{
-    NvmeNamespace *ns;
-    LnvmGetL2PTbl *gtbl = (LnvmGetL2PTbl*)cmd;
-    uint64_t slba = le64_to_cpu(gtbl->slba);
-    uint32_t nlb = le32_to_cpu(gtbl->nlb);
-    uint64_t prp1 = le64_to_cpu(gtbl->prp1);
-    uint64_t prp2 = le64_to_cpu(gtbl->prp2);
-    uint32_t nsid = le32_to_cpu(gtbl->nsid);
-    uint64_t xfer_len = nlb * sizeof(*(ns->tbl));
-
-    if (nsid == 0 || nsid > n->num_namespaces) {
-        return NVME_INVALID_NSID | NVME_DNR;
-    }
-    ns = &n->namespaces[nsid - 1];
-
-    if (slba >= ns->tbl_entries) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-            offsetof(LnvmGetL2PTbl, slba), 0, ns->id);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-    if ((slba + nlb) > ns->tbl_entries) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-            offsetof(LnvmGetL2PTbl, nlb), 0, ns->id);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    if (nvme_dma_read_prp(n, (uint8_t *)&ns->tbl[slba], xfer_len,
-                          prp1, prp2)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                            offsetof(LnvmGetL2PTbl, prp1), 0, ns->id);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-    return NVME_SUCCESS;
-}
-
 /* TODO: Implement for different bad block table formats. It depends on flash
  * vendors.
  */
@@ -1788,7 +1748,6 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
     ns = &n->namespaces[nsid - 1];
     switch (cmd->opcode) {
-    case LNVM_CMD_HYBRID_WRITE:
     case LNVM_CMD_PHYS_READ:
     case LNVM_CMD_PHYS_WRITE:
         return lnvm_rw(n, ns, cmd, req);
@@ -2596,8 +2555,6 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return nvme_set_db_memory(n, cmd);
     case LNVM_ADM_CMD_IDENTITY:
             return lnvm_identity(n, cmd);
-    case LNVM_ADM_CMD_GET_L2P_TBL:
-            return lnvm_get_l2p_tbl(n, cmd, req);
     case LNVM_ADM_CMD_GET_BB_TBL:
             return lnvm_bbt_get(n, cmd, req);
     case LNVM_ADM_CMD_SET_BB_TBL:
