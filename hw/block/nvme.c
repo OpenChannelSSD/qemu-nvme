@@ -2280,10 +2280,6 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return nvme_set_db_memory(n, cmd);
     case LNVM_ADM_CMD_IDENTITY:
             return lnvm_identity(n, cmd);
-    case LNVM_ADM_CMD_GET_BB_TBL:
-            printf("nvme: get bad block table deprecated\n");
-    case LNVM_ADM_CMD_SET_BB_TBL:
-            printf("nvme: set bad block table deprecated\n");
     case NVME_ADM_CMD_ACTIVATE_FW:
     case NVME_ADM_CMD_DOWNLOAD_FW:
     case NVME_ADM_CMD_SECURITY_SEND:
