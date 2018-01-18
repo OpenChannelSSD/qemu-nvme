@@ -2953,8 +2953,6 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     NVME_CAP_SET_DSTRD(n->bar.cap, n->db_stride);
     NVME_CAP_SET_NSSRS(n->bar.cap, 0);
     NVME_CAP_SET_CSS(n->bar.cap, 1);
-    if (lnvm_dev(n))
-        NVME_CAP_SET_LNVM(n->bar.cap, 1);
 
     NVME_CAP_SET_MPSMIN(n->bar.cap, n->mpsmin);
     NVME_CAP_SET_MPSMAX(n->bar.cap, n->mpsmax);
