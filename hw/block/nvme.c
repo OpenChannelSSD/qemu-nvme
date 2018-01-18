@@ -2714,7 +2714,7 @@ static int lnvm_init_meta(LnvmCtrl *ln)
         ln->meta_fname = malloc(10);
         if (!ln->meta_fname)
             return -ENOMEM;
-        strncpy(ln->meta_fname, "meta.qemu\0", 10);
+        strncpy(ln->meta_fname, "qemu.chkstate\0", 10);
     } else {
         ln->meta_auto_gen = 0;
     }
