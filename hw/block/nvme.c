@@ -1176,62 +1176,6 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_NO_COMPLETE;
 }
 
-static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
-{
-    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
-    uint16_t ctrl = 0;
-    uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
-    uint64_t prp1 = le64_to_cpu(rw->prp1);
-    uint64_t prp2 = le64_to_cpu(rw->prp2);
-    uint64_t slba;
-    uint64_t elba;
-    const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
-    const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
-    uint64_t data_size = nlb << data_shift;
-    uint64_t meta_size = nlb * ms;
-    uint64_t aio_slba;
-    uint16_t err;
-
-    slba = le64_to_cpu(rw->slba);
-    elba = slba + nlb;
-    req->is_write = rw->opcode == NVME_CMD_WRITE;
-    aio_slba = ns->start_block + (slba << (data_shift - BDRV_SECTOR_BITS));
-    ctrl = le16_to_cpu(rw->control);
-
-    err = nvme_rw_check_req(n, ns, cmd, req, slba, elba, nlb, ctrl,
-                                                        data_size, meta_size);
-    if (err)
-        return err;
-
-    if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-            offsetof(NvmeRwCmd, prp1), 0, ns->id);
-        exit(0);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-    req->slba = slba;
-    req->meta_size = 0;
-    req->status = NVME_SUCCESS;
-    req->nlb = nlb;
-    req->ns = ns;
-
-    dma_acct_start(n->conf.blk, &req->acct, &req->qsg, req->is_write ?
-        BLOCK_ACCT_WRITE : BLOCK_ACCT_READ);
-    if (req->qsg.nsg > 0) {
-        req->aiocb = req->is_write ?
-            dma_blk_write(n->conf.blk, &req->qsg, aio_slba, nvme_rw_cb, req) :
-            dma_blk_read(n->conf.blk, &req->qsg, aio_slba, nvme_rw_cb, req);
-    } else {
-        req->aiocb = req->is_write ?
-            blk_aio_writev(n->conf.blk, aio_slba, &req->iov, data_size >> 9, nvme_rw_cb, req) :
-            blk_aio_readv(n->conf.blk, aio_slba, &req->iov, data_size >> 9, nvme_rw_cb, req);
-    }
-
-    return NVME_NO_COMPLETE;
-}
-
 static void nvme_discard_cb(void *opaque, int ret)
 {
     NvmeRequest *req = opaque;
@@ -1312,11 +1256,6 @@ static uint16_t nvme_flush(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     block_acct_start(blk_get_stats(n->conf.blk), &req->acct, 0, BLOCK_ACCT_FLUSH);
     req->aiocb = blk_aio_flush(n->conf.blk, nvme_misc_cb, req);
     return NVME_NO_COMPLETE;
-}
-
-static uint32_t lnvm_tbl_size(NvmeNamespace *ns)
-{
-    return ns->tbl_entries * sizeof(*(ns->tbl));
 }
 
 static uint16_t lnvm_identity(NvmeCtrl *n, NvmeCmd *cmd)
@@ -2094,31 +2033,19 @@ static uint16_t nvme_abort_req(NvmeCtrl *n, NvmeCmd *cmd, uint32_t *result)
     return NVME_SUCCESS;
 }
 
-static uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
+static uint64_t ns_calc_blks(NvmeNamespace *ns, uint8_t lba_idx)
 {
     NvmeCtrl *n = ns->ctrl;
     NvmeIdNs *id_ns = &ns->id_ns;
-    uint64_t ns_size = n->ns_size;
-
+    LnvmCtrl *ln = &n->lnvm_ctrl;
     uint32_t lba_ds = (1 << id_ns->lbaf[lba_idx].ds);
-    uint32_t lba_sz = lba_ds + n->meta;
+    uint64_t tblks, tchks, chks_per_lun;
 
-    if (lnvm_dev(n)) {
-        /* p_ent: LBA + md + L2P entry */
-        uint64_t p_ent = lba_sz + sizeof(*(ns->tbl));
-        uint64_t p_ents = ns_size / p_ent;
+    tblks = n->ns_size / lba_ds;
+    tchks = tblks / ln->params.sec_per_chk;
+    chks_per_lun = tchks / ln->params.num_lun;
 
-        return p_ents;
-    } else {
-        return ns_size / lba_sz;
-    }
-}
-
-static uint64_t ns_bdrv_blks(NvmeNamespace *ns, uint64_t blks, uint8_t lba_idx)
-{
-    NvmeIdNs *id_ns = &ns->id_ns;
-
-    return blks << (id_ns->lbaf[lba_idx].ds - BDRV_SECTOR_BITS);
+    return chks_per_lun * ln->params.num_lun * ln->params.sec_per_chk;
 }
 
 static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
@@ -2130,22 +2057,15 @@ static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
         referencing freed memory -- DANGEROUS.
     */
     NvmeIdNs *id_ns = &ns->id_ns;
-    uint64_t blks;
-    uint64_t bdrv_blks;
 
-    blks = ns->ns_blks;
-    bdrv_blks = ns_bdrv_blks(ns, ns->ns_blks, lba_idx);
-
-    id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(blks);
-    ns->meta_start_offset =
-        ((ns->start_block + bdrv_blks) << BDRV_SECTOR_BITS) + lnvm_tbl_size(ns);
+    id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(ns->ns_blks);
 
     if (ns->util)
         g_free(ns->util);
-    ns->util = bitmap_new(blks);
+    ns->util = bitmap_new(ns->ns_blks);
     if (ns->uncorrectable)
         g_free(ns->uncorrectable);
-    ns->uncorrectable = bitmap_new(blks);
+    ns->uncorrectable = bitmap_new(ns->ns_blks);
 }
 
 static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
@@ -2176,7 +2096,7 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
 
     ns->id_ns.flbas = lba_idx | meta_loc;
     ns->id_ns.dps = pil | pi;
-    ns->ns_blks = ns_blks(ns, lba_idx);
+    ns->ns_blks = ns_calc_blks(ns, lba_idx);
     nvme_partition_ns(ns, lba_idx);
     if (sec_erase) {
         /* TODO: write zeros, complete asynchronously */;
@@ -2685,9 +2605,11 @@ static void nvme_init_namespaces(NvmeCtrl *n)
 
         ns->id = i + 1;
         ns->ctrl = n;
+        ns->ns_blks = ns_calc_blks(ns, lba_index);
         ns->start_block = i * (n->ns_size >> BDRV_SECTOR_BITS);
         ns->util = bitmap_new(blks);
         ns->uncorrectable = bitmap_new(blks);
+        nvme_partition_ns(ns, lba_index);
     }
 }
 
@@ -3100,6 +3022,8 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT8("lver", NvmeCtrl, lnvm_ctrl.id_ctrl.major_verid, 0),
+    DEFINE_PROP_UINT32("lsec_size", NvmeCtrl, lnvm_ctrl.params.sec_size, 4096),
+    DEFINE_PROP_UINT32("lsecs_per_chk", NvmeCtrl, lnvm_ctrl.params.sec_per_chk, 4096),
     DEFINE_PROP_UINT8("lmax_sec_per_rq", NvmeCtrl, lnvm_ctrl.params.max_sec_per_rq, 64),
     DEFINE_PROP_UINT8("lws_min", NvmeCtrl, lnvm_ctrl.params.ws_min, 4),
     DEFINE_PROP_UINT8("lws_opt", NvmeCtrl, lnvm_ctrl.params.ws_opt, 8),

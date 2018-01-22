@@ -1005,10 +1005,6 @@ typedef struct NvmeNamespace {
     uint32_t        id;
     uint64_t        ns_blks;
     uint64_t        start_block;
-    uint64_t        meta_start_offset;
-    uint64_t        tbl_dsk_start_offset;
-    uint32_t        tbl_entries;
-    uint64_t        *tbl;
     LnvmCS          *chunk_meta;
 } NvmeNamespace;
 
