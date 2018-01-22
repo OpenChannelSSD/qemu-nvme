@@ -416,11 +416,11 @@ typedef struct LnvmRwCmd {
     uint64_t    metadata;
     uint64_t    prp1;
     uint64_t    prp2;
-    uint64_t    spba;
+    uint64_t    slba;
     uint16_t    nlb;
     uint16_t    control;
-    uint32_t    dsmgmt;
-    uint64_t    slba;
+    uint32_t    resv;
+    uint64_t    resv2;
 } LnvmRwCmd;
 
 typedef struct LnvmDmCmd {
