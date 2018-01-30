@@ -1069,12 +1069,9 @@ fail_free_aio_sector_list:
         return err;
 }
 
-
 static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
-    /* In the case of a OCSSD device. The slba is the logical address, while
-     * the actual physical block address is stored in Command Dword 11-10. */
     LnvmCtrl *ln = &n->lnvm_ctrl;
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
     uint64_t psl[ln->params.max_sec_per_rq];
@@ -1114,13 +1111,6 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
           psl[0] = slba;
     }
 
-    if (slba == LNVM_PBA_UNMAPPED) {
-        printf("lnvm_rw: unmapped PBA\n");
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                offsetof(LnvmRwCmd, slba), lrw->slba + nlb, ns->id);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
     ctrl = le16_to_cpu(lrw->control);
     req->lnvm_slba = le64_to_cpu(lrw->slba);
     req->is_write = is_write;
@@ -1149,6 +1139,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
         return lnvm_rw_free_rq(aio_sector_list);
     }
+
     req->slba = sppa;
     req->meta_size = 0;
     req->status = NVME_SUCCESS;
