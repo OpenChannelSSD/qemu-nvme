@@ -99,6 +99,7 @@ typedef struct NvmeNamespace {
     uint64_t        start_block_predef;
     uint8_t         *predef;
     LnvmCS          *chunk_meta;
+    uint8_t         *resetfail;
 } NvmeNamespace;
 
 #define TYPE_NVME "nvme"
@@ -116,6 +117,7 @@ typedef struct LnvmCtrl {
     uint8_t        state_auto_gen;
     char           *meta_fname;
     char           *chunk_fname;
+    char           *resetfail_fname;
     uint32_t       err_write;
     uint32_t       n_err_write;
     uint32_t       err_write_cnt;

@@ -67,9 +67,9 @@
  *  lnum_pu=<int>     : Number of parallel units per group, Default:1
  *  lchunktable=<file> : Load state table from file destination (Provide path
  *  to file. If no file is provided a state table will be generated.
+ *  lresetfail=<file> : Reset fail injection configuration file
  *  lmetadata=<file>   : Load metadata from file destination
- *  lb_err_write       : First lba to inject write error. Default: 0 (disabled)
- *  ln_err_write       : Number of lbas affected by write error injection
+ *  lfmetasize=<int>    : LightNVM metaa (OOB) size. Default: 16
  *  ldebug             : Enable LightNVM debugging. Default: 0 (disabled)
  *  lstrict            : Enable strict checks. Necessary for pblk (disabled)
  *
@@ -1166,11 +1166,25 @@ static inline void *lnvm_meta_index(LnvmCtrl *ln, void *meta, uint32_t index)
 static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba, hwaddr mptr)
 {
     LnvmCS *chunk_meta;
+    uint32_t resetfail_prob = 0;
 
     chunk_meta = lnvm_chunk_get_state(ns, ln, lba);
     if (!chunk_meta) {
         fprintf(stderr, "nvme: trying to reset non-existing chunk\n");
         return -EINVAL;
+    }
+
+    if (ns->resetfail) {
+        resetfail_prob = ns->resetfail[lnvm_lba_to_chunk_no(ln, lba)];
+    }
+
+    if (resetfail_prob) {
+        if ((rand() % 100) < resetfail_prob) {
+            chunk_meta->state = LNVM_CHUNK_BAD;
+            chunk_meta->wp = 0xffff;
+            fprintf(stderr, "nvme: injecting erase failure\n");
+            return -EINVAL;
+        }
     }
 
     if (!(chunk_meta->state & LNVM_CHUNK_CLOSED) ||
@@ -1719,7 +1733,7 @@ static unsigned get_unsigned(char *string, const char *key,
 {
     char *keyvalue = strstr(string, key);
     if (!keyvalue) {
-        return 1;
+        return 0;
     }
     return sscanf(keyvalue + strlen(key), "%u", value);
 }
@@ -1731,11 +1745,11 @@ static unsigned get_str(char *string, const char *key, char *value,
     char format[32];
 
     if (!keyvalue) {
-        return 1;
+        return 0;
     }
 
     if (len == 0) {
-        return 1;
+        return 0;
     }
 
     snprintf(format, (int)sizeof(format), "%%%ds", (int)len - 1);
@@ -1764,25 +1778,55 @@ static int get_state_id(char *state)
     return -1;
 }
 
-static int update_chunk(char *chunkinfo, NvmeNamespace *ns)
+
+static int get_ch_lun_chk(char *chunkinfo, unsigned int *ch,
+                          unsigned int *lun, unsigned int *chk)
+{
+    if (!get_unsigned(chunkinfo, "grp=", ch)) {
+        return 0;
+    }
+
+    if (!get_unsigned(chunkinfo, "pu=", lun)) {
+        return 0;
+    }
+
+    if (!get_unsigned(chunkinfo, "chk=", chk)) {
+        return 0;
+    }
+
+    return 1;
+}
+
+static int get_chunk_meta_index(unsigned int ch, unsigned int lun,
+                        unsigned int chk, NvmeNamespace *ns)
 {
     struct LnvmCtrl *ln = &ns->ctrl->lnvm_ctrl;
-    LnvmCS *chunk_meta = ns->chunk_meta;
-    unsigned int ch = 1, lun, chk, wp, wi;
+
+    if (chk >= ln->id_ctrl.geo.num_chk) {
+        return -1;
+    }
+
+    if (lun >= ln->params.num_lun) {
+        return -1;
+    }
+
+    if (ch >= ln->params.num_ch) {
+        return -1;
+    }
+
+    return ln->id_ctrl.geo.num_chk * (ch * ln->params.num_lun + lun) + chk;
+}
+
+static int update_chunk(char *chunkinfo, NvmeNamespace *ns)
+{
+    LnvmCS *chunk_meta;
+    unsigned int ch, lun, chk, wp, wi;
     char status[16] = {0};
     char type[16] = {0};
-    unsigned int index;
     int state_id;
+    int i;
 
-    if (!get_unsigned(chunkinfo, "grp=", &ch)) {
-        return 1;
-    }
-
-    if (!get_unsigned(chunkinfo, "pu=", &lun)) {
-        return 1;
-    }
-
-    if (!get_unsigned(chunkinfo, "chk=", &chk)) {
+    if (!get_ch_lun_chk(chunkinfo, &ch, &lun, &chk)) {
         return 1;
     }
 
@@ -1804,29 +1848,21 @@ static int update_chunk(char *chunkinfo, NvmeNamespace *ns)
         return 1;
     }
 
-    if (chk >= ln->id_ctrl.geo.num_chk) {
-        return 1;
-    }
-
-    if (lun >= ln->params.num_lun) {
-        return 1;
-    }
-
-    if (ch >= ln->params.num_ch) {
-        return 1;
-    }
-
     state_id = get_state_id(status);
 
     if (state_id < 0) {
         return 1;
     }
 
-    index = ln->id_ctrl.geo.num_chk * (ch * ln->params.num_lun + lun) + chk;
+    i = get_chunk_meta_index(ch, lun, chk, ns);
+    if (i < 0) {
+        return 1;
+    }
 
-    chunk_meta[index].state = state_id;
-    chunk_meta[index].wear_index = wi;
-    chunk_meta[index].wp = wp;
+    chunk_meta = &ns->chunk_meta[i];
+    chunk_meta->state = state_id;
+    chunk_meta->wear_index = wi;
+    chunk_meta->wp = wp;
 
     if (chunk_meta->state == LNVM_CHUNK_BAD) {
         chunk_meta->wp = 0xffff;
@@ -1858,6 +1894,59 @@ static int lnvm_chunk_meta_load(NvmeNamespace *ns,
     while (fgets(line, sizeof(line), fp)) {
         if (update_chunk(line, ns)) {
             fprintf(stderr, "error parsing chunk state line: %s", line);
+        }
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+static int set_resetfail_chunk(char *chunkinfo, NvmeNamespace *ns)
+{
+    unsigned int ch, lun, chk, resetfail_prob;
+    int i;
+
+    if (!get_ch_lun_chk(chunkinfo, &ch, &lun, &chk)) {
+        return 1;
+    }
+
+    if (!get_unsigned(chunkinfo, "resetfail_prob=", &resetfail_prob)) {
+        return 1;
+    }
+
+    if (resetfail_prob > 100) {
+        return 1;
+    }
+
+    i = get_chunk_meta_index(ch, lun, chk, ns);
+    if (i < 0) {
+        return 1;
+    }
+
+    ns->resetfail[i] = resetfail_prob;
+
+    return 0;
+}
+
+static int lnvm_resetfail_load(NvmeNamespace *ns)
+{
+    struct LnvmCtrl *ln = &ns->ctrl->lnvm_ctrl;
+    FILE *fp;
+    char line[256];
+
+    if (!ln->resetfail_fname) {
+        return 0;
+    }
+
+    fp = fopen(ln->resetfail_fname, "r");
+    if (!fp) {
+        printf("nvme: could not open resetfail file\n");
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), fp)) {
+        if (set_resetfail_chunk(line, ns)) {
+            printf("error parsing erasefail line: %s", line);
         }
     }
 
@@ -3414,11 +3503,10 @@ static void nvme_init_namespaces(NvmeCtrl *n)
 }
 
 static void nvme_free_namespace(NvmeNamespace *ns) {
+    g_free(ns->resetfail);
     g_free(ns->util);
     g_free(ns->uncorrectable);
-    if (ns->predef) {
-        g_free(ns->predef);
-    }
+    g_free(ns->predef);
     g_free(ns->chunk_meta);
 }
 
@@ -3599,6 +3687,19 @@ static int lnvm_init(NvmeCtrl *n, Error **errp)
         ret = lnvm_chunk_meta_load(ns, ln->params.total_chks);
         if (ret)
             return ret;
+
+        ns->resetfail = NULL;
+        if (ln->resetfail_fname) {
+            ns->resetfail = g_malloc0(ln->params.total_chks * sizeof(uint8_t));
+            if (!ns->resetfail) {
+                return -ENOMEM;
+            }
+
+            ret = lnvm_resetfail_load(ns);
+            if (ret) {
+                error_setg(errp, "nvme: could not initilize reset failures");
+            }
+        }
     }
 
     if (!ln->chunk_fname) {
@@ -3617,6 +3718,7 @@ static int lnvm_init(NvmeCtrl *n, Error **errp)
         error_setg(errp, "nvme: lnvm_init_meta: failed\n");
         return ret;
     }
+
 
     return 0;
 }
@@ -3800,8 +3902,13 @@ static void lnvm_exit(NvmeCtrl *n)
     LnvmCtrl *ln = &n->lnvm_ctrl;
     int i;
 
-    for (i = 0; i < n->num_namespaces; i++)
+    for (i = 0; i < n->num_namespaces; i++) {
         lnvm_chunk_meta_save(&n->namespaces[i]);
+        if (n->namespaces[i].resetfail) {
+            free(n->namespaces[i].resetfail);
+        }
+    }
+
 
     fclose(ln->metadata);
 }
@@ -3877,6 +3984,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT32("lnum_ch", NvmeCtrl, lnvm_ctrl.params.num_ch, 1),
     DEFINE_PROP_UINT32("lnum_pu", NvmeCtrl, lnvm_ctrl.params.num_lun, 1),
     DEFINE_PROP_STRING("lchunktable_txt", NvmeCtrl, lnvm_ctrl.chunk_fname),
+    DEFINE_PROP_STRING("lresetfail", NvmeCtrl, lnvm_ctrl.resetfail_fname),
     DEFINE_PROP_STRING("lmetadata", NvmeCtrl, lnvm_ctrl.meta_fname),
     DEFINE_PROP_UINT32("lb_err_write", NvmeCtrl, lnvm_ctrl.err_write, 0),
     DEFINE_PROP_UINT32("ln_err_write", NvmeCtrl, lnvm_ctrl.n_err_write, 0),
