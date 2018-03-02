@@ -175,6 +175,19 @@ static inline union lnvm_addr lnvm_lba_to_addr(LnvmCtrl *ln, uint64_t lba) {
     return gen;
 }
 
+static uint64_t lnvm_lba_addr(unsigned int ch, unsigned int lun,
+                              unsigned int chk, unsigned int sec, LnvmCtrl *ln)
+{
+    uint64_t lba = 0;
+
+    lba = lba | sec << ln->lbaf.sec_offset;
+    lba = lba | chk << ln->lbaf.chk_offset;
+    lba = lba | lun << ln->lbaf.lun_offset;
+    lba = lba | ch << ln->lbaf.ch_offset;
+
+    return lba;
+}
+
 static void lnvm_print_lba(LnvmCtrl *ln, uint64_t lba)
 {
     union lnvm_addr gen = lnvm_lba_to_addr(ln, lba);
@@ -568,31 +581,39 @@ static uint16_t nvme_dma_read_prp(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
 
 static void lnvm_inject_w_err(LnvmCtrl *ln, NvmeRequest *req, NvmeCqe *cqe)
 {
-   if (ln->err_write && req->is_write) {
-        if (ln->debug)
-            fprintf(stderr, "nvme:err_stat:err_write_cnt:%d,nlbas:%d,err_write:%d, n_err_write:%d\n",
-                    ln->err_write_cnt, req->nlb, ln->err_write, ln->n_err_write);
-        if ((ln->err_write_cnt + req->nlb) > ln->err_write) {
-            int i;
-            int bit;
+    NvmeNamespace *ns = req->ns;
+    int req_fail = 0;
 
-            /* kill n_err_write sectors in lba list */
-            for (i = 0; i < req->nlb; i++) {
-                if (ln->err_write_cnt + i < ln->err_write)
-                    continue;
+    if (ns && ns->writefail && req->is_write && req->lnvm_lba_list) {
+        for (int i = 0; i < req->nlb; i++) {
+            uint64_t lba = req->lnvm_lba_list[i];
+            uint8_t err_prob = ns->writefail[lnvm_lba_to_off(ln, lba)];
 
-                bit = i;
-                bitmap_set(&cqe->res64, bit, ln->n_err_write);
-                break;
+            LnvmCS *chunk_meta = lnvm_chunk_get_state(ns, ln, lba);
+
+            if (err_prob && (rand() % 100) < err_prob) {
+                req_fail = 1;
             }
 
-            if (ln->debug)
-                fprintf(stderr, "nvme: injected error:%u, n:%u, bitmap:%lu\n",
-                                             bit, ln->n_err_write, cqe->res64);
-            req->status = 0x40ff; /* FAIL WRITE status code */
-            ln->err_write_cnt = 0;
+            if (req_fail) {
+                bitmap_set(&cqe->res64, i, 1);
+                req->status = 0x40ff; /* FAIL WRITE status code */
+
+                /* Rewind the wp since we've already advanced it */
+                chunk_meta->wp--;
+
+                /* Fail the next erase */
+                ns->resetfail[lnvm_lba_to_chunk_no(ln, lba)] = 100;
+
+                if (ln->debug) {
+                    fprintf(stderr, "Injecting write error for lba:\n");
+                    lnvm_print_lba(ln, lba);
+                }
+            }
         }
-        ln->err_write_cnt += req->nlb;
+
+        g_free(req->lnvm_lba_list);
+        req->lnvm_lba_list = NULL;
     }
 }
 
@@ -1237,11 +1258,20 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
     if (!*aio_offset_list)
         return -ENOMEM;
 
+    req->lnvm_lba_list = NULL;
+    if (req->is_write) {
+        req->lnvm_lba_list = g_malloc0(sizeof(uint64_t) * nlb);
+        if (!req->lnvm_lba_list) {
+            printf("lnvm_rw: ENOMEM\n");
+            err = -ENOMEM;
+            goto fail_free_aio_offset_list;
+        }
+    }
 
     msl = g_malloc0(ln->lba_meta_size * nlb);
     if (!msl) {
         err = -ENOMEM;
-        goto fail_free_aio_offset_list;
+        goto fail_free_lnvm_lba_list;
     }
 
     if (meta && req->is_write)
@@ -1269,6 +1299,7 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
         }
 
         if (req->is_write) {
+            req->lnvm_lba_list[i] = psl[i];
             if (lnvm_chunk_advance_wp(ns, ln, psl[i], 1)) {
                 fprintf(stderr, "lnvm_rw: advance chunk wp failed\n  ");
                 lnvm_print_lba(ln, psl[i]);
@@ -1307,10 +1338,15 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
     return 0;
 
 fail_free_msl:
-        g_free(msl);
+    g_free(msl);
+
+fail_free_lnvm_lba_list:
+    g_free(req->lnvm_lba_list);
+    req->lnvm_lba_list = NULL;
+
 fail_free_aio_offset_list:
-        g_free(*aio_offset_list);
-        return err;
+    g_free(*aio_offset_list);
+    return err;
 }
 
 static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
@@ -1947,6 +1983,64 @@ static int lnvm_resetfail_load(NvmeNamespace *ns)
     while (fgets(line, sizeof(line), fp)) {
         if (set_resetfail_chunk(line, ns)) {
             printf("error parsing erasefail line: %s", line);
+        }
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+static int set_writefail_sector(char *secinfo, NvmeNamespace *ns)
+{
+    struct LnvmCtrl *ln = &ns->ctrl->lnvm_ctrl;
+    unsigned int ch, lun, chk, sec, writefail_prob;
+    uint64_t lba;
+
+    if (!get_ch_lun_chk(secinfo, &ch, &lun, &chk)) {
+        return 1;
+    }
+
+    if (!get_unsigned(secinfo, "sec=", &sec)) {
+        return 1;
+    }
+
+    if (sec >= ln->id_ctrl.geo.clba) {
+        return 1;
+    }
+
+    if (!get_unsigned(secinfo, "writefail_prob=", &writefail_prob)) {
+        return 1;
+    }
+
+    if (writefail_prob > 100) {
+        return 1;
+    }
+
+    lba = lnvm_lba_addr(ch, lun, chk, sec, ln);
+    ns->writefail[lnvm_lba_to_off(ln, lba)] = writefail_prob;
+
+    return 0;
+}
+
+static int lnvm_writefail_load(NvmeNamespace *ns)
+{
+    struct LnvmCtrl *ln = &ns->ctrl->lnvm_ctrl;
+    FILE *fp;
+    char line[256];
+
+    if (!ln->writefail_fname) {
+        return 0;
+    }
+
+    fp = fopen(ln->writefail_fname, "r");
+    if (!fp) {
+        printf("nvme: could not open writefail file\n");
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), fp)) {
+        if (set_writefail_sector(line, ns)) {
+            printf("error parsing writefail line: %s", line);
         }
     }
 
@@ -2723,7 +2817,6 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
 
     return NVME_SUCCESS;
 }
-
 
 static uint16_t nvme_format(NvmeCtrl *n, NvmeCmd *cmd)
 {
@@ -3504,6 +3597,7 @@ static void nvme_init_namespaces(NvmeCtrl *n)
 
 static void nvme_free_namespace(NvmeNamespace *ns) {
     g_free(ns->resetfail);
+    g_free(ns->writefail);
     g_free(ns->util);
     g_free(ns->uncorrectable);
     g_free(ns->predef);
@@ -3592,7 +3686,6 @@ static int lnvm_init(NvmeCtrl *n, Error **errp)
     unsigned int i;
     uint64_t chnl_chks;
     int ret = 0;
-
 
     ln = &n->lnvm_ctrl;
 
@@ -3698,6 +3791,28 @@ static int lnvm_init(NvmeCtrl *n, Error **errp)
             ret = lnvm_resetfail_load(ns);
             if (ret) {
                 error_setg(errp, "nvme: could not initilize reset failures");
+            }
+        }
+
+    ns->writefail = NULL;
+        if (ln->writefail_fname) {
+            ns->writefail = g_malloc0(ns->ns_blks * sizeof(uint8_t));
+            if (!ns->writefail) {
+                return -ENOMEM;
+            }
+
+            ret = lnvm_writefail_load(ns);
+            if (ret) {
+                error_setg(errp, "nvme: could not initilize write failures");
+            }
+
+            /* We fail resets for a chunk after a write failure to it, so make
+             * sure to allocate the resetfailure buffer if it has not been
+             * already
+             */
+            if (!ns->resetfail) {
+                ns->resetfail = g_malloc0(ln->params.total_chks *
+                    sizeof(uint8_t));
             }
         }
     }
@@ -3985,9 +4100,8 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT32("lnum_pu", NvmeCtrl, lnvm_ctrl.params.num_lun, 1),
     DEFINE_PROP_STRING("lchunktable_txt", NvmeCtrl, lnvm_ctrl.chunk_fname),
     DEFINE_PROP_STRING("lresetfail", NvmeCtrl, lnvm_ctrl.resetfail_fname),
+    DEFINE_PROP_STRING("lwritefail", NvmeCtrl, lnvm_ctrl.writefail_fname),
     DEFINE_PROP_STRING("lmetadata", NvmeCtrl, lnvm_ctrl.meta_fname),
-    DEFINE_PROP_UINT32("lb_err_write", NvmeCtrl, lnvm_ctrl.err_write, 0),
-    DEFINE_PROP_UINT32("ln_err_write", NvmeCtrl, lnvm_ctrl.n_err_write, 0),
     DEFINE_PROP_UINT8("ldebug", NvmeCtrl, lnvm_ctrl.debug, 0),
     DEFINE_PROP_UINT8("lstrict", NvmeCtrl, lnvm_ctrl.strict, 0),
     DEFINE_PROP_END_OF_LIST(),
