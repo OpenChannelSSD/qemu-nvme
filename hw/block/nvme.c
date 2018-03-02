@@ -669,7 +669,6 @@ static uint16_t lnvm_rw_check_req(NvmeCtrl *n, LnvmCtrl *ln, NvmeNamespace *ns,
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
 
     if (sppa == -1 || eppa == -1) {
-        printf("lnvm_rw: EINVAL\n");
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -843,10 +842,8 @@ static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t ppa,
 
     ret = fread(state, int_oob_len, 1, meta_fp);
     if (ret != 1) {
-        if (errno == EAGAIN) {
-            //printf("lnvm_meta_state_get: Why is this not an error?\n");
+        if (errno == EAGAIN)
             return 0;
-        }
         perror("lnvm_meta_state_get: fread");
         printf("lnvm_meta_state_get: ppa(%lu), ret(%lu)\n", ppa, ret);
         return -1;
@@ -969,7 +966,6 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
                 uint64_t *psl, uint64_t data_shift, uint32_t nlb)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
-    NvmeCqe *cqe = &req->cqe;
     void *msl;
     uint64_t meta = le64_to_cpu(lrw->metadata);
     uint64_t ppa_off;
@@ -977,14 +973,11 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
     uint16_t err;
 
     *aio_sector_list = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
-    if (!*aio_sector_list) {
-        printf("lnvm_rw: ENOMEM\n");
+    if (!*aio_sector_list)
         return -ENOMEM;
-    }
 
     msl = g_malloc0(ln->params.sos * ln->params.max_sec_per_rq);
     if (!msl) {
-        printf("lnvm_rw: ENOMEM\n");
         err = -ENOMEM;
         goto fail_free_aio_sector_list;
     }
@@ -1018,33 +1011,6 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
                 }
             }
         } else {
-            LnvmCS *chunk_meta;
-            uint64_t write_wp;
-
-            chunk_meta = lnvm_chunk_get_state(ns, ln, psl[i]);
-
-            //TODO: return predefined data on bad state and do ws_min check
-            /*if (chunk_meta->state & (LNVM_CHUNK_BAD || LNVM_CHUNK_FREE)) {
-                printf("lnvm_rw: read status failed (%d)\n", chunk_meta->state);
-                print_ppa(ln, psl[i]);
-                err = NVME_INVALID_FIELD | NVME_DNR;
-                goto fail_free_msl;
-            }*/
-
-            if (chunk_meta->state == LNVM_CHUNK_OPEN) {
-                write_wp = lnvm_chunk_sec_from_ppa(ln, psl[i]);
-                if (write_wp > chunk_meta->wp) {
-                    bitmap_set(&cqe->res64, i, nlb - i);
-                    req->status = 0x42ff;
-
-                    /* Copy what has been read from the OOB area */
-                    if (meta)
-                        nvme_addr_write(n, meta, (void *)msl, nlb * ln->params.sos);
-                    err = 0x42ff;
-                    goto fail_free_msl;
-                }
-            }
-
             if (meta) {
                 if (lnvm_meta_read(ln, ppa_off, lnvm_meta_index(ln, msl, i))) {
                     printf("lnvm_rw: read metadata failed\n");
