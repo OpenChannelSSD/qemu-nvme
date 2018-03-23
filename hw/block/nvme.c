@@ -1866,7 +1866,7 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len)
 }
 
 static uint16_t lnvm_report_chunk(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-                                  uint32_t buf_len, uint32_t off)
+                                  uint32_t buf_len, uint64_t off)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
     uint8_t *log_page;
@@ -1895,16 +1895,17 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     uint32_t dw12 = le32_to_cpu(cmd->cdw12);
     uint32_t dw13 = le32_to_cpu(cmd->cdw13);
     uint16_t lid = dw10 & 0xff;
-    uint32_t numdl, numdu, lpol, lpou, len, off;
+    uint32_t numdl, numdu, len;
+    uint64_t off, lpol, lpou;
 
     /* NVMe R1.3 */
-    numdl = (dw10 >> 16) << 2;
-    numdu = (dw11 & 0xffff) << 2;
-    lpol = dw12 << 2;
-    lpou = dw13 << 2;
+    numdl = (dw10 >> 16);
+    numdu = (dw11 & 0xffff);
+    lpol = dw12;
+    lpou = dw13;
 
-    len = numdl + numdu;
-    off = lpol + lpou;
+    len = ((numdu << 16) | numdl) << 2;
+    off = (lpou << 32ULL) | lpol;
 
     switch (lid) {
     case NVME_LOG_ERROR_INFO:
