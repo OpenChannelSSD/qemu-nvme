@@ -177,11 +177,6 @@ static void nvme_addr_write(NvmeCtrl *n, hwaddr addr, void *buf, int size)
     }
 }
 
-static uint8_t lnvm_dev(NvmeCtrl *n)
-{
-    return (n->lnvm_ctrl.id_ctrl.major_verid != 0);
-}
-
 static int nvme_check_sqid(NvmeCtrl *n, uint16_t sqid)
 {
     return sqid < n->num_queues && n->sq[sqid] != NULL ? 0 : -1;
@@ -1397,10 +1392,7 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case LNVM_CMD_VECT_ERASE_ASYNC:
-        if (lnvm_dev(n))
-            return lnvm_erase_async(n, ns, cmd, req);
-        return NVME_INVALID_OPCODE | NVME_DNR;
-
+        return lnvm_erase_async(n, ns, cmd, req);
     default:
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
@@ -2558,8 +2550,7 @@ static void nvme_init_namespaces(NvmeCtrl *n)
         id_ns->dpc = n->dpc;
         id_ns->dps = n->dps;
 
-        if (lnvm_dev(n))
-            id_ns->vs[0] = 0x1;
+        id_ns->vs[0] = 0x1;
 
         for (j = 0; j < n->nlbaf; j++) {
             id_ns->lbaf[j].ds = 12 + j; /* default to min 4K */
@@ -2910,9 +2901,8 @@ static int nvme_init(PCIDevice *pci_dev)
     nvme_init_pci(n);
     nvme_init_ctrl(n);
     nvme_init_namespaces(n);
-    if (lnvm_dev(n))
-        return lnvm_init(n);
-    return 0;
+
+    return lnvm_init(n);
 }
 
 static void lnvm_exit(NvmeCtrl *n)
@@ -2950,9 +2940,7 @@ static void nvme_exit(PCIDevice *pci_dev)
         memory_region_unref(&n->ctrl_mem);
     }
 
-    if (lnvm_dev(n)) {
-        lnvm_exit(n);
-    }
+    lnvm_exit(n);
 }
 
 static Property nvme_props[] = {
@@ -2988,7 +2976,6 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x1f1f),
-    DEFINE_PROP_UINT8("lver", NvmeCtrl, lnvm_ctrl.id_ctrl.major_verid, 0),
     DEFINE_PROP_UINT32("lsec_size", NvmeCtrl, lnvm_ctrl.params.sec_size, 4096),
     DEFINE_PROP_UINT32("lsecs_per_chk", NvmeCtrl, lnvm_ctrl.params.sec_per_chk, 4096),
     DEFINE_PROP_UINT8("lmax_sec_per_rq", NvmeCtrl, lnvm_ctrl.params.max_sec_per_rq, 64),
