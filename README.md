@@ -1,39 +1,43 @@
-### Qemu NVMe Driver Fork
+# Virtual Open-Channel SSD 2.0
 
-####About
+This repository implements support for exposing an NVMe device that implements the Open-Channel 2.0 specification.
 
-
-This work is part of the OpenChannelSSD/LightNVM project, derived from work on an NVMe driver for Qemu (git://git.qemu.org/qemu).
-The NVMe device emulation code has been extended to allow it to pose as a LightNVM-compatible device for testing the proposed kernel component, available from https://github.com/OpenChannelSSD/linux.
-
-#### Compiling & Installing 
-Configuration & installation follows the standard QEMU approach, consult [QEMU - Getting Started (Developers)](http://wiki.qemu.org/Documentation/GettingStartedDevelopers) for more information.
+## Compiling & Installing
 
 Below is a minimal example of the installation process for x86_64, kvm-enabled emulation using libaio for I/O.
 
-    ./configure --python=/usr/bin/python2 --enable-kvm --target-list=x86_64-softmmu --enable-linux-aio --prefix=$HOME/qemu-nvme
-    make -j8
+    git clone https://github.com/OpenChannelSSD/qemu-nvme.git
+
+    cd qemu-nvme
+    ./configure --enable-kvm --target-list=x86_64-softmmu --enable-linux-aio --prefix=$HOME/qemu-nvme
+    make
     make install
 
+That'll install the OCSSD enabled qemu binary into $HOME/qemu-nvme.
 
-#### Configuring the NVMe device driver
+## Configuring the virtual open-channel SSD drive
+
+The device must have a backend file to store its data. Create a backend file by
+
+    dd if=/dev/zero of=ocssd_backend.img bs=1M count=8096
+
+The qemu arguments must be extended with:
+
+    -drive file={path to ocssd backend file},id=myocssd,format=raw,if=none \
+    -device nvme,drive=myocssd,lnum_lun=4,lstrict=1,meta=16,mc=3 \
+
+The full command line could look like the following and creates an ocssd with 4 parallel units:
+
+    sudo $HOME/qemu-nvme/bin/qemu-system-x86_64 -m 4G -smp 4 -s \
+    -drive file={path to vm image},id=diskdrive,format=raw,if=none \
+    -device virtio-blk-pci,drive=diskdrive,scsi=off,config-wce=off,x-data-plane=on \
+    -drive file={path to ocssd backend file},id=myocssd,format=raw,if=none \
+    -device nvme,drive=myocssd,lnum_lun=4,lstrict=1,meta=16,mc=3
 
 A complete list of all options supported by the NVMe device can be found in [the source](hw/block/nvme.c) with comments on each option at the top of the file and a list of options and their default values toward the bottom of the file.
 
-Example:
-> -drive file=/home/<myuser>/blk_nvme_device,if=none,id=lightnvme
-> -device nvme,drive=lightnvme,serial=deadbeef,lver=1,ltype=0,lba_index=3,nlbaf=5,lchannels=1,namespaces=1
+In the virtual machine, make sure to install at least Linux kernel 4.17 or latest release candidate.
 
-In this case, a single namespace (namespaces=1) with 4K blocks (nlbaf=5,lba_index=3) is created, as large as the backing file. The device is marked as LightNVM-compatible (lver=1) and block-addressable(ltype=0). Each namespace is assigned a single channel (lchannels=1).
+## Current limitations
 
-#### Driver Limitations
-The modified QEMU NVMe driver has some limitations:
-  - The driver cannot support namespaces with different numbers of channels assigned to them - this is not a limitation of the LightNVM standard, but mostly one of determining an easy way of passing the configuration to the underlying driver.
-  - The driver does not yet persist the per-namespace physical- to logical block mapping table - ideally this should be handled by partitioning the namespaces (done) and ensuring the data is flushed before the VM shuts down.
-
-Patches, input and comments with respect to any of these limitations are gratefully accepted.
-
-#### QEMU-specific documentation
-Read the documentation in qemu-doc.html or on http://wiki.qemu-project.org
-
-- QEMU team
+  - The driver does not support multiple groups. This should however be easy to implement.
