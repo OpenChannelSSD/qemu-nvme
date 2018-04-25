@@ -58,15 +58,13 @@
  *  oacs=<oacs>      : Optional Admin command support, Default:Format
  *  cmbsz=<cmbsz>    : Controller Memory Buffer CMBSZ register, Default:0
  *  cmbloc=<cmbloc>  : Controller Memory Buffer CMBLOC register, Default:0
- *  lver=<int>         : version of the LightNVM standard to use,
- *                     : Default:0 to disable 2 for enabling 2.0
  *  lsec_per_chk=<int> : Number of sectors in a chunk. Default: 65536
  *  lws_min=<int>      : Mininum write size for device in sectors. Default: 4
  *  lws_opt=<int>      : Optimal write size for device in sectors. Default: 8
  *  lmw_cunits=<int>   : Number of written sectors required in chunk before read. Default: 32
  *  lmax_sec_per_rq=<int> : Maximum number of sectors per I/O request. Default: 64
- *  lnum_ch=<int>      : Number of controller channels. Default: 1
- *  lnum_lun=<int>     : Number of LUNs per channel, Default:1
+ *  lnum_grp=<int>      : Number of controller group. Default: 1. ONLY 1 supported!
+ *  lnum_pu=<int>     : Number of parallel units per group, Default:1
  *  lchunktable=<file> : Load state table from file destination (Provide path
  *  to file. If no file is provided a state table will be generated.
  *  lmetadata=<file>   : Load metadata from file destination
@@ -2983,7 +2981,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("lws_opt", NvmeCtrl, lnvm_ctrl.params.ws_opt, 8),
     DEFINE_PROP_UINT8("lmw_cunits", NvmeCtrl, lnvm_ctrl.params.mw_cunits, 32),
     DEFINE_PROP_UINT32("lnum_ch", NvmeCtrl, lnvm_ctrl.params.num_ch, 1),
-    DEFINE_PROP_UINT32("lnum_lun", NvmeCtrl, lnvm_ctrl.params.num_lun, 1),
+    DEFINE_PROP_UINT32("lnum_pu", NvmeCtrl, lnvm_ctrl.params.num_lun, 1),
     DEFINE_PROP_STRING("lchunkable", NvmeCtrl, lnvm_ctrl.chunk_fname),
     DEFINE_PROP_STRING("lmetadata", NvmeCtrl, lnvm_ctrl.meta_fname),
     DEFINE_PROP_UINT16("lmetasize", NvmeCtrl, lnvm_ctrl.params.sos, 16),
