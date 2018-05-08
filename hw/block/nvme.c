@@ -909,7 +909,7 @@ static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t ppa)
                       (chunk_meta->state & (LNVM_CHUNK_OPEN ||
                                             LNVM_CHUNK_BAD ||
                                             LNVM_CHUNK_FREE))) {
-        printf("nvme: reset: invalid chunk state (%llu -> %d (wp: %u))\n", ppa, chunk_meta->state, chunk_meta->wp);
+        printf("nvme: reset: invalid chunk state (%" PRIu64 " -> %d (wp: %" PRIu64 "))\n", ppa, chunk_meta->state, chunk_meta->wp);
     }
 
     chunk_meta->state = LNVM_CHUNK_FREE;
@@ -1175,7 +1175,7 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 printf("nvme: reset: only single chunk reset supported %u\n", nlb);
 
             if (lnvm_chunk_set_free(ns, &n->lnvm_ctrl, slba)) {
-                printf("trim failed: %llu\n", slba);
+                printf("trim failed: %" PRIu64 "\n", slba);
                 req->status = 0x40C1; /* Invalid reset */
             }
 
@@ -2590,7 +2590,7 @@ static int lnvm_init_meta(LnvmCtrl *ln)
         ln->meta_fname = malloc(14);
         if (!ln->meta_fname)
             return -ENOMEM;
-        strncpy(ln->meta_fname, "qemu.chkstate\0", 14);
+        strncpy(ln->meta_fname, "meta.qemu\0", 14);
     } else {
         ln->meta_auto_gen = 0;
     }
@@ -2747,7 +2747,7 @@ static int lnvm_init(NvmeCtrl *n)
         ln->chunk_fname = malloc(16);
         if (!ln->chunk_fname)
             return -ENOMEM;
-        strncpy(ln->chunk_fname, "statetable.qemu\0", 16);
+        strncpy(ln->chunk_fname, "chunk.qemu\0", 16);
     } else {
         ln->state_auto_gen = 0;
     }
@@ -2966,8 +2966,8 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("extended", NvmeCtrl, extended, 0),
     DEFINE_PROP_UINT8("dpc", NvmeCtrl, dpc, 0),
     DEFINE_PROP_UINT8("dps", NvmeCtrl, dps, 0),
-    DEFINE_PROP_UINT8("mc", NvmeCtrl, mc, 0),
-    DEFINE_PROP_UINT8("meta", NvmeCtrl, meta, 0),
+    DEFINE_PROP_UINT8("mc", NvmeCtrl, mc, 2),
+    DEFINE_PROP_UINT8("meta", NvmeCtrl, meta, 16),
     DEFINE_PROP_UINT32("cmbsz", NvmeCtrl, cmbsz, 0),
     DEFINE_PROP_UINT32("cmbloc", NvmeCtrl, cmbloc, 0),
     DEFINE_PROP_UINT16("oacs", NvmeCtrl, oacs, NVME_OACS_FORMAT),
@@ -2982,7 +2982,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("lmw_cunits", NvmeCtrl, lnvm_ctrl.params.mw_cunits, 32),
     DEFINE_PROP_UINT32("lnum_ch", NvmeCtrl, lnvm_ctrl.params.num_ch, 1),
     DEFINE_PROP_UINT32("lnum_pu", NvmeCtrl, lnvm_ctrl.params.num_lun, 1),
-    DEFINE_PROP_STRING("lchunkable", NvmeCtrl, lnvm_ctrl.chunk_fname),
+    DEFINE_PROP_STRING("lchunktable", NvmeCtrl, lnvm_ctrl.chunk_fname),
     DEFINE_PROP_STRING("lmetadata", NvmeCtrl, lnvm_ctrl.meta_fname),
     DEFINE_PROP_UINT16("lmetasize", NvmeCtrl, lnvm_ctrl.params.sos, 16),
     DEFINE_PROP_UINT32("lb_err_write", NvmeCtrl, lnvm_ctrl.err_write, 0),
