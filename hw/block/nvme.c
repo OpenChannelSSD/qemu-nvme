@@ -1336,6 +1336,7 @@ static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t spba = le64_to_cpu(dm->slba);
     uint64_t psl[ln->params.max_sec_per_rq];
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
+    uint64_t mptr = le64_to_cpu(dm->metadata);
     int i;
 
     if (nlb > 1) {
@@ -1357,6 +1358,17 @@ static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             req->status = 0x40ff;
 
             return NVME_INVALID_FIELD | NVME_DNR;
+        }
+
+        /* Update the metadata buffer with the new chunk descriptor of the
+         * reset chunks.
+         */
+        if (mptr) {
+            LnvmCS *chunk_meta;
+
+            chunk_meta = lnvm_chunk_get_state(ns, ln, psl[i]);
+            nvme_addr_write(n, mptr + i * sizeof(LnvmCS), chunk_meta,
+            		sizeof(LnvmCS));
         }
     }
 
