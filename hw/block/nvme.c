@@ -3051,6 +3051,7 @@ static void nvme_instance_init(Object *obj)
                         nvme_get_bootindex,
                         nvme_set_bootindex, NULL, NULL, NULL);
     object_property_set_int(obj, -1, "bootindex", NULL);
+    object_ref(obj);
 }
 
 static const TypeInfo nvme_info = {
