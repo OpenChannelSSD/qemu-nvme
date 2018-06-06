@@ -24,7 +24,7 @@ The device must have a backend file to store its data. Create a backend file by 
 The qemu arguments must be extended with:
 
     -drive file={path to ocssd backend file},id=myocssd,format=raw,if=none \
-    -device nvme,drive=myocssd,lnum_pu=4,lstrict=1,meta=16,mc=3 \
+    -device nvme,drive=myocssd,serial=deadbeef,lnum_pu=4,lstrict=1,meta=16,mc=3 \
 
 The full command line could look like the following and creates an ocssd with 4 parallel units:
 
@@ -32,7 +32,7 @@ The full command line could look like the following and creates an ocssd with 4 
     -drive file={path to vm image},id=diskdrive,format=raw,if=none \
     -device virtio-blk-pci,drive=diskdrive,scsi=off,config-wce=off,x-data-plane=on \
     -drive file={path to ocssd backend file},id=myocssd,format=raw,if=none \
-    -device nvme,drive=myocssd,lnum_pu=4,lstrict=1,meta=16,mc=3
+    -device nvme,drive=myocssd,serial=deadbeef,lnum_pu=4,lstrict=1,meta=16,mc=3
 
 A complete list of all options supported by the NVMe device can be found in [the source](hw/block/nvme.c#L61) with comments on each option at the top of the file and a list of options and their default values toward the bottom of the file.
 
