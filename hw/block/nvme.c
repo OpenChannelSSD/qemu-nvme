@@ -1250,9 +1250,8 @@ static void lnvm_chunk_meta_init(LnvmCtrl *ln, LnvmCS *chunk_meta,
 static void lnvm_chunk_meta_save(NvmeNamespace *ns)
 {
     LnvmCtrl *ln = &ns->ctrl->lnvm_ctrl;
-    Lnvm_IdGeo *geo = &ln->id_ctrl.geo;
     LnvmCS *chunk_meta = ns->chunk_meta;
-    uint32_t nr_chunks = geo->num_chk;
+    uint32_t nr_chunks = ln->params.total_chks;
     FILE *fp;
 
     if (!ln->chunk_fname) {
