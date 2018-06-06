@@ -2590,11 +2590,13 @@ static int lnvm_init_meta(LnvmCtrl *ln)
         if (!ln->meta_fname)
             return -ENOMEM;
         strncpy(ln->meta_fname, "meta.qemu\0", 14);
+
+        ln->metadata = fopen(ln->meta_fname, "w+");
     } else {
         ln->meta_auto_gen = 0;
+        ln->metadata = fopen(ln->meta_fname, "r+");
     }
 
-    ln->metadata = fopen(ln->meta_fname, "w+");
     if (!ln->metadata) {
         error_report("nvme: lnvm_init_meta: fopen(%s)\n", ln->meta_fname);
         return -EEXIST;
@@ -2914,8 +2916,7 @@ static void lnvm_exit(NvmeCtrl *n)
         free(ln->chunk_fname);
     if (ln->meta_auto_gen)
         free(ln->meta_fname);
-    fclose(n->lnvm_ctrl.metadata);
-    n->lnvm_ctrl.metadata = NULL;
+    fclose(ln->metadata);
 }
 
 static void nvme_exit(PCIDevice *pci_dev)
