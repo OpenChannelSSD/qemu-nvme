@@ -1023,7 +1023,6 @@ typedef struct LnvmCtrl {
     uint8_t        state_auto_gen;
     char           *meta_fname;
     char           *chunk_fname;
-    FILE           *bbt_fp;
     uint32_t       err_write;
     uint32_t       n_err_write;
     uint32_t       err_write_cnt;

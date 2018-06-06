@@ -2914,9 +2914,7 @@ static void lnvm_exit(NvmeCtrl *n)
         free(ln->chunk_fname);
     if (ln->meta_auto_gen)
         free(ln->meta_fname);
-    fclose(n->lnvm_ctrl.bbt_fp);
     fclose(n->lnvm_ctrl.metadata);
-    n->lnvm_ctrl.bbt_fp = NULL;
     n->lnvm_ctrl.metadata = NULL;
 }
 
