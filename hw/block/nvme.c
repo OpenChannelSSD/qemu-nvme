@@ -909,7 +909,12 @@ static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t ppa)
                       (chunk_meta->state & (LNVM_CHUNK_OPEN ||
                                             LNVM_CHUNK_BAD ||
                                             LNVM_CHUNK_FREE))) {
-        printf("nvme: reset: invalid chunk state (%" PRIu64 " -> %d (wp: %" PRIu64 "))\n", ppa, chunk_meta->state, chunk_meta->wp);
+        if (chunk_meta->state & LNVM_CHUNK_FREE)
+            printf("nvme: reset double reset (%" PRIu64 ")\n", ppa);
+        else if (chunk_meta->state & LNVM_CHUNK_OPEN)
+            printf("nvme: reset prematurely (%" PRIu64 " wp: %" PRIu64")\n", ppa, chunk_meta->wp);
+        else
+            printf("nvme: reset: invalid chunk state (%" PRIu64 " -> %d (wp: %" PRIu64 "))\n", ppa, chunk_meta->state, chunk_meta->wp);
     }
 
     chunk_meta->state = LNVM_CHUNK_FREE;
