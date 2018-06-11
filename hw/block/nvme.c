@@ -1908,7 +1908,7 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     lpol = dw12;
     lpou = dw13;
 
-    len = ((numdu << 16) | numdl) << 2;
+    len = (((numdu << 16) | numdl) + 1) << 2;
     off = (lpou << 32ULL) | lpol;
 
     switch (lid) {
