@@ -863,6 +863,16 @@ static inline int64_t lnvm_lba_to_chunk_no(LnvmCtrl *ln, uint64_t lba)
     return cno;
 }
 
+static inline uint64_t lnvm_chunk_no_to_lba(LnvmCtrl *ln, int64_t cno) {
+    uint64_t ch = cno / ln->params.chk_per_ch;
+    uint64_t lun = cno % ln->params.chk_per_ch / ln->params.chk_per_lun;
+    uint64_t chk = cno % ln->params.chk_per_lun;
+
+    return ch << ln->lbaf.ch_offset |
+        lun << ln->lbaf.lun_offset |
+        chk << ln->lbaf.chk_offset;
+}
+
 static inline int lnvm_check_state_table(NvmeNamespace *ns, LnvmCtrl *ln,
                                          uint64_t lba)
 {
@@ -1230,7 +1240,7 @@ static void lnvm_chunk_meta_init(LnvmCtrl *ln, LnvmCS *chunk_meta,
         chunk_meta[i].state = LNVM_CHUNK_FREE;
         chunk_meta[i].type = LNVM_CHUNK_TYPE_SEQ;
         chunk_meta[i].wear_index = 0;
-        chunk_meta[i].slba = i * ln->params.sec_per_chk;
+        chunk_meta[i].slba = lnvm_chunk_no_to_lba(ln, i);
         chunk_meta[i].cnlb = ln->params.sec_per_chk;
         chunk_meta[i].wp = 0;
     }
