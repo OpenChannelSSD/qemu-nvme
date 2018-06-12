@@ -1255,9 +1255,8 @@ static void lnvm_chunk_meta_init(LnvmCtrl *ln, LnvmCS *chunk_meta,
 static void lnvm_chunk_meta_save(NvmeNamespace *ns)
 {
     LnvmCtrl *ln = &ns->ctrl->lnvm_ctrl;
-    Lnvm_IdGeo *geo = &ln->id_ctrl.geo;
     LnvmCS *chunk_meta = ns->chunk_meta;
-    uint32_t nr_chunks = geo->num_chk;
+    uint32_t nr_chunks = ln->params.total_chks;
     FILE *fp;
 
     if (!ln->chunk_fname) {
@@ -2596,11 +2595,13 @@ static int lnvm_init_meta(LnvmCtrl *ln)
         if (!ln->meta_fname)
             return -ENOMEM;
         strncpy(ln->meta_fname, "meta.qemu\0", 14);
+
+        ln->metadata = fopen(ln->meta_fname, "w+");
     } else {
         ln->meta_auto_gen = 0;
+        ln->metadata = fopen(ln->meta_fname, "r+");
     }
 
-    ln->metadata = fopen(ln->meta_fname, "w+");
     if (!ln->metadata) {
         error_report("nvme: lnvm_init_meta: fopen(%s)\n", ln->meta_fname);
         return -EEXIST;
@@ -2920,10 +2921,7 @@ static void lnvm_exit(NvmeCtrl *n)
         free(ln->chunk_fname);
     if (ln->meta_auto_gen)
         free(ln->meta_fname);
-    fclose(n->lnvm_ctrl.bbt_fp);
-    fclose(n->lnvm_ctrl.metadata);
-    n->lnvm_ctrl.bbt_fp = NULL;
-    n->lnvm_ctrl.metadata = NULL;
+    fclose(ln->metadata);
 }
 
 static void nvme_exit(PCIDevice *pci_dev)
@@ -3058,6 +3056,7 @@ static void nvme_instance_init(Object *obj)
                         nvme_get_bootindex,
                         nvme_set_bootindex, NULL, NULL, NULL);
     object_property_set_int(obj, -1, "bootindex", NULL);
+    object_ref(obj);
 }
 
 static const TypeInfo nvme_info = {
