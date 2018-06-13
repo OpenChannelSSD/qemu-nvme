@@ -69,8 +69,8 @@
  *  to file. If no file is provided a state table will be generated.
  *  lmetadata=<file>   : Load metadata from file destination
  *  lmetasize=<int>    : LightNVM metadata (OOB) size. Default: 16
- *  lb_err_write       : First ppa to inject write error. Default: 0 (disabled)
- *  ln_err_write       : Number of ppas affected by write error injection
+ *  lb_err_write       : First lba to inject write error. Default: 0 (disabled)
+ *  ln_err_write       : Number of lbas affected by write error injection
  *  ldebug             : Enable LightNVM debugging. Default: 0 (disabled)
  *  lstrict            : Enable strict checks. Necessary for pblk (disabled)
  *
@@ -416,13 +416,13 @@ static void lnvm_inject_w_err(LnvmCtrl *ln, NvmeRequest *req, NvmeCqe *cqe)
 {
    if (ln->err_write && req->is_write) {
         if (ln->debug)
-            printf("nvme:err_stat:err_write_cnt:%d,nppas:%d,err_write:%d, n_err_write:%d\n",
+            printf("nvme:err_stat:err_write_cnt:%d,nlbas:%d,err_write:%d, n_err_write:%d\n",
                     ln->err_write_cnt, req->nlb, ln->err_write, ln->n_err_write);
         if ((ln->err_write_cnt + req->nlb) > ln->err_write) {
             int i;
             int bit;
 
-            /* kill n_err_write sectors in ppa list */
+            /* kill n_err_write sectors in lba list */
             for (i = 0; i < req->nlb; i++) {
                 if (ln->err_write_cnt + i < ln->err_write)
                     continue;
@@ -655,13 +655,13 @@ static uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 }
 
 static uint16_t lnvm_rw_check_req(NvmeCtrl *n, LnvmCtrl *ln, NvmeNamespace *ns,
-        NvmeCmd *cmd, NvmeRequest *req, uint64_t sppa, uint64_t eppa,
+        NvmeCmd *cmd, NvmeRequest *req, uint64_t slba, uint64_t elba,
         uint32_t nlb, uint16_t ctrl, uint64_t data_size, uint64_t meta_size)
 {
     Lnvm_IdWrt *wrt = &ln->id_ctrl.wrt;
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
 
-    if (sppa == -1 || eppa == -1) {
+    if (slba == -1 || elba == -1) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -681,18 +681,18 @@ static uint16_t lnvm_rw_check_req(NvmeCtrl *n, LnvmCtrl *ln, NvmeNamespace *ns,
     }
 
     /* Reuse check logic from nvme_rw */
-    return nvme_rw_check_req(n, ns, cmd, req, sppa, eppa, nlb, ctrl,
+    return nvme_rw_check_req(n, ns, cmd, req, slba, elba, nlb, ctrl,
                                                         data_size, meta_size);
 }
 
-static void print_ppa(LnvmCtrl *ln, uint64_t ppa)
+static void print_lba(LnvmCtrl *ln, uint64_t lba)
 {
-    uint64_t ch = (ppa & ln->lbaf.ch_mask) >> ln->lbaf.ch_offset;
-    uint64_t lun = (ppa & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
-    uint64_t chk = (ppa & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
-    uint64_t sec = (ppa & ln->lbaf.sec_mask) >> ln->lbaf.sec_offset;
+    uint64_t ch = (lba & ln->lbaf.ch_mask) >> ln->lbaf.ch_offset;
+    uint64_t lun = (lba & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
+    uint64_t chk = (lba & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
+    uint64_t sec = (lba & ln->lbaf.sec_mask) >> ln->lbaf.sec_offset;
 
-    printf("ppa: ch(%lu), lun(%lu), chunk(%lu), sec(%lu)\n",
+    printf("lba: ch(%lu), lun(%lu), chunk(%lu), sec(%lu)\n",
                                                     ch, lun, chk, sec);
 }
 
@@ -701,7 +701,7 @@ static void print_rq(LnvmCtrl *ln, uint64_t *psl, uint32_t nlb)
     uint32_t i;
 
     for (i = 0; i < nlb; i++)
-        print_ppa(ln, psl[i]);
+        print_lba(ln, psl[i]);
 }
 
 struct lnvm_metadata_format {
@@ -724,13 +724,13 @@ struct lnvm_tgt_meta {
  * NOTE: Ensure that `lnvm_set_written_state` has been called prior to this
  * function to ensure correct file offset of ln->metadata?
  */
-static inline int lnvm_meta_write(LnvmCtrl *ln, uint64_t ppa, void *meta)
+static inline int lnvm_meta_write(LnvmCtrl *ln, uint64_t lba, void *meta)
 {
     FILE *meta_fp = ln->metadata;
     size_t tgt_oob_len = ln->params.sos;
     size_t int_oob_len = ln->int_meta_size;
     size_t meta_len = tgt_oob_len + int_oob_len;
-    uint32_t seek = ppa * meta_len;
+    uint32_t seek = lba * meta_len;
     size_t ret;
 
     if (fseek(meta_fp, seek, SEEK_SET)) {
@@ -758,13 +758,13 @@ static inline int lnvm_meta_write(LnvmCtrl *ln, uint64_t ppa, void *meta)
  * NOTE: Ensure that `lnvm_meta_state_get` has been called to have the correct
  * file offset in ln->metadata?
  */
-static inline int lnvm_meta_read(LnvmCtrl *ln, uint64_t ppa, void *meta)
+static inline int lnvm_meta_read(LnvmCtrl *ln, uint64_t lba, void *meta)
 {
     FILE *meta_fp = ln->metadata;
     size_t tgt_oob_len = ln->params.sos;
     size_t int_oob_len = ln->int_meta_size;
     size_t meta_len = tgt_oob_len + int_oob_len;
-    uint32_t seek = ppa * meta_len;
+    uint32_t seek = lba * meta_len;
     size_t ret;
 
     if (fseek(meta_fp, seek, SEEK_SET)) {
@@ -796,7 +796,7 @@ static inline int64_t lnvm_bbt_pos_get(LnvmCtrl *ln, uint64_t r)
     return chk + lun_off;
 }
 
-static inline int64_t lnvm_ppa_to_off(LnvmCtrl *ln, uint64_t r)
+static inline int64_t lnvm_lba_to_off(LnvmCtrl *ln, uint64_t r)
 {
     uint64_t ch = (r & ln->lbaf.ch_mask) >> ln->lbaf.ch_offset;
     uint64_t lun = (r & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
@@ -809,7 +809,7 @@ static inline int64_t lnvm_ppa_to_off(LnvmCtrl *ln, uint64_t r)
     off += lun * ln->params.lun_units;
 
     if (off > ln->params.total_units) {
-        printf("lnvm: ppa OOB:ch:%lu,lun:%lu,chk:%lu,sec:%lu\n",
+        printf("lnvm: lba OOB:ch:%lu,lun:%lu,chk:%lu,sec:%lu\n",
                 ch, lun, chk, sec);
         return -1;
     }
@@ -817,14 +817,14 @@ static inline int64_t lnvm_ppa_to_off(LnvmCtrl *ln, uint64_t r)
     return off;
 }
 
-static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t ppa,
+static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t lba,
                                         uint32_t *state)
 {
     FILE *meta_fp = ln->metadata;
     size_t tgt_oob_len = ln->params.sos;
     size_t int_oob_len = ln->int_meta_size;
     size_t meta_len = tgt_oob_len + int_oob_len;
-    uint32_t seek = ppa * meta_len;
+    uint32_t seek = lba * meta_len;
     size_t ret;
 
     if (fseek(meta_fp, seek, SEEK_SET)) {
@@ -838,53 +838,37 @@ static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t ppa,
         if (errno == EAGAIN)
             return 0;
         perror("lnvm_meta_state_get: fread");
-        printf("lnvm_meta_state_get: ppa(%lu), ret(%lu)\n", ppa, ret);
+        printf("lnvm_meta_state_get: lba(%lu), ret(%lu)\n", lba, ret);
         return -1;
     }
 
     return 0;
 }
 
-static inline int64_t lnvm_chunk_pos_from_ppa(LnvmCtrl *ln, uint64_t ppa)
+static inline int64_t lnvm_lba_to_chunk_no(LnvmCtrl *ln, uint64_t lba)
 {
-    uint64_t ch = (ppa & ln->lbaf.ch_mask) >> ln->lbaf.ch_offset;
-    uint64_t lun = (ppa & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
-    uint64_t chk = (ppa & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
-    uint64_t pos = chk;
+    uint64_t ch = (lba & ln->lbaf.ch_mask) >> ln->lbaf.ch_offset;
+    uint64_t lun = (lba & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
+    uint64_t chk = (lba & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
+    uint64_t cno = chk;
 
-    pos += lun * ln->params.chk_per_lun;
-    pos += ch * ln->params.chk_per_ch;
+    cno += lun * ln->params.chk_per_lun;
+    cno += ch * ln->params.chk_per_ch;
 
-    if (pos > ln->params.total_chks) {
+    if (cno > ln->params.total_chks) {
         printf("lnvm: chunk meta OOB: ch:%lu, lun:%lu, chk:%lu\n", ch, lun, chk);
         return -1;
     }
 
-    return pos;
-}
-
-static inline int32_t lnvm_chunk_sec_from_ppa(LnvmCtrl *ln, uint64_t ppa)
-{
-    uint64_t pos = (ppa & ln->lbaf.sec_mask) >> ln->lbaf.sec_offset;
-
-    if (pos > ln->params.sec_per_chk) {
-        uint64_t ch = (ppa & ln->lbaf.ch_mask) >> ln->lbaf.ch_offset;
-        uint64_t lun = (ppa & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
-        uint64_t chk = (ppa & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
-
-        printf("lnvm: chunk OOB: ch:%lu, lun:%lu, chk:%lu\n", ch, lun, chk);
-        return -1;
-    }
-
-    return pos;
+    return cno;
 }
 
 static inline int lnvm_check_state_table(NvmeNamespace *ns, LnvmCtrl *ln,
-                                         uint64_t ppa)
+                                         uint64_t lba)
 {
     LnvmCS chunk_meta;
 
-    chunk_meta = ns->chunk_meta[lnvm_chunk_pos_from_ppa(ln, ppa)];
+    chunk_meta = ns->chunk_meta[lnvm_lba_to_chunk_no(ln, lba)];
     return chunk_meta.state & LNVM_CHUNK_CLOSED;
 }
 
@@ -894,27 +878,27 @@ static inline void *lnvm_meta_index(LnvmCtrl *ln, void *meta, uint32_t index)
 }
 
 static LnvmCS *lnvm_chunk_get_state(NvmeNamespace *ns, LnvmCtrl *ln,
-                                    uint64_t ppa)
+                                    uint64_t lba)
 {
-    return &ns->chunk_meta[lnvm_chunk_pos_from_ppa(ln, ppa)];
+    return &ns->chunk_meta[lnvm_lba_to_chunk_no(ln, lba)];
 }
 
-static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t ppa)
+static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba)
 {
     LnvmCS *chunk_meta;
 
-    chunk_meta = lnvm_chunk_get_state(ns, ln, ppa);
+    chunk_meta = lnvm_chunk_get_state(ns, ln, lba);
 
     if (!(chunk_meta->state & LNVM_CHUNK_CLOSED) ||
                       (chunk_meta->state & (LNVM_CHUNK_OPEN ||
                                             LNVM_CHUNK_BAD ||
                                             LNVM_CHUNK_FREE))) {
         if (chunk_meta->state & LNVM_CHUNK_FREE)
-            printf("nvme: reset double reset (%" PRIu64 ")\n", ppa);
+            printf("nvme: reset double reset (%" PRIu64 ")\n", lba);
         else if (chunk_meta->state & LNVM_CHUNK_OPEN)
-            printf("nvme: reset prematurely (%" PRIu64 " wp: %" PRIu64")\n", ppa, chunk_meta->wp);
+            printf("nvme: reset prematurely (%" PRIu64 " wp: %" PRIu64")\n", lba, chunk_meta->wp);
         else
-            printf("nvme: reset: invalid chunk state (%" PRIu64 " -> %d (wp: %" PRIu64 "))\n", ppa, chunk_meta->state, chunk_meta->wp);
+            printf("nvme: reset: invalid chunk state (%" PRIu64 " -> %d (wp: %" PRIu64 "))\n", lba, chunk_meta->state, chunk_meta->wp);
     }
 
     chunk_meta->state = LNVM_CHUNK_FREE;
@@ -926,11 +910,11 @@ static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t ppa)
     return 0;
 }
 
-static int lnvm_chunk_advance_wp(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t ppa)
+static int lnvm_chunk_advance_wp(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba)
 {
     LnvmCS *chunk_meta;
 
-    chunk_meta = lnvm_chunk_get_state(ns, ln, ppa);
+    chunk_meta = lnvm_chunk_get_state(ns, ln, lba);
 
     if (chunk_meta->state & LNVM_CHUNK_FREE) {
         chunk_meta->state &= ~LNVM_CHUNK_FREE;
@@ -965,7 +949,7 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
     LnvmCtrl *ln = &n->lnvm_ctrl;
     void *msl;
     uint64_t meta = le64_to_cpu(lrw->metadata);
-    uint64_t ppa_off;
+    uint64_t lba_off;
     uint8_t i;
     uint16_t err;
 
@@ -982,36 +966,36 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
     if (meta && req->is_write)
         nvme_addr_read(n, meta, (void *)msl, nlb * ln->params.sos);
 
-    /* If several LUNs are set up, the ppa list sent by the host will not be
-     * sequential. In this case, we need to pass on the list of ppas to the dma
+    /* If several LUNs are set up, the lba list sent by the host will not be
+     * sequential. In this case, we need to pass on the list of lbas to the dma
      * handlers to write/read data to/from the right physical sector
      */
     for (i = 0; i < nlb; i++) {
-        ppa_off = lnvm_ppa_to_off(ln, psl[i]);
+        lba_off = lnvm_lba_to_off(ln, psl[i]);
         (*aio_sector_list)[i] =
-                ns->start_block + (ppa_off << (data_shift - BDRV_SECTOR_BITS));
+                ns->start_block + (lba_off << (data_shift - BDRV_SECTOR_BITS));
 
         if (req->is_write) {
             if (lnvm_chunk_advance_wp(ns, ln, psl[i])) {
                 printf("lnvm_rw: advance chunk wp failed\n");
-                print_ppa(ln, psl[i]);
+                print_lba(ln, psl[i]);
                 err = NVME_INVALID_FIELD | NVME_DNR;
                 goto fail_free_msl;
             }
 
             if (meta) {
-                if (lnvm_meta_write(ln, ppa_off, lnvm_meta_index(ln, msl, i))) {
+                if (lnvm_meta_write(ln, lba_off, lnvm_meta_index(ln, msl, i))) {
                     printf("lnvm_rw: write metadata failed\n");
-                    print_ppa(ln, psl[i]);
+                    print_lba(ln, psl[i]);
                     err = NVME_INVALID_FIELD | NVME_DNR;
                     goto fail_free_msl;
                 }
             }
         } else {
             if (meta) {
-                if (lnvm_meta_read(ln, ppa_off, lnvm_meta_index(ln, msl, i))) {
+                if (lnvm_meta_read(ln, lba_off, lnvm_meta_index(ln, msl, i))) {
                     printf("lnvm_rw: read metadata failed\n");
-                    print_ppa(ln, psl[i]);
+                    print_lba(ln, psl[i]);
                     err = NVME_INVALID_FIELD | NVME_DNR;
                     goto fail_free_msl;
                 }
@@ -1039,8 +1023,8 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
     uint64_t psl[ln->params.max_sec_per_rq];
     uint64_t *aio_sector_list;
-    uint64_t sppa;
-    uint64_t eppa;
+    uint64_t slba_offset;
+    uint64_t elba_offset;
     uint32_t nlb  = le16_to_cpu(lrw->nlb) + 1;
     uint64_t prp1 = le64_to_cpu(lrw->prp1);
     uint64_t prp2 = le64_to_cpu(lrw->prp2);
@@ -1078,11 +1062,11 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->lnvm_slba = le64_to_cpu(lrw->slba);
     req->is_write = is_write;
 
-    sppa = lnvm_ppa_to_off(ln, psl[0]);
-    eppa = lnvm_ppa_to_off(ln, psl[nlb - 1]);
+    slba_offset = lnvm_lba_to_off(ln, psl[0]);
+    elba_offset = lnvm_lba_to_off(ln, psl[nlb - 1]);
 
-    err = lnvm_rw_check_req(n, ln, ns, cmd, req, sppa, eppa, nlb, ctrl,
-                                                data_size, meta_size);
+    err = lnvm_rw_check_req(n, ln, ns, cmd, req, slba_offset, elba_offset,
+                            nlb, ctrl, data_size, meta_size);
     if (err) {
         printf("lnvm_rw: failed nvme_rw_check\n");
         return err;
@@ -1103,7 +1087,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return lnvm_rw_free_rq(aio_sector_list);
     }
 
-    req->slba = sppa;
+    req->slba = slba_offset;
     req->meta_size = 0;
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
@@ -1355,7 +1339,7 @@ static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     for (i = 0; i < nlb; i++) {
         if (lnvm_chunk_set_free(ns, ln, psl[i])) {
             printf("lnvm_erase_async: failed: ");
-            print_ppa(ln, psl[0]);
+            print_lba(ln, psl[0]);
             req->status = 0x40ff;
 
             return NVME_INVALID_FIELD | NVME_DNR;
