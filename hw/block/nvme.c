@@ -1254,14 +1254,22 @@ static void lnvm_chunk_meta_save(NvmeNamespace *ns)
     FILE *fp;
 
     if (!ln->chunk_fname) {
-        printf("nvme: could not save chunk metadata. File do not exist\n");
+        printf("nvme: could not save chunk metadata. File does not exist\n");
         return;
     }
 
-    fp = fopen(ln->chunk_fname, "w");
-    if (!fp) {
-        printf("nvme: could not save chunk metadata. Cannot open file\n");
-        return;
+    if (ln->state_auto_gen) {
+        fp = fopen(ln->chunk_fname, "w+");
+        if (!fp) {
+            printf("nvme: could not save chunk metadata. Cannot open file\n");
+            return;
+        }
+    } else {
+        fp = fopen(ln->chunk_fname, "r+");
+        if (!fp) {
+            printf("nvme: could not save chunk metadata. Cannot open file\n");
+            return;
+        }
     }
 
     if (fwrite(chunk_meta, sizeof(LnvmCS), nr_chunks, fp) != nr_chunks) {
@@ -1278,29 +1286,45 @@ static int lnvm_chunk_meta_load(NvmeNamespace *ns, uint32_t offset,
 {
     struct LnvmCtrl *ln = &ns->ctrl->lnvm_ctrl;
     LnvmCS *chunk_meta = ns->chunk_meta;
+    struct stat buf;
     FILE *fp;
+    size_t chunk_tbytes;
     size_t ret;
+
+    chunk_tbytes = sizeof(LnvmCS) * ln->params.total_chks;
 
     if (!ln->chunk_fname) {
         lnvm_chunk_meta_init(ln, chunk_meta, nr_chunks);
         return 0;
     }
 
-    fp = fopen(ln->chunk_fname, "r");
+    fp = fopen(ln->chunk_fname, "r+");
     if (!fp) {
         printf("nvme: could not open chunk metadata\n");
         return -1;
     }
 
-    if (fseek(fp, offset, SEEK_SET)) {
-        printf("nvme: could not seek chunk metadata\n");
+    if (fstat(fileno(fp), &buf)) {
+        error_report("nvme: lnvm_chunk_meta_load: fstat(%s)\n", ln->chunk_fname);
         return -1;
     }
 
-    ret = fread(chunk_meta, sizeof(LnvmCS), nr_chunks, fp);
-    if (ret != nr_chunks) {
-        printf("nvme: could not read chunk metadata\n");
-        return -1;
+    if (buf.st_size == chunk_tbytes) {
+        if (fseek(fp, offset, SEEK_SET)) {
+            printf("nvme: could not seek chunk metadata\n");
+            return -1;
+        }
+
+        ret = fread(chunk_meta, sizeof(LnvmCS), nr_chunks, fp);
+        if (ret != nr_chunks) {
+            printf("nvme: could not read chunk metadata\n");
+            return -1;
+        }
+    } else {
+        lnvm_chunk_meta_init(ln, chunk_meta, nr_chunks);
+
+        if (fwrite(chunk_meta, sizeof(LnvmCS), nr_chunks, fp) != nr_chunks)
+            printf("nvme: could not save chunk metadata. Cannot write to file\n");
     }
 
     fclose(fp);
@@ -2656,6 +2680,8 @@ static int lnvm_init(NvmeCtrl *n)
 
     for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
+        ns->ctrl = n;
+
         chnl_chks = ns->ns_blks / ln->params.sec_per_chk;
 
         ln->id_ctrl.major_verid = 2;
@@ -2911,16 +2937,14 @@ static void lnvm_exit(NvmeCtrl *n)
     for (i = 0; i < n->num_namespaces; i++)
         lnvm_chunk_meta_save(&n->namespaces[i]);
 
-    if (ln->state_auto_gen)
-        free(ln->chunk_fname);
-    if (ln->meta_auto_gen)
-        free(ln->meta_fname);
     fclose(ln->metadata);
 }
 
 static void nvme_exit(PCIDevice *pci_dev)
 {
     NvmeCtrl *n = NVME(pci_dev);
+
+    lnvm_exit(n);
 
     nvme_clear_ctrl(n);
     g_free(n->namespaces);
@@ -2934,8 +2958,6 @@ static void nvme_exit(PCIDevice *pci_dev)
     if (n->cmbsz) {
         memory_region_unref(&n->ctrl_mem);
     }
-
-    lnvm_exit(n);
 }
 
 static Property nvme_props[] = {
