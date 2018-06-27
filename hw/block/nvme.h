@@ -692,9 +692,7 @@ typedef struct Lnvm_IdGeo {
     uint16_t        num_lun;
     uint32_t        num_chk;
     uint32_t        clba;
-    uint32_t        csecs;
-    uint32_t        sos;
-    uint8_t         resv[44];
+    uint8_t         resv[52];
 } Lnvm_IdGeo;
 
 typedef struct Lnvm_IdWrt {

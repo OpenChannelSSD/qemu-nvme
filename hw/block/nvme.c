@@ -2690,8 +2690,6 @@ static int lnvm_init(NvmeCtrl *n)
         geo->num_lun = cpu_to_le16(ln->params.num_lun);
         geo->num_chk = cpu_to_le32(chnl_chks / ln->params.num_lun);
         geo->clba = cpu_to_le32(ln->params.sec_per_chk);
-        geo->csecs = cpu_to_le32(ln->params.sec_size);
-        geo->sos = cpu_to_le32(ln->params.sos);
 
         wrt = &ln->id_ctrl.wrt;
         wrt->ws_min = cpu_to_le32(ln->params.ws_min);
