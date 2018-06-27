@@ -894,7 +894,7 @@ static LnvmCS *lnvm_chunk_get_state(NvmeNamespace *ns, LnvmCtrl *ln,
     return &ns->chunk_meta[lnvm_lba_to_chunk_no(ln, lba)];
 }
 
-static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba)
+static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba, hwaddr mptr)
 {
     LnvmCS *chunk_meta;
 
@@ -915,6 +915,9 @@ static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba)
     chunk_meta->state = LNVM_CHUNK_FREE;
     chunk_meta->wear_index++;
     chunk_meta->wp = 0;
+    
+    if (mptr)
+        nvme_addr_write(ns->ctrl, mptr, chunk_meta, sizeof(*chunk_meta);
 
     //TODO: Should we save to file here?
 
@@ -1176,7 +1179,7 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             if (nlb < ln->params.sec_per_chk || nlb > ln->params.sec_per_chk)
                 printf("nvme: reset: invalid reset size. (%u != %u)\n", nlb, ln->params.sec_per_chk);
 
-            if (lnvm_chunk_set_free(ns, &n->lnvm_ctrl, slba_dev)) {
+            if (lnvm_chunk_set_free(ns, &n->lnvm_ctrl, slba_dev, 0)) {
                 req->status = 0x40C1; /* Invalid reset */
             }
 
@@ -1355,6 +1358,7 @@ static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
     LnvmRwCmd *dm = (LnvmRwCmd *)cmd;
+    hwaddr mptr = le64_to_cpu(cmd->mptr);
     uint64_t spba = le64_to_cpu(dm->slba);
     uint64_t psl[ln->params.max_sec_per_rq];
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
@@ -1373,13 +1377,16 @@ static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->ns = ns;
 
     for (i = 0; i < nlb; i++) {
-        if (lnvm_chunk_set_free(ns, ln, psl[i])) {
+        if (lnvm_chunk_set_free(ns, ln, psl[i], mptr)) {
             printf("lnvm_erase_async: failed: ");
             print_lba(ln, psl[0]);
             req->status = 0x40ff;
 
             return NVME_INVALID_FIELD | NVME_DNR;
         }
+        
+        if (mptr)
+            mptr += sizeof(LnvmCS);
     }
 
     erase_io_complete_cb(req, 0);
