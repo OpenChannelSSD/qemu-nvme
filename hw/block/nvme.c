@@ -805,13 +805,14 @@ static inline int64_t lnvm_lba_to_off(LnvmCtrl *ln, uint64_t r)
 
     uint64_t off = sec;
 
-    off += chk * ln->params.chk_units;
-    off += lun * ln->params.lun_units;
-
-    if (off > ln->params.total_units) {
-        printf("lnvm: lba OOB:ch:%lu,lun:%lu,chk:%lu,sec:%lu\n",
-                ch, lun, chk, sec);
-        return -1;
+    if (ch > (ln->id_ctrl.geo.num_ch - 1) ||
+            lun > (ln->id_ctrl.geo.num_lun - 1) ||
+            chk > (ln->id_ctrl.geo.num_chk - 1) ||
+            sec > (ln->id_ctrl.geo.clba)) {
+        off = 0; /* Assuming that only reads will hit this. */
+    } else {
+        off += chk * ln->params.chk_units;
+        off += lun * ln->params.lun_units;
     }
 
     return off;
@@ -1138,6 +1139,7 @@ static void nvme_discard_cb(void *opaque, int ret)
 static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
+    LnvmCtrl *ln = &n->lnvm_ctrl;
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
     uint32_t dw11 = le32_to_cpu(cmd->cdw11);
     uint64_t prp1 = le64_to_cpu(cmd->prp1);
@@ -1149,7 +1151,7 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds - BDRV_SECTOR_BITS;
 
         int i;
-        uint64_t slba;
+        uint64_t slba, slba_dev;
         uint32_t nlb;
         NvmeDsmRange range[nr];
 
@@ -1161,7 +1163,8 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
         req->status = NVME_SUCCESS;
         for (i = 0; i < nr; i++) {
-            slba = le64_to_cpu(range[i].slba);
+            slba = lnvm_lba_to_off(ln, le64_to_cpu(range[i].slba));
+            slba_dev = le64_to_cpu(range[i].slba);
             nlb = le32_to_cpu(range[i].nlb);
             if (slba + nlb > le64_to_cpu(ns->id_ns.nsze)) {
                 nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
@@ -1170,11 +1173,10 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             }
 
             /* TODO: implement multi-trim */
-            if (nlb > 0)
-                printf("nvme: reset: only single chunk reset supported %u\n", nlb);
+            if (nlb < ln->params.sec_per_chk || nlb > ln->params.sec_per_chk)
+                printf("nvme: reset: invalid reset size. (%u != %u)\n", nlb, ln->params.sec_per_chk);
 
-            if (lnvm_chunk_set_free(ns, &n->lnvm_ctrl, slba)) {
-                printf("trim failed: %" PRIu64 "\n", slba);
+            if (lnvm_chunk_set_free(ns, &n->lnvm_ctrl, slba_dev)) {
                 req->status = 0x40C1; /* Invalid reset */
             }
 
@@ -2035,10 +2037,6 @@ static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
         (util, uncorrectable, tbl) -- failure to do so could render I/O code
         referencing freed memory -- DANGEROUS.
     */
-    NvmeIdNs *id_ns = &ns->id_ns;
-
-    id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(ns->ns_blks);
-
     if (ns->util)
         g_free(ns->util);
     ns->util = bitmap_new(ns->ns_blks);
@@ -2669,6 +2667,7 @@ static int lnvm_init(NvmeCtrl *n)
     Lnvm_IdPerf *perf;
     Lnvm_IdWrt *wrt;
     NvmeNamespace *ns;
+    NvmeIdNs *id_ns;
     unsigned int i;
     uint64_t chnl_chks;
     int ret = 0;
@@ -2681,7 +2680,7 @@ static int lnvm_init(NvmeCtrl *n)
     for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
         ns->ctrl = n;
-
+        id_ns = &ns->id_ns;
         chnl_chks = ns->ns_blks / ln->params.sec_per_chk;
 
         ln->id_ctrl.major_verid = 2;
@@ -2757,6 +2756,8 @@ static int lnvm_init(NvmeCtrl *n)
                                                         ln->lbaf.chk_offset;
         ln->lbaf.sec_mask = ((1 << ln->id_ctrl.lbaf.sec_len) - 1) <<
                                                         ln->lbaf.sec_offset;
+
+        id_ns->nuse = id_ns->ncap = id_ns->nsze = 1ULL << (ln->id_ctrl.lbaf.sec_len + ln->id_ctrl.lbaf.chk_len + ln->id_ctrl.lbaf.lun_len + ln->id_ctrl.lbaf.ch_len);
 
         ns->chunk_meta = g_malloc0(ln->params.total_chks * sizeof(LnvmCS));
         if (!ns->chunk_meta)
