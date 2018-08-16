@@ -858,7 +858,7 @@ static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t ppa,
 static inline int lnvm_meta_blk_set_erased(NvmeNamespace *ns, LnvmCtrl *ln,
                                   uint64_t *psl, int nr_ppas, int pmode)
 {
-    struct lnvm_metadata_format meta = {.state = LNVM_SEC_ERASED};
+    struct lnvm_metadata_format meta = {.state = LNVM_SEC_FREE};
     LnvmIdGroup *c = &ln->id_ctrl.groups[0];
     FILE *meta_fp = ln->metadata;
     size_t tgt_oob_len = ln->params.sos;
@@ -930,7 +930,7 @@ static inline int lnvm_meta_blk_set_erased(NvmeNamespace *ns, LnvmCtrl *ln,
                 printf("_erase_meta: failed: reading current state\n");
                 return -1;
             }
-            if (cur_state == LNVM_SEC_ERASED) {
+            if (cur_state == LNVM_SEC_FREE) {
                 printf("_erase_meta: failed -- already erased\n");
             }
 
@@ -983,7 +983,7 @@ static inline int lnvm_meta_state_set_written(LnvmCtrl *ln, uint64_t ppa)
         return -1;
     }
 
-    if (state != LNVM_SEC_ERASED) {
+    if (state != LNVM_SEC_FREE && state != LNVM_SEC_OPEN) {
         printf("_set_written: Invalid block state(%02x)\n", state);
         return -1;
     }
@@ -993,7 +993,7 @@ static inline int lnvm_meta_state_set_written(LnvmCtrl *ln, uint64_t ppa)
         return -1;
     }
 
-    state = LNVM_SEC_WRITTEN;
+    state = LNVM_SEC_FULL;
     ret = fwrite(&state, int_oob_len, 1, meta_fp);
     if (ret != 1) {
         perror("_set_written: fwrite");
@@ -1154,7 +1154,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 goto fail_free_msl;
             }
 
-            if (state != LNVM_SEC_WRITTEN) {
+            if (state == LNVM_SEC_FREE) {
                 bitmap_set(&cqe->res64, i, n_pages - i);
                 req->status = 0x42ff;
 
@@ -3020,7 +3020,7 @@ static int lnvm_init_meta(LnvmCtrl *ln)
     struct stat buf;
     size_t meta_tbytes, res;
 
-    ln->int_meta_size = 4;      // Internal meta (state: ERASED / WRITTEN)
+    ln->int_meta_size = 4;      // Internal meta (state: FREE / FULL)
 
     //
     // Internal meta are the first "ln->int_meta_size" bytes
@@ -3068,7 +3068,7 @@ static int lnvm_init_meta(LnvmCtrl *ln)
         return -ENOMEM;
     }
 
-    memset(state, LNVM_SEC_UNKNOWN, meta_tbytes);
+    memset(state, 0, meta_tbytes);
 
     res = fwrite(state, 1, meta_tbytes, ln->metadata);
 

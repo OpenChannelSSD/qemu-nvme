@@ -266,9 +266,9 @@ enum LnvmDmCommands {
 };
 
 enum LnvmMetaState {
-    LNVM_SEC_UNKNOWN = 0x0,
-    LNVM_SEC_WRITTEN = 0xAC,
-    LNVM_SEC_ERASED = 0xDC,
+    LNVM_SEC_FREE = 0x0,
+    LNVM_SEC_OPEN = 0x1,
+    LNVM_SEC_FULL = 0x2,
 };
 
 typedef struct LnvmGetL2PTbl {
