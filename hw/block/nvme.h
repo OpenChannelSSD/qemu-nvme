@@ -565,9 +565,14 @@ enum NvmeStatusCodes {
     NVME_E2E_REF_ERROR          = 0x0284,
     NVME_CMP_FAILURE            = 0x0285,
     NVME_ACCESS_DENIED          = 0x0286,
+    NVME_DULB                   = 0x0287,
     NVME_MORE                   = 0x2000,
     NVME_DNR                    = 0x4000,
     NVME_NO_COMPLETE            = 0xffff,
+};
+
+enum LnvmStatusCodes {
+    LNVM_OUT_OF_ORDER_WRITE     = 0x02f2,
 };
 
 typedef struct NvmeFwSlotInfoLog {
@@ -817,6 +822,8 @@ typedef struct NvmeFeatureVal {
 #define NVME_INTC_THR(intc)     (intc & 0xff)
 #define NVME_INTC_TIME(intc)    ((intc >> 8) & 0xff)
 
+#define NVME_ERR_REC_DULBE(err_rec) (err_rec & 0x10000)
+
 enum NvmeFeatureIds {
     NVME_ARBITRATION                = 0x1,
     NVME_POWER_MANAGEMENT           = 0x2,
@@ -858,13 +865,16 @@ typedef struct NvmeIdNs {
     uint8_t     mc;
     uint8_t     dpc;
     uint8_t     dps;
-    uint8_t     res30[98];
+    uint8_t     rsvd1[3];
+    uint8_t     dlfeat;
+    uint8_t     res30[94];
     NvmeLBAF    lbaf[16];
     uint8_t     res192[192];
     uint8_t     vs[3712];
 } NvmeIdNs;
 
 #define NVME_ID_NS_NSFEAT_THIN(nsfeat)      ((nsfeat & 0x1))
+#define NVME_ID_NS_NSFEAT_DULBE(nsfeat)     ((nsfeat & 0x4))
 #define NVME_ID_NS_FLBAS_EXTENDED(flbas)    ((flbas >> 4) & 0x1)
 #define NVME_ID_NS_FLBAS_INDEX(flbas)       ((flbas & 0xf))
 #define NVME_ID_NS_MC_SEPARATE(mc)          ((mc >> 1) & 0x1)
@@ -924,6 +934,7 @@ typedef struct NvmeRequest {
     uint64_t                slba;
     uint16_t                is_write;
     uint16_t                nlb;
+    uint8_t                 *is_predefined;
     uint16_t                ctrl;
     uint64_t                meta_size;
     uint64_t                mptr;
@@ -1002,6 +1013,8 @@ typedef struct NvmeNamespace {
     uint32_t        id;
     uint64_t        ns_blks;
     uint64_t        start_block;
+    uint64_t        start_block_predef;
+    uint8_t         *predef;
     LnvmCS          *chunk_meta;
 } NvmeNamespace;
 

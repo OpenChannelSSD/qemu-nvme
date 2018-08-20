@@ -145,6 +145,7 @@
 #define NVME_SPARE_THRESHOLD    20
 #define NVME_TEMPERATURE        0x143
 #define NVME_OP_ABORTED         0xff
+#define NVME_DLFEAT_VAL         0x00
 
 #define LNVM_MAX_GRPS_PR_IDENT (20)
 #define LNVM_FEAT_EXT_START 64
@@ -172,6 +173,19 @@ inline union lnvm_addr lnvm_lba_to_addr(LnvmCtrl *ln, uint64_t lba) {
     gen.sectr = (lba & ln->lbaf.sec_mask) >> ln->lbaf.sec_offset;
 
     return gen;
+}
+
+static void lnvm_print_lba(LnvmCtrl *ln, uint64_t lba)
+{
+    union lnvm_addr gen = lnvm_lba_to_addr(ln, lba);
+
+    fprintf(stderr, "phys: 0x%016lx; {pugrp: %u, punit: %u, chunk: %u, sectr: %u}\n",
+                              lba, gen.pugrp, gen.punit, gen.chunk, gen.sectr);
+}
+
+static void lnvm_print_rq(LnvmCtrl *ln, uint64_t *psl, uint32_t nlb)
+{
+    for (uint32_t i = 0; i < nlb; i++) lnvm_print_lba(ln, psl[i]);
 }
 
 static inline int64_t lnvm_lba_to_off(LnvmCtrl *ln, uint64_t lba)
@@ -263,19 +277,6 @@ static int lnvm_chunk_advance_wp(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba,
     }
 
     return 0;
-}
-
-static void lnvm_print_lba(LnvmCtrl *ln, uint64_t lba)
-{
-    union lnvm_addr gen = lnvm_lba_to_addr(ln, lba);
-
-    fprintf(stderr, "addr: 0x%016lx; {pugrp: %u, punit: %u, chunk: %u, sectr: %u}\n",
-                              lba, gen.pugrp, gen.punit, gen.chunk, gen.sectr);
-}
-
-static void lnvm_print_rq(LnvmCtrl *ln, uint64_t *psl, uint32_t nlb)
-{
-    for (uint32_t i = 0; i < nlb; i++) lnvm_print_lba(ln, psl[i]);
 }
 
 static void nvme_process_sq(void *opaque);
@@ -753,62 +754,241 @@ static void nvme_rw_cb(void *opaque, int ret)
 }
 
 static uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req, uint64_t slba, uint64_t elba, uint32_t nlb, uint16_t ctrl,
-    uint64_t data_size, uint64_t meta_size)
+    NvmeRequest *req, uint32_t nlb, uint16_t ctrl, uint64_t data_size)
 {
-    if (elba > le64_to_cpu(ns->id_ns.nsze)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-            offsetof(NvmeRwCmd, nlb), elba, ns->id);
-        return NVME_LBA_RANGE | NVME_DNR;
-    }
     if (n->id_ctrl.mdts && data_size > n->page_size * (1 << n->id_ctrl.mdts)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
             offsetof(NvmeRwCmd, nlb), nlb, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+
     if ((ctrl & NVME_RW_PRINFO_PRACT) && !(ns->id_ns.dps & DPS_TYPE_MASK)) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
             offsetof(NvmeRwCmd, control), ctrl, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
-    if (!req->is_write && find_next_bit(ns->uncorrectable, elba, slba) < elba) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_UNRECOVERED_READ,
-            offsetof(NvmeRwCmd, slba), elba, ns->id);
-        return NVME_UNRECOVERED_READ;
+
+    return 0;
+}
+
+static uint16_t lnvm_rw_check_chunk_write(NvmeCtrl *n, LnvmCtrl *ln,
+    NvmeNamespace *ns, uint64_t slba, uint32_t nlba)
+{
+    LnvmCS *cnk = lnvm_chunk_get_state(ns, ln, slba);
+    if (!cnk) {
+        return NVME_WRITE_FAULT | NVME_DNR;
+    }
+
+    uint32_t start_sectr = (slba & ln->lbaf.sec_mask) >> ln->lbaf.sec_offset;
+    uint32_t end_sectr = start_sectr + nlba;
+
+    // check if we are at all allowed to write to the chunk
+    if (cnk->state & LNVM_CHUNK_BAD || cnk->state & LNVM_CHUNK_CLOSED) {
+        fprintf(stderr, "lvnm_rw_check_chunk_write: write fault"
+               " (chunk state: 0x%02x)\n  ", cnk->state);
+        lnvm_print_lba(ln, slba);
+
+        return NVME_WRITE_FAULT | NVME_DNR;
+    }
+
+    if (end_sectr > cnk->cnlb) {
+        fprintf(stderr, "lvnm_rw_check_chunk_write: out of bounds write"
+               " (sectr: %d, cnlb: %ld)\n  ", end_sectr, cnk->cnlb);
+        lnvm_print_lba(ln, slba+end_sectr);
+        return NVME_WRITE_FAULT | NVME_DNR;
+    }
+
+    // check that the write begins at the current wp
+    if (start_sectr != cnk->wp) {
+        fprintf(stderr, "lvnm_rw_check_chunk_write: out of order write"
+               "  (sectr: %d, wp: %ld)\n  ", start_sectr, cnk->wp);
+        lnvm_print_lba(ln, slba);
+        return LNVM_OUT_OF_ORDER_WRITE | NVME_DNR;
     }
 
     return 0;
 }
 
-static uint16_t lnvm_rw_check_req(NvmeCtrl *n, LnvmCtrl *ln, NvmeNamespace *ns,
-        NvmeCmd *cmd, NvmeRequest *req, uint64_t slba, uint64_t elba,
-        uint32_t nlb, uint16_t ctrl, uint64_t data_size, uint64_t meta_size)
+static uint16_t lnvm_rw_check_write_req(NvmeCtrl *n, LnvmCtrl *ln,
+    NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req, uint64_t *psl,
+    uint32_t nlb)
 {
+    uint16_t err = 0;
+
     Lnvm_IdWrt *wrt = &ln->id_ctrl.wrt;
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
 
-    if (slba == -1 || elba == -1) {
-        return NVME_INVALID_FIELD | NVME_DNR;
+    // we need to check that the device write constraints are respected by
+    // the request; this requires some state
+
+    struct _state {
+        // stores chunk slba
+        union lnvm_addr chunk_slba;
+
+        // number of writes in chunk
+        uint8_t  ws;
+
+        // lba of first write to chunk
+        uint64_t slba;
+
+        // last lba seen
+        uint64_t lbap;
+    };
+
+    // a single request can include up to 64 LBAs, where a minimum of
+    // WS_MIN logical blocks must be written sequentially within each
+    // involved chunk. use this to bound the number of chunks that can be
+    // successfully written to per request.
+    uint8_t max_chunks_per_req = 64 / wrt->ws_min;
+
+    struct _state *m = g_malloc0(sizeof(struct _state) * max_chunks_per_req);
+
+    for (int i = 0; i < nlb; i++) {
+        union lnvm_addr chunk_slba = lnvm_lba_to_addr(ln, psl[i]);
+
+        // set sector offset to zero such that the address is the chunk slba
+        chunk_slba.sectr = 0;
+
+        if (chunk_slba.v == -1) {
+            // write to non-existing LBA
+            err = NVME_WRITE_FAULT | NVME_DNR;
+            goto fail;
+        }
+
+        for (int j = 0; j < max_chunks_per_req; j++) {
+            if (m[j].ws) {
+                // check if we've seen this chunk before
+                if (m[j].chunk_slba.v == chunk_slba.v) {
+                    // check that the write is sequential within the chunk
+                    if (++(m[j].lbap) != psl[i]) {
+                        fprintf(stderr, "lvnm_rw_check_write_req: out of order write"
+                               "\n");
+                        fprintf(stderr, "  tried: "); lnvm_print_lba(ln, psl[i]);
+                        fprintf(stderr, "  last : "); lnvm_print_lba(ln, m[j].lbap-1);
+                        err = LNVM_OUT_OF_ORDER_WRITE | NVME_DNR;
+                        goto fail;
+                    }
+
+                    m[j].ws++;
+                    break;
+                }
+
+                continue;
+            }
+
+            if (j == max_chunks_per_req-1) {
+                // ooops; we have referenced more chunks than possible under
+                // the write constraints
+                fprintf(stderr, "lnvm_rw_check_write_req failed: exceeded max number of"
+                       "chunks per request (%d)\n", max_chunks_per_req);
+
+                err = NVME_INVALID_FIELD | NVME_DNR;
+                goto fail;
+            }
+
+            m[j].chunk_slba = chunk_slba;
+            m[j].ws = 1;
+            m[j].slba = m[j].lbap = psl[i];
+
+            break;
+        }
     }
 
-    if (nlb > ln->params.max_sec_per_rq) {
-        fprintf(stderr, "lnvm_rw: npages too large (%u). Max:%u supported\n",
-                                        nlb, ln->params.max_sec_per_rq);
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
+    // now, check that WS_MIN is respected and writes are aligned to WS_MIN for
+    // each involved chunk
+    for (int i = 0; i < max_chunks_per_req; i++) {
+        if (m[i].ws == 0) {
+            break;
+        }
+
+        if (m[i].ws < wrt->ws_min && (m[i].ws % wrt->ws_min != 0)) {
+            fprintf(stderr, "lnvm_rw_check_write failed: request does not respect "
+                   "device write constraints (ws: %d, ws_min: %d)\n  ",
+                   m[i].ws, wrt->ws_min);
+            lnvm_print_lba(ln, m[i].slba);
+
+            nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                 offsetof(LnvmRwCmd, slba), lrw->slba + nlb, ns->id);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    } else if ((req->is_write) && (nlb < wrt->ws_min)) {
-        fprintf(stderr, "lnvm_rw: I/O does not respect device write constrains."
-                "Sectors send: (%u). Min:%u sectors required\n",
-                                        nlb, wrt->ws_min);
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-                offsetof(LnvmRwCmd, slba), lrw->slba + nlb, ns->id);
-        return NVME_INVALID_FIELD | NVME_DNR;
+
+            err = NVME_INVALID_FIELD | NVME_DNR;
+            goto fail;
+        }
+
+        err = lnvm_rw_check_chunk_write(n, ln, ns, m[i].slba, m[i].ws);
+        if (err) {
+            goto fail;
+        }
     }
 
-    /* Reuse check logic from nvme_rw */
-    return nvme_rw_check_req(n, ns, cmd, req, slba, elba, nlb, ctrl,
-                                                        data_size, meta_size);
+fail:
+    g_free(m);
+    return err;
+}
+
+static uint16_t lnvm_rw_check_chunk_read(NvmeCtrl *n, LnvmCtrl *ln,
+    NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req, uint64_t slba,
+    uint32_t nlba)
+{
+    LnvmCS *chunk_meta = lnvm_chunk_get_state(ns, ln, slba);
+    if (chunk_meta) {
+        uint8_t state = chunk_meta->state;
+
+        uint64_t end_sectr = ((slba & ln->lbaf.sec_mask) >>
+                                               ln->lbaf.sec_offset) + (nlba-1);
+        uint64_t mw_cunits = ln->id_ctrl.wrt.mw_cunits;
+        uint64_t wp = chunk_meta->wp;
+
+        // a read can only be valid if the chunk is open or closed
+        if (state == LNVM_CHUNK_OPEN || state == LNVM_CHUNK_CLOSED) {
+            uint64_t wpp = wp < mw_cunits ? 0 : wp;
+            if (state == LNVM_CHUNK_OPEN && wpp) {
+                // if the chunk is open, adjust for MW_CUNITS
+                wpp = wp-mw_cunits;
+            }
+
+            if (end_sectr < wpp) {
+                return 0;
+            }
+        }
+    }
+
+    return 1;
+}
+
+static uint16_t lnvm_rw_check_read_req(NvmeCtrl *n, LnvmCtrl *ln,
+    NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req, uint64_t *psl,
+    uint32_t nlb)
+{
+    for (int i = 0; i < nlb; i++) {
+        req->is_predefined[i] =
+            lnvm_rw_check_chunk_read(n, ln, ns, cmd, req, psl[i], 1);
+    }
+
+    return 0;
+}
+
+static uint16_t lnvm_rw_check_req(NvmeCtrl *n, LnvmCtrl *ln,
+    NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req, uint64_t *psl,
+    uint32_t nlb, uint16_t ctrl, uint64_t data_size)
+{
+    int err;
+
+    err = nvme_rw_check_req(n, ns, cmd, req, nlb, ctrl, data_size);
+    if (err) {
+        return err;
+    }
+
+    if (req->is_write) {
+        err = lnvm_rw_check_write_req(n, ln, ns, cmd, req, psl, nlb);
+    } else {
+        err = lnvm_rw_check_read_req(n, ln, ns, cmd, req, psl, nlb);
+    }
+
+    if (err) {
+        return err;
+    }
+
+    return 0;
 }
 
 struct lnvm_metadata_format {
@@ -820,10 +1000,6 @@ struct lnvm_tgt_meta {
     uint64_t lba;
     uint64_t rsvd;
 } __attribute__((__packed__));
-
-/**
-
- */
 
 /**
  * Write a single out-of-bound area entry
@@ -984,7 +1160,8 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
     if (!*aio_sector_list)
         return -ENOMEM;
 
-    msl = g_malloc0(ln->lba_meta_size * ln->params.max_sec_per_rq);
+
+    msl = g_malloc0(ln->lba_meta_size * nlb);
     if (!msl) {
         err = -ENOMEM;
         goto fail_free_aio_sector_list;
@@ -999,8 +1176,20 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
      */
     for (i = 0; i < nlb; i++) {
         lba_off = lnvm_lba_to_off(ln, psl[i]);
-        (*aio_sector_list)[i] =
+
+        if (req->is_predefined[i] && !req->is_write) {
+            if (NVME_ERR_REC_DULBE(n->features.err_rec)) {
+               err = NVME_DULB | NVME_DNR;
+               goto fail_free_msl;
+            }
+
+            // handle DLFEAT; we map predefined reads to the sentinel sector at
+            // the beginning of the disk
+            (*aio_sector_list)[i] = ns->start_block_predef;
+        } else {
+            (*aio_sector_list)[i] =
                 ns->start_block + (lba_off << (data_shift - BDRV_SECTOR_BITS));
+        }
 
         if (req->is_write) {
             if (lnvm_chunk_advance_wp(ns, ln, psl[i], 1)) {
@@ -1020,11 +1209,15 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
             }
         } else {
             if (meta) {
-                if (lnvm_meta_read(ln, lba_off, lnvm_meta_index(ln, msl, i))) {
-                    fprintf(stderr, "lnvm_rw: read metadata failed\n  ");
-                    lnvm_print_lba(ln, psl[i]);
-                    err = NVME_INVALID_FIELD | NVME_DNR;
-                    goto fail_free_msl;
+                if (req->is_predefined[i]) {
+                    memset(lnvm_meta_index(ln, msl, i), NVME_DLFEAT_VAL, ln->lba_meta_size);
+                } else {
+                    if (lnvm_meta_read(ln, lba_off, lnvm_meta_index(ln, msl, i))) {
+                        fprintf(stderr, "lnvm_rw: read metadata failed\n  ");
+                        lnvm_print_lba(ln, psl[i]);
+                        err = NVME_INVALID_FIELD | NVME_DNR;
+                        goto fail_free_msl;
+                    }
                 }
             }
          }
@@ -1047,6 +1240,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
+    Lnvm_IdWrt *wrt = &ln->id_ctrl.wrt;
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint16_t ctrl = le16_to_cpu(rw->control);
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
@@ -1054,37 +1248,96 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t prp1 = le64_to_cpu(rw->prp1);
     uint64_t prp2 = le64_to_cpu(rw->prp2);
     uint64_t meta = le64_to_cpu(rw->mptr);
-    const uint64_t elba = slba + nlb;
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
     uint64_t data_size = nlb << data_shift;
     uint64_t aio_slba;
-    uint64_t dev_slba = lnvm_lba_to_off(ln, slba);
-    uint64_t dev_elba = lnvm_lba_to_off(ln, elba);
-    int i;
+
+    int i, err;
+    int read_err = 0;
     void *msl;
 
-    req->is_write = rw->opcode == NVME_CMD_WRITE;
-    if (elba > le64_to_cpu(ns->id_ns.nsze)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_LBA_RANGE,
-            offsetof(NvmeRwCmd, nlb), elba, ns->id);
-        return NVME_LBA_RANGE | NVME_DNR;
+    req->is_write = (rw->opcode == NVME_CMD_WRITE);
+
+    err = nvme_rw_check_req(n, ns, cmd, req, nlb, ctrl, data_size);
+    if (err) {
+        return err;
     }
-    if (n->id_ctrl.mdts && data_size > n->page_size * (1 << n->id_ctrl.mdts)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-            offsetof(NvmeRwCmd, nlb), nlb, ns->id);
-        return NVME_INVALID_FIELD | NVME_DNR;
+
+    req->slba = lnvm_lba_to_off(ln, slba);
+    req->meta_size = 0;
+    req->status = NVME_SUCCESS;
+    req->nlb = nlb;
+    req->ns = ns;
+
+    if (req->is_write) {
+        if (nlb < wrt->ws_min) {
+            fprintf(stderr, "lnvm_rw_check_write failed: request does not respect "
+                   "device write constraints (ws: %d, ws_min: %d)\n  ",
+                   nlb, wrt->ws_min);
+            lnvm_print_lba(ln, slba);
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+
+        err = lnvm_rw_check_chunk_write(n, ln, ns, slba, nlb);
+        if (err) {
+            return err;
+        }
+
+        if (lnvm_chunk_advance_wp(ns, ln, slba, nlb)) {
+            fprintf(stderr, "nvme_rw: advance chunk wp failed (slba: %lu)\n  ", slba);
+            lnvm_print_lba(ln, req->slba);
+
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+    } else {
+        read_err = lnvm_rw_check_chunk_read(n, ln, ns, cmd, req, slba, nlb);
+        if (read_err) {
+            if (NVME_ERR_REC_DULBE(n->features.err_rec)) {
+                return NVME_DULB | NVME_DNR;
+            }
+        }
     }
-    if ((ctrl & NVME_RW_PRINFO_PRACT) && !(ns->id_ns.dps & DPS_TYPE_MASK)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-            offsetof(NvmeRwCmd, control), ctrl, ns->id);
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-    if (!req->is_write &&
-            find_next_bit(ns->uncorrectable, dev_elba, dev_slba) < dev_elba) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_UNRECOVERED_READ,
-            offsetof(NvmeRwCmd, slba), elba, ns->id);
-        return NVME_UNRECOVERED_READ;
+
+    if (meta) {
+        msl = g_malloc0(ln->lba_meta_size * nlb);
+        if (!msl) {
+            fprintf(stderr, "failed alloc\n");
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+
+        if (req->is_write) {
+            nvme_addr_read(n, meta, (void *)msl, nlb * ln->lba_meta_size);
+            for (i = 0; i < nlb; i++) {
+                if (lnvm_meta_write(ln, req->slba + i, lnvm_meta_index(ln, msl, i))) {
+                    fprintf(stderr, "lnvm_rw: write metadata failed\n  ");
+                    lnvm_print_lba(ln, req->slba + i);
+                    g_free(msl);
+                    return NVME_INVALID_FIELD | NVME_DNR;
+                }
+            }
+        } else {
+            if (read_err) {
+                for (i = 0; i < nlb; i++) {
+                    memset(lnvm_meta_index(ln, msl, i), NVME_DLFEAT_VAL, ln->lba_meta_size);
+                }
+
+                nvme_addr_write(n, meta, (void *)msl, nlb * ln->lba_meta_size);
+            } else {
+                for (i = 0; i < nlb; i++) {
+                    if (lnvm_meta_read(ln, req->slba + i, lnvm_meta_index(ln, msl, i))) {
+                        fprintf(stderr, "lnvm_rw: read metadata failed\n  ");
+                        lnvm_print_lba(ln, req->slba + i);
+                        g_free(msl);
+                        return NVME_INVALID_FIELD | NVME_DNR;
+                    }
+                }
+
+                nvme_addr_write(n, meta, (void *)msl, nlb * ln->lba_meta_size);
+            }
+        }
+
+        g_free(msl);
     }
 
     if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
@@ -1093,55 +1346,34 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    req->slba = dev_slba;
-    req->meta_size = 0;
-    req->status = NVME_SUCCESS;
-    req->nlb = nlb;
-    req->ns = ns;
+    if (!req->is_write && read_err) {
+        uint16_t status = NVME_SUCCESS;
 
-    if (req->is_write) {
-        if (lnvm_chunk_advance_wp(ns, ln, slba, nlb)) {
-            fprintf(stderr, "nvme_rw: advance chunk wp failed (slba: %lu)\n", slba);
-            lnvm_print_lba(ln, req->slba);
-
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-
-        if (meta) {
-            msl = g_malloc0(ln->lba_meta_size * ln->params.max_sec_per_rq);
-            if (!msl) {
-                fprintf(stderr, "failed alloc\n");
+        uint8_t *predef = ns->predef;
+        if (!predef) {
+            if (NULL == (predef = g_malloc(data_size))) {
                 return NVME_INVALID_FIELD | NVME_DNR;
             }
-            nvme_addr_read(n, meta, (void *)msl, nlb * ln->lba_meta_size);
-            for (i = 0; i < nlb; i++) {
-                if (lnvm_meta_write(ln, req->slba + i, lnvm_meta_index(ln, msl, i))) {
-                    fprintf(stderr, "lnvm_rw: write metadata failed\n");
-                    lnvm_print_lba(ln, req->slba + i);
-                    return NVME_INVALID_FIELD | NVME_DNR;
-                }
-            }
-            g_free(msl);
+            memset(predef, NVME_DLFEAT_VAL, data_size);
         }
-    } else {
-        if (meta) {
-            msl = g_malloc0(ln->lba_meta_size * ln->params.max_sec_per_rq);
-            if (!msl) {
-                fprintf(stderr, "failed alloc\n");
-                return NVME_INVALID_FIELD | NVME_DNR;
-            }
 
-            for (i = 0; i < nlb; i++) {
-                if (lnvm_meta_read(ln, req->slba + i, lnvm_meta_index(ln, msl, i))) {
-                    fprintf(stderr, "lnvm_rw: read metadata failed\n");
-                    lnvm_print_lba(ln, req->slba + i);
-                    return NVME_INVALID_FIELD | NVME_DNR;
-                }
+        if (req->qsg.nsg > 0) {
+            if(dma_buf_read(predef, data_size, &req->qsg)) {
+                status = NVME_INVALID_FIELD | NVME_DNR;
             }
-
-            nvme_addr_write(n, meta, (void *)msl, nlb * ln->lba_meta_size);
-            g_free(msl);
+            qemu_sglist_destroy(&req->qsg);
+        } else {
+            if (qemu_iovec_to_buf(&req->iov, 0, predef, data_size) != data_size) {
+                status = NVME_INVALID_FIELD | NVME_DNR;
+            }
+            qemu_iovec_destroy(&req->iov);
         }
+
+        if (!ns->predef) {
+            g_free(predef);
+        }
+
+        return status;
     }
 
     aio_slba =
@@ -1168,18 +1400,13 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
     uint64_t psl[ln->params.max_sec_per_rq];
     uint64_t *aio_sector_list;
-    uint64_t slba_offset;
-    uint64_t elba_offset;
     uint32_t nlb  = le16_to_cpu(lrw->nlb) + 1;
     uint64_t prp1 = le64_to_cpu(lrw->prp1);
     uint64_t prp2 = le64_to_cpu(lrw->prp2);
     uint64_t slba = le64_to_cpu(lrw->slba);
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
-    const uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_index].ms);
     uint64_t data_size = nlb << data_shift;
-    uint64_t meta_size = nlb * ms;
-    uint16_t is_write = (lrw->opcode == LNVM_CMD_VECT_WRITE);
     uint16_t ctrl = 0;
     uint16_t err;
 
@@ -1196,22 +1423,30 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     ctrl = le16_to_cpu(lrw->control);
     req->lnvm_slba = le64_to_cpu(lrw->slba);
-    req->is_write = is_write;
+    req->is_write = (lrw->opcode == LNVM_CMD_VECT_WRITE);
 
-    slba_offset = lnvm_lba_to_off(ln, psl[0]);
-    elba_offset = lnvm_lba_to_off(ln, psl[nlb - 1]);
+    req->is_predefined = g_malloc0(nlb*sizeof(*req->is_predefined));
 
-    err = lnvm_rw_check_req(n, ln, ns, cmd, req, slba_offset, elba_offset,
-                            nlb, ctrl, data_size, meta_size);
+    err = lnvm_rw_check_req(n, ln, ns, cmd, req, psl, nlb, ctrl, data_size);
     if (err) {
-        fprintf(stderr, "lnvm_rw: failed nvme_rw_check\n");
+        fprintf(stderr, "lnvm_rw: lvme_rw_check_req failed: 0x%x\n", err);
+        g_free(req->is_predefined);
         return err;
     }
 
+    // lnvm_rw_setup_rq handles (amongst other stuff) mapping of invalid reads
+    // to the predefined data block (as determinted by lnvm_rw_check_req). This
+    // ensures that we can just use dma_blk_read_list directly below.
     err = lnvm_rw_setup_rq(n, ns, lrw, &aio_sector_list, req, psl,
                                                             data_shift, nlb);
-    if (err)
+    if (err) {
+        fprintf(stderr, "lnvm_rw: lnvm_rw_setup_rq failed: 0x%x\n  ", err);
+        lnvm_print_rq(ln, psl, nlb);
+        g_free(req->is_predefined);
         return err;
+    }
+
+    g_free(req->is_predefined);
 
     if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
         lnvm_print_rq(ln, psl, nlb);
@@ -1222,7 +1457,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return lnvm_rw_free_rq(aio_sector_list);
     }
 
-    req->slba = slba_offset;
+    req->slba = lnvm_lba_to_off(ln, psl[0]);
     req->meta_size = 0;
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
@@ -1406,7 +1641,7 @@ static void lnvm_chunk_meta_save(NvmeNamespace *ns)
     }
 
     fclose(fp);
-    free(ns->chunk_meta);
+    g_free(ns->chunk_meta);
 }
 
 static int lnvm_chunk_meta_load(NvmeNamespace *ns, uint32_t offset,
@@ -2692,12 +2927,13 @@ static void nvme_init_namespaces(NvmeCtrl *n)
         NvmeNamespace *ns = &n->namespaces[i];
         NvmeIdNs *id_ns = &ns->id_ns;
 
-        id_ns->nsfeat = 0x0;
+        id_ns->nsfeat = 0x4; // support DULBE
         id_ns->nlbaf = n->nlbaf - 1;
         id_ns->flbas = n->lba_index | (n->extended << 4);
         id_ns->mc = n->mc;
         id_ns->dpc = n->dpc;
         id_ns->dps = n->dps;
+        id_ns->dlfeat = 0x1; // predefined data (and metadata) is set to 0x00
 
         id_ns->vs[0] = 0x1;
 
@@ -2713,11 +2949,34 @@ static void nvme_init_namespaces(NvmeCtrl *n)
         ns->id = i + 1;
         ns->ctrl = n;
         ns->ns_blks = ns_calc_blks(ns, lba_index);
-        ns->start_block = i * (n->ns_size >> BDRV_SECTOR_BITS);
+
+        // reserve sector to serve requests for predefined data
+        ns->start_block_predef = i * (n->ns_size >> BDRV_SECTOR_BITS);
+        ns->start_block = ns->start_block_predef +
+            (n->lnvm_ctrl.params.sec_size >> BDRV_SECTOR_BITS);
+
+        // if mdts is set, allocate a static buffer to use for returning
+        // predefined data for invalid reads
+        ns->predef = NULL;
+        if (n->mdts) {
+            size_t predef_sz = (1 << n->mdts) << (12 + n->mpsmin);
+            ns->predef = g_malloc(predef_sz);
+            memset(ns->predef, NVME_DLFEAT_VAL, predef_sz);
+        }
+
         ns->util = bitmap_new(blks);
         ns->uncorrectable = bitmap_new(blks);
         nvme_partition_ns(ns, lba_index);
     }
+}
+
+static void nvme_free_namespace(NvmeNamespace *ns) {
+    g_free(ns->util);
+    g_free(ns->uncorrectable);
+    if (ns->predef) {
+        g_free(ns->predef);
+    }
+    g_free(ns->chunk_meta);
 }
 
 static int lnvm_init_meta(LnvmCtrl *ln)
@@ -2738,7 +2997,7 @@ static int lnvm_init_meta(LnvmCtrl *ln)
 
     if (!ln->meta_fname) {      // Default meta file
         ln->meta_auto_gen = 1;
-        ln->meta_fname = malloc(14);
+        ln->meta_fname = g_malloc(14);
         if (!ln->meta_fname)
             return -ENOMEM;
         strncpy(ln->meta_fname, "meta.qemu\0", 14);
@@ -2768,7 +3027,7 @@ static int lnvm_init_meta(LnvmCtrl *ln)
         return -1;
     }
 
-    state = malloc(meta_tbytes);
+    state = g_malloc(meta_tbytes);
     if (!state) {
         error_report("nvme: lnvm_init_meta: malloc f(%s)\n", ln->meta_fname);
         return -ENOMEM;
@@ -2778,7 +3037,7 @@ static int lnvm_init_meta(LnvmCtrl *ln)
 
     res = fwrite(state, 1, meta_tbytes, ln->metadata);
 
-    free(state);
+    g_free(state);
 
     if (res != meta_tbytes) {
         error_report("nvme: lnvm_init_meta: fwrite(%s), res(%lu)\n",
@@ -2900,7 +3159,7 @@ static int lnvm_init(NvmeCtrl *n)
 
     if (!ln->chunk_fname) {
         ln->state_auto_gen = 1;
-        ln->chunk_fname = malloc(16);
+        ln->chunk_fname = g_malloc(16);
         if (!ln->chunk_fname)
             return -ENOMEM;
         strncpy(ln->chunk_fname, "chunk.qemu\0", 16);
@@ -3043,7 +3302,10 @@ static int nvme_init(PCIDevice *pci_dev)
 
     n->start_time = time(NULL);
     n->reg_size = 1 << qemu_fls(0x1004 + 2 * (n->num_queues + 1) * 4);
-    n->ns_size = bs_size / (uint64_t)n->num_namespaces;
+
+    // adjust namespace size to account for the sector holding predefined data
+    n->ns_size = (bs_size / (uint64_t)n->num_namespaces) -
+      (n->num_namespaces * (n->lnvm_ctrl.params.sec_size >> BDRV_SECTOR_BITS));
 
     n->sq = g_malloc0(sizeof(*n->sq)*n->num_queues);
     n->cq = g_malloc0(sizeof(*n->cq)*n->num_queues);
@@ -3073,9 +3335,15 @@ static void lnvm_exit(NvmeCtrl *n)
 
 static void nvme_exit(PCIDevice *pci_dev)
 {
+    int i;
+
     NvmeCtrl *n = NVME(pci_dev);
 
     lnvm_exit(n);
+
+    for (i = 0; i < n->num_namespaces; i++) {
+        nvme_free_namespace(&n->namespaces[i]);
+    }
 
     nvme_clear_ctrl(n);
     g_free(n->namespaces);
