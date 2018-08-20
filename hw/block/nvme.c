@@ -192,19 +192,8 @@ static inline int64_t lnvm_lba_to_off(LnvmCtrl *ln, uint64_t lba)
 {
     union lnvm_addr gen = lnvm_lba_to_addr(ln, lba);
 
-    uint64_t off = gen.sectr;
-
-    if (gen.pugrp > (ln->id_ctrl.geo.num_ch - 1) ||
-            gen.punit > (ln->id_ctrl.geo.num_lun - 1) ||
-            gen.chunk > (ln->id_ctrl.geo.num_chk - 1) ||
-            gen.sectr > (ln->id_ctrl.geo.clba)) {
-        off = 0; /* Assuming that only reads will hit this. */
-    } else {
-        off += gen.chunk * ln->params.chk_units;
-        off += gen.punit * ln->params.lun_units;
-    }
-
-    return off;
+    return gen.sectr + gen.chunk * ln->params.chk_units +
+                                              gen.punit * ln->params.lun_units;
 }
 
 static inline int lnvm_lba_to_chunk_no(LnvmCtrl *ln, uint64_t lba)
