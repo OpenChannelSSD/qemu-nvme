@@ -152,6 +152,132 @@
 #define LNVM_PBA_UNMAPPED UINT64_MAX
 #define LNVM_LBA_UNMAPPED UINT64_MAX
 
+union lnvm_addr {
+    struct  {
+        uint32_t sectr;
+        uint16_t chunk;
+        uint8_t  punit;
+        uint8_t  pugrp;
+    };
+
+    uint64_t v;
+};
+
+inline union lnvm_addr lnvm_lba_to_addr(LnvmCtrl *ln, uint64_t lba) {
+    union lnvm_addr gen = { .v = 0 };
+
+    gen.pugrp = (lba & ln->lbaf.ch_mask)  >> ln->lbaf.ch_offset;
+    gen.punit = (lba & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
+    gen.chunk = (lba & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
+    gen.sectr = (lba & ln->lbaf.sec_mask) >> ln->lbaf.sec_offset;
+
+    return gen;
+}
+
+static inline int64_t lnvm_lba_to_off(LnvmCtrl *ln, uint64_t lba)
+{
+    union lnvm_addr gen = lnvm_lba_to_addr(ln, lba);
+
+    uint64_t off = gen.sectr;
+
+    if (gen.pugrp > (ln->id_ctrl.geo.num_ch - 1) ||
+            gen.punit > (ln->id_ctrl.geo.num_lun - 1) ||
+            gen.chunk > (ln->id_ctrl.geo.num_chk - 1) ||
+            gen.sectr > (ln->id_ctrl.geo.clba)) {
+        off = 0; /* Assuming that only reads will hit this. */
+    } else {
+        off += gen.chunk * ln->params.chk_units;
+        off += gen.punit * ln->params.lun_units;
+    }
+
+    return off;
+}
+
+static inline int lnvm_lba_to_chunk_no(LnvmCtrl *ln, uint64_t lba)
+{
+    uint64_t ch = (lba & ln->lbaf.ch_mask) >> ln->lbaf.ch_offset;
+    uint64_t lun = (lba & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
+    uint64_t chk = (lba & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
+    uint64_t cno = chk;
+
+    cno += lun * ln->params.chk_per_lun;
+    cno += ch * ln->params.chk_per_ch;
+
+    if (chk >= ln->params.chk_per_lun ||
+            lun >= ln->params.num_lun ||
+            ch >= ln->params.num_ch) {
+        printf("nvme: accessing unmapped chunk: ch:%lu, lun:%lu, chk:%lu, cno: %lu\n", ch, lun, chk, cno);
+        return -1;
+    }
+
+    return cno;
+}
+
+static inline uint64_t lnvm_chunk_no_to_lba(LnvmCtrl *ln, int64_t cno) {
+    uint64_t ch = cno / ln->params.chk_per_ch;
+    uint64_t lun = cno % ln->params.chk_per_ch / ln->params.chk_per_lun;
+    uint64_t chk = cno % ln->params.chk_per_lun;
+
+    return ch << ln->lbaf.ch_offset |
+        lun << ln->lbaf.lun_offset |
+        chk << ln->lbaf.chk_offset;
+}
+
+static LnvmCS *lnvm_chunk_get_state(NvmeNamespace *ns, LnvmCtrl *ln,
+    uint64_t lba)
+{
+    int cid = lnvm_lba_to_chunk_no(ln, lba);
+
+    if (cid == -1)
+        return NULL;
+
+    return &ns->chunk_meta[lnvm_lba_to_chunk_no(ln, lba)];
+}
+
+static int lnvm_chunk_advance_wp(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba,
+                                 uint32_t nlb)
+{
+    LnvmCS *chunk_meta;
+
+    chunk_meta = lnvm_chunk_get_state(ns, ln, lba);
+    if (!chunk_meta) {
+        printf("nvme: trying to write to unmapped chunk\n");
+        return -1;
+    }
+
+    if (chunk_meta->state & LNVM_CHUNK_FREE) {
+        chunk_meta->state &= ~LNVM_CHUNK_FREE;
+        chunk_meta->state |= LNVM_CHUNK_OPEN;
+    }
+
+    if (!(chunk_meta->state & LNVM_CHUNK_OPEN)) {
+        printf("nvme: advance: bad chunk state (state:%d, wp:%lu)\n",
+                                        chunk_meta->state, chunk_meta->wp);
+        return -1;
+    }
+
+    chunk_meta->wp += nlb;
+    if (chunk_meta->wp == ln->params.sec_per_chk) {
+        chunk_meta->state &= ~LNVM_CHUNK_OPEN;
+        chunk_meta->state |= LNVM_CHUNK_CLOSED;
+    }
+
+    return 0;
+}
+
+static void lnvm_print_lba(LnvmCtrl *ln, uint64_t lba)
+{
+    union lnvm_addr gen = lnvm_lba_to_addr(ln, lba);
+
+    printf("addr: 0x%016lx; {pugrp: %u, punit: %u, chunk: %u, sectr: %u}\n",
+                              lba, gen.pugrp, gen.punit, gen.chunk, gen.sectr);
+}
+
+static void lnvm_print_rq(LnvmCtrl *ln, uint64_t *psl, uint32_t nlb)
+{
+    for (uint32_t i = 0; i < nlb; i++) lnvm_print_lba(ln, psl[i]);
+}
+
 static void nvme_process_sq(void *opaque);
 
 static void nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size)
@@ -447,7 +573,7 @@ static void lnvm_post_cqe(NvmeCtrl *n, NvmeRequest *req)
     LnvmCtrl *ln = &n->lnvm_ctrl;
     NvmeCqe *cqe = &req->cqe;
 
-   /* Do post-completion processing depending on the type of command. This is
+    /* Do post-completion processing depending on the type of command. This is
      * used primarily to inject different types of errors.
      */
     switch (req->cmd_opcode) {
@@ -685,25 +811,6 @@ static uint16_t lnvm_rw_check_req(NvmeCtrl *n, LnvmCtrl *ln, NvmeNamespace *ns,
                                                         data_size, meta_size);
 }
 
-static void print_lba(LnvmCtrl *ln, uint64_t lba)
-{
-    uint64_t ch = (lba & ln->lbaf.ch_mask) >> ln->lbaf.ch_offset;
-    uint64_t lun = (lba & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
-    uint64_t chk = (lba & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
-    uint64_t sec = (lba & ln->lbaf.sec_mask) >> ln->lbaf.sec_offset;
-
-    printf("lba: ch(%lu), lun(%lu), chunk(%lu), sec(%lu)\n",
-                                                    ch, lun, chk, sec);
-}
-
-static void print_rq(LnvmCtrl *ln, uint64_t *psl, uint32_t nlb)
-{
-    uint32_t i;
-
-    for (i = 0; i < nlb; i++)
-        print_lba(ln, psl[i]);
-}
-
 struct lnvm_metadata_format {
     uint32_t state;
     uint64_t rsv[2];
@@ -784,40 +891,6 @@ static inline int lnvm_meta_read(LnvmCtrl *ln, uint64_t lba, void *meta)
     return 0;
 }
 
-static inline int64_t lnvm_bbt_pos_get(LnvmCtrl *ln, uint64_t r)
-{
-    Lnvm_IdGeo *geo = &ln->id_ctrl.geo;
-
-    uint64_t lun = (r & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
-    uint64_t chk = (r & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
-
-    uint64_t lun_off = lun * geo->num_chk;
-
-    return chk + lun_off;
-}
-
-static inline int64_t lnvm_lba_to_off(LnvmCtrl *ln, uint64_t r)
-{
-    uint64_t ch = (r & ln->lbaf.ch_mask) >> ln->lbaf.ch_offset;
-    uint64_t lun = (r & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
-    uint64_t chk = (r & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
-    uint64_t sec = (r & ln->lbaf.sec_mask) >> ln->lbaf.sec_offset;
-
-    uint64_t off = sec;
-
-    if (ch > (ln->id_ctrl.geo.num_ch - 1) ||
-            lun > (ln->id_ctrl.geo.num_lun - 1) ||
-            chk > (ln->id_ctrl.geo.num_chk - 1) ||
-            sec > (ln->id_ctrl.geo.clba)) {
-        off = 0; /* Assuming that only reads will hit this. */
-    } else {
-        off += chk * ln->params.chk_units;
-        off += lun * ln->params.lun_units;
-    }
-
-    return off;
-}
-
 static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t lba,
                                         uint32_t *state)
 {
@@ -846,48 +919,6 @@ static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t lba,
     return 0;
 }
 
-static inline int lnvm_lba_to_chunk_no(LnvmCtrl *ln, uint64_t lba)
-{
-    uint64_t ch = (lba & ln->lbaf.ch_mask) >> ln->lbaf.ch_offset;
-    uint64_t lun = (lba & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
-    uint64_t chk = (lba & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
-    uint64_t cno = chk;
-
-    cno += lun * ln->params.chk_per_lun;
-    cno += ch * ln->params.chk_per_ch;
-
-    if (chk >= ln->params.chk_per_lun ||
-            lun >= ln->params.num_lun ||
-            ch >= ln->params.num_ch) {
-        fprintf(stderr, "nvme: accessing unmapped chunk: ch:%"PRIu64", lun:%"PRIu64
-		", chk:%"PRIu64" cno: %"PRIu64"\n", ch, lun, chk, cno);
-        return -1;
-    }
-
-    return cno;
-}
-
-static LnvmCS *lnvm_chunk_get_state(NvmeNamespace *ns, LnvmCtrl *ln,
-                                    uint64_t lba)
-{
-    int cid = lnvm_lba_to_chunk_no(ln, lba);
-
-    if (cid == -1)
-        return NULL;
-
-    return &ns->chunk_meta[lnvm_lba_to_chunk_no(ln, lba)];
-}
-
-static inline uint64_t lnvm_chunk_no_to_lba(LnvmCtrl *ln, int64_t cno) {
-    uint64_t ch = cno / ln->params.chk_per_ch;
-    uint64_t lun = cno % ln->params.chk_per_ch / ln->params.chk_per_lun;
-    uint64_t chk = cno % ln->params.chk_per_lun;
-
-    return ch << ln->lbaf.ch_offset |
-        lun << ln->lbaf.lun_offset |
-        chk << ln->lbaf.chk_offset;
-}
-
 static inline void *lnvm_meta_index(LnvmCtrl *ln, void *meta, uint32_t index)
 {
     return meta + (index * ln->lba_meta_size);
@@ -907,12 +938,17 @@ static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba, hw
                       (chunk_meta->state & (LNVM_CHUNK_OPEN ||
                                             LNVM_CHUNK_BAD ||
                                             LNVM_CHUNK_FREE))) {
-        if (chunk_meta->state & LNVM_CHUNK_FREE)
-            printf("nvme: reset double reset (%" PRIu64 ")\n", lba);
-        else if (chunk_meta->state & LNVM_CHUNK_OPEN)
-            printf("nvme: reset prematurely (%" PRIu64 " wp: %" PRIu64")\n", lba, chunk_meta->wp);
-        else
-            printf("nvme: reset: invalid chunk state (%" PRIu64 " -> %d (wp: %" PRIu64 "))\n", lba, chunk_meta->state, chunk_meta->wp);
+        if (chunk_meta->state & LNVM_CHUNK_FREE) {
+            printf("nvme: double reset\n  ");
+            lnvm_print_lba(ln, lba);
+        } else if (chunk_meta->state & LNVM_CHUNK_OPEN) {
+            printf("nvme: early reset (wp: %" PRIu64 ")\n  ", chunk_meta->wp);
+            lnvm_print_lba(ln, lba);
+	    } else {
+            printf("nvme: invalid chunk state during reset (wp: %" PRIu64 "))\n", chunk_meta->wp);
+            lnvm_print_lba(ln, lba);
+            printf("  state: %d\n", chunk_meta->state);
+        }
     }
 
     chunk_meta->state = LNVM_CHUNK_FREE;
@@ -923,37 +959,6 @@ static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba, hw
         nvme_addr_write(ns->ctrl, mptr, chunk_meta, sizeof(*chunk_meta));
 
     //TODO: Should we save to file here?
-
-    return 0;
-}
-
-static int lnvm_chunk_advance_wp(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba,
-                                 uint32_t nlb)
-{
-    LnvmCS *chunk_meta;
-
-    chunk_meta = lnvm_chunk_get_state(ns, ln, lba);
-    if (!chunk_meta) {
-        fprintf(stderr, "nvme: trying to write to unmapped chunk\n");
-        return -1;
-    }
-
-    if (chunk_meta->state & LNVM_CHUNK_FREE) {
-        chunk_meta->state &= ~LNVM_CHUNK_FREE;
-        chunk_meta->state |= LNVM_CHUNK_OPEN;
-    }
-
-    if (!(chunk_meta->state & LNVM_CHUNK_OPEN)) {
-        fprintf(stderr, "nvme: advance: bad chunk state (state:%d, wp:%lu)\n",
-                                        chunk_meta->state, chunk_meta->wp);
-        return -1;
-    }
-
-    chunk_meta->wp += nlb;
-    if (chunk_meta->wp == ln->params.sec_per_chk) {
-        chunk_meta->state &= ~LNVM_CHUNK_OPEN;
-        chunk_meta->state |= LNVM_CHUNK_CLOSED;
-    }
 
     return 0;
 }
@@ -999,16 +1004,16 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
 
         if (req->is_write) {
             if (lnvm_chunk_advance_wp(ns, ln, psl[i], 1)) {
-                fprintf(stderr, "lnvm_rw: advance chunk wp failed\n");
-                print_lba(ln, psl[i]);
+                fprintf(stderr, "lnvm_rw: advance chunk wp failed\n  ");
+                lnvm_print_lba(ln, psl[i]);
                 err = NVME_INVALID_FIELD | NVME_DNR;
                 goto fail_free_msl;
             }
 
             if (meta) {
                 if (lnvm_meta_write(ln, lba_off, lnvm_meta_index(ln, msl, i))) {
-                    fprintf(stderr, "lnvm_rw: write metadata failed\n");
-                    print_lba(ln, psl[i]);
+                    fprintf(stderr, "lnvm_rw: write metadata failed\n  ");
+                    lnvm_print_lba(ln, psl[i]);
                     err = NVME_INVALID_FIELD | NVME_DNR;
                     goto fail_free_msl;
                 }
@@ -1016,8 +1021,8 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
         } else {
             if (meta) {
                 if (lnvm_meta_read(ln, lba_off, lnvm_meta_index(ln, msl, i))) {
-                    fprintf(stderr, "lnvm_rw: read metadata failed\n");
-                    print_lba(ln, psl[i]);
+                    fprintf(stderr, "lnvm_rw: read metadata failed\n  ");
+                    lnvm_print_lba(ln, psl[i]);
                     err = NVME_INVALID_FIELD | NVME_DNR;
                     goto fail_free_msl;
                 }
@@ -1096,8 +1101,9 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     if (req->is_write) {
         if (lnvm_chunk_advance_wp(ns, ln, slba, nlb)) {
-            fprintf(stderr, "nvme_rw: advance chunk wp failed (slba: %"PRIu64")\n", slba);
-            print_lba(ln, req->slba);
+            fprintf(stderr, "nvme_rw: advance chunk wp failed (slba: %lu)\n", slba);
+            lnvm_print_lba(ln, req->slba);
+
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
@@ -1111,7 +1117,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             for (i = 0; i < nlb; i++) {
                 if (lnvm_meta_write(ln, req->slba + i, lnvm_meta_index(ln, msl, i))) {
                     fprintf(stderr, "lnvm_rw: write metadata failed\n");
-                    print_lba(ln, req->slba + i);
+                    lnvm_print_lba(ln, req->slba + i);
                     return NVME_INVALID_FIELD | NVME_DNR;
                 }
             }
@@ -1128,7 +1134,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             for (i = 0; i < nlb; i++) {
                 if (lnvm_meta_read(ln, req->slba + i, lnvm_meta_index(ln, msl, i))) {
                     fprintf(stderr, "lnvm_rw: read metadata failed\n");
-                    print_lba(ln, req->slba + i);
+                    lnvm_print_lba(ln, req->slba + i);
                     return NVME_INVALID_FIELD | NVME_DNR;
                 }
             }
@@ -1208,7 +1214,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return err;
 
     if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
-        print_rq(ln, psl, nlb);
+        lnvm_print_rq(ln, psl, nlb);
 
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
             offsetof(NvmeRwCmd, prp1), 0, ns->id);
@@ -1453,7 +1459,7 @@ static int lnvm_chunk_meta_load(NvmeNamespace *ns, uint32_t offset,
     return 0;
 }
 
-static void erase_io_complete_cb(void *opaque, int ret)
+static void lnvm_erase_io_complete_cb(void *opaque, int ret)
 {
     NvmeRequest *req = opaque;
     NvmeSQueue *sq = req->sq;
@@ -1495,8 +1501,8 @@ static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     for (i = 0; i < nlb; i++) {
         if (lnvm_chunk_set_free(ns, ln, psl[i], mptr)) {
-            fprintf(stderr, "lnvm_erase_async: failed: ");
-            print_lba(ln, psl[0]);
+            fprintf(stderr, "lnvm_erase_async: failed:\n  ");
+            lnvm_print_lba(ln, psl[0]);
             req->status = 0x40ff;
 
             return NVME_INVALID_FIELD | NVME_DNR;
@@ -1506,7 +1512,7 @@ static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             mptr += sizeof(LnvmCS);
     }
 
-    erase_io_complete_cb(req, 0);
+    lnvm_erase_io_complete_cb(req, 0);
     return NVME_NO_COMPLETE;
 }
 
