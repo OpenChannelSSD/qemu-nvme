@@ -859,7 +859,7 @@ static inline int lnvm_lba_to_chunk_no(LnvmCtrl *ln, uint64_t lba)
     if (chk >= ln->params.chk_per_lun ||
             lun >= ln->params.num_lun ||
             ch >= ln->params.num_ch) {
-        printf("nvme: accessing unmapped chunk: ch:%lu, lun:%lu, chk:%lu\n", ch, lun, chk);
+        printf("nvme: accessing unmapped chunk: ch:%lu, lun:%lu, chk:%lu cno: %u\n", ch, lun, chk, cno);
         return -1;
     }
 
@@ -1047,6 +1047,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint64_t prp1 = le64_to_cpu(rw->prp1);
     uint64_t prp2 = le64_to_cpu(rw->prp2);
+    uint64_t meta = le64_to_cpu(rw->mptr);
     const uint64_t elba = slba + nlb;
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
@@ -1054,6 +1055,8 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t aio_slba;
     uint64_t dev_slba = lnvm_lba_to_off(ln, slba);
     uint64_t dev_elba = lnvm_lba_to_off(ln, elba);
+    int i;
+    void *msl;
 
     req->is_write = rw->opcode == NVME_CMD_WRITE;
     if (elba > le64_to_cpu(ns->id_ns.nsze)) {
@@ -1091,10 +1094,46 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->ns = ns;
 
     if (req->is_write) {
-        if (lnvm_chunk_advance_wp(ns, ln, req->slba, nlb)) {
-            printf("nvme_rw: advance chunk wp failed\n");
+        if (lnvm_chunk_advance_wp(ns, ln, slba, nlb)) {
+            printf("nvme_rw: advance chunk wp failed (slba: %llu)\n", slba);
             print_lba(ln, req->slba);
             return NVME_INVALID_FIELD | NVME_DNR;
+        }
+
+        if (meta) {
+            msl = g_malloc0(ln->params.sos * ln->params.max_sec_per_rq);
+            if (!msl) {
+                printf("failed alloc\n");
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
+            nvme_addr_read(n, meta, (void *)msl, nlb * ln->params.sos);
+            for (i = 0; i < nlb; i++) {
+                if (lnvm_meta_write(ln, req->slba + i, lnvm_meta_index(ln, msl, i))) {
+                    printf("lnvm_rw: write metadata failed\n");
+                    print_lba(ln, req->slba + i);
+                    return NVME_INVALID_FIELD | NVME_DNR;
+                }
+            }
+            g_free(msl);
+        }
+    } else {
+        if (meta) {
+            msl = g_malloc0(ln->params.sos * ln->params.max_sec_per_rq);
+            if (!msl) {
+                printf("failed alloc\n");
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
+
+            for (i = 0; i < nlb; i++) {
+                if (lnvm_meta_read(ln, req->slba + i, lnvm_meta_index(ln, msl, i))) {
+                    printf("lnvm_rw: read metadata failed\n");
+                    print_lba(ln, req->slba + i);
+                    return NVME_INVALID_FIELD | NVME_DNR;
+                }
+            }
+
+            nvme_addr_write(n, meta, (void *)msl, nlb * ln->params.sos);
+            g_free(msl);
         }
     }
 
