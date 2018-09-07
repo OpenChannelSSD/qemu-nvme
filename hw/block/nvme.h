@@ -758,7 +758,6 @@ typedef struct LnvmParams {
     uint8_t     ws_min;
     uint8_t     ws_opt;
     uint8_t     mw_cunits;
-    uint16_t    sos;
     /* calculated values */
     uint32_t    sec_per_lun;
     uint32_t    total_secs;
@@ -1026,6 +1025,7 @@ typedef struct LnvmCtrl {
     uint32_t       err_write_cnt;
     FILE           *metadata;
     uint8_t        int_meta_size;       // # of bytes for "internal" metadata
+    uint8_t        lba_meta_size; /* per lba metadata */
 } LnvmCtrl;
 
 typedef struct NvmeCtrl {

@@ -52,8 +52,8 @@
  *  extended=<int>   : Use extended-lba for meta-data, Default:0
  *  dpc=<int>        : Data protection capabilities, Default:0
  *  dps=<int>        : Data protection settings, Default:0
- *  mc=<int>         : Meta-data capabilities, Default:0
- *  meta=<int>       : Meta-data size, Default:0
+ *  mc=<int>         : Meta-data capabilities, Default:2
+ *  meta=<int>       : Meta-data size, Default:16
  *  oncs=<oncs>      : Optional NVMe command support, Default:DSM
  *  oacs=<oacs>      : Optional Admin command support, Default:Format
  *  cmbsz=<cmbsz>    : Controller Memory Buffer CMBSZ register, Default:0
@@ -68,7 +68,6 @@
  *  lchunktable=<file> : Load state table from file destination (Provide path
  *  to file. If no file is provided a state table will be generated.
  *  lmetadata=<file>   : Load metadata from file destination
- *  lmetasize=<int>    : LightNVM metadata (OOB) size. Default: 16
  *  lb_err_write       : First lba to inject write error. Default: 0 (disabled)
  *  ln_err_write       : Number of lbas affected by write error injection
  *  ldebug             : Enable LightNVM debugging. Default: 0 (disabled)
@@ -727,7 +726,7 @@ struct lnvm_tgt_meta {
 static inline int lnvm_meta_write(LnvmCtrl *ln, uint64_t lba, void *meta)
 {
     FILE *meta_fp = ln->metadata;
-    size_t tgt_oob_len = ln->params.sos;
+    size_t tgt_oob_len = ln->lba_meta_size;
     size_t int_oob_len = ln->int_meta_size;
     size_t meta_len = tgt_oob_len + int_oob_len;
     uint32_t seek = lba * meta_len;
@@ -761,7 +760,7 @@ static inline int lnvm_meta_write(LnvmCtrl *ln, uint64_t lba, void *meta)
 static inline int lnvm_meta_read(LnvmCtrl *ln, uint64_t lba, void *meta)
 {
     FILE *meta_fp = ln->metadata;
-    size_t tgt_oob_len = ln->params.sos;
+    size_t tgt_oob_len = ln->lba_meta_size;
     size_t int_oob_len = ln->int_meta_size;
     size_t meta_len = tgt_oob_len + int_oob_len;
     uint32_t seek = lba * meta_len;
@@ -822,7 +821,7 @@ static inline int lnvm_meta_state_get(LnvmCtrl *ln, uint64_t lba,
                                         uint32_t *state)
 {
     FILE *meta_fp = ln->metadata;
-    size_t tgt_oob_len = ln->params.sos;
+    size_t tgt_oob_len = ln->lba_meta_size;
     size_t int_oob_len = ln->int_meta_size;
     size_t meta_len = tgt_oob_len + int_oob_len;
     uint32_t seek = lba * meta_len;
@@ -889,7 +888,7 @@ static inline uint64_t lnvm_chunk_no_to_lba(LnvmCtrl *ln, int64_t cno) {
 
 static inline void *lnvm_meta_index(LnvmCtrl *ln, void *meta, uint32_t index)
 {
-    return meta + (index * ln->params.sos);
+    return meta + (index * ln->lba_meta_size);
 }
 
 static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba, hwaddr mptr)
@@ -978,14 +977,14 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
     if (!*aio_sector_list)
         return -ENOMEM;
 
-    msl = g_malloc0(ln->params.sos * ln->params.max_sec_per_rq);
+    msl = g_malloc0(ln->lba_meta_size * ln->params.max_sec_per_rq);
     if (!msl) {
         err = -ENOMEM;
         goto fail_free_aio_sector_list;
     }
 
     if (meta && req->is_write)
-        nvme_addr_read(n, meta, (void *)msl, nlb * ln->params.sos);
+        nvme_addr_read(n, meta, (void *)msl, nlb * ln->lba_meta_size);
 
     /* If several LUNs are set up, the lba list sent by the host will not be
      * sequential. In this case, we need to pass on the list of lbas to the dma
@@ -1025,7 +1024,7 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
     }
 
     if (meta && !req->is_write)
-        nvme_addr_write(n, meta, (void *)msl, nlb * ln->params.sos);
+        nvme_addr_write(n, meta, (void *)msl, nlb * ln->lba_meta_size);
 
     g_free(msl);
     return 0;
@@ -1101,12 +1100,12 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         }
 
         if (meta) {
-            msl = g_malloc0(ln->params.sos * ln->params.max_sec_per_rq);
+            msl = g_malloc0(ln->lba_meta_size * ln->params.max_sec_per_rq);
             if (!msl) {
                 printf("failed alloc\n");
                 return NVME_INVALID_FIELD | NVME_DNR;
             }
-            nvme_addr_read(n, meta, (void *)msl, nlb * ln->params.sos);
+            nvme_addr_read(n, meta, (void *)msl, nlb * ln->lba_meta_size);
             for (i = 0; i < nlb; i++) {
                 if (lnvm_meta_write(ln, req->slba + i, lnvm_meta_index(ln, msl, i))) {
                     printf("lnvm_rw: write metadata failed\n");
@@ -1118,7 +1117,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         }
     } else {
         if (meta) {
-            msl = g_malloc0(ln->params.sos * ln->params.max_sec_per_rq);
+            msl = g_malloc0(ln->lba_meta_size * ln->params.max_sec_per_rq);
             if (!msl) {
                 printf("failed alloc\n");
                 return NVME_INVALID_FIELD | NVME_DNR;
@@ -1132,7 +1131,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 }
             }
 
-            nvme_addr_write(n, meta, (void *)msl, nlb * ln->params.sos);
+            nvme_addr_write(n, meta, (void *)msl, nlb * ln->lba_meta_size);
             g_free(msl);
         }
     }
@@ -2723,10 +2722,10 @@ static int lnvm_init_meta(LnvmCtrl *ln)
 
     //
     // Internal meta are the first "ln->int_meta_size" bytes
-    // Then comes the tgt_oob_len with is the following ln->param.sos bytes
+    // Then comes the tgt_oob_len with is the following ln->lba_meta_size bytes
     //
 
-    meta_tbytes = (ln->int_meta_size + ln->params.sos) * \
+    meta_tbytes = (ln->int_meta_size + ln->lba_meta_size) * \
                   ln->params.total_secs;
 
     if (!ln->meta_fname) {      // Default meta file
@@ -2901,6 +2900,7 @@ static int lnvm_init(NvmeCtrl *n)
         ln->state_auto_gen = 0;
     }
 
+    ln->lba_meta_size = n->meta;
     ret = lnvm_init_meta(ln);   // Initialize metadata file
     if (ret) {
         error_report("nvme: lnvm_init_meta: failed\n");
@@ -3126,7 +3126,6 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT32("lnum_pu", NvmeCtrl, lnvm_ctrl.params.num_lun, 1),
     DEFINE_PROP_STRING("lchunktable", NvmeCtrl, lnvm_ctrl.chunk_fname),
     DEFINE_PROP_STRING("lmetadata", NvmeCtrl, lnvm_ctrl.meta_fname),
-    DEFINE_PROP_UINT16("lmetasize", NvmeCtrl, lnvm_ctrl.params.sos, 16),
     DEFINE_PROP_UINT32("lb_err_write", NvmeCtrl, lnvm_ctrl.err_write, 0),
     DEFINE_PROP_UINT32("ln_err_write", NvmeCtrl, lnvm_ctrl.n_err_write, 0),
     DEFINE_PROP_UINT8("ldebug", NvmeCtrl, lnvm_ctrl.debug, 0),
