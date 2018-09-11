@@ -59,6 +59,7 @@
  *  cmbsz=<cmbsz>    : Controller Memory Buffer CMBSZ register, Default:0
  *  cmbloc=<cmbloc>  : Controller Memory Buffer CMBLOC register, Default:0
  *  lsec_per_chk=<int> : Number of sectors in a chunk. Default: 65536
+ *  lsec_size        : Sector Size. Default: 4096
  *  lws_min=<int>      : Mininum write size for device in sectors. Default: 4
  *  lws_opt=<int>      : Optimal write size for device in sectors. Default: 8
  *  lmw_cunits=<int>   : Number of written sectors required in chunk before read. Default: 32
