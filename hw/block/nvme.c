@@ -858,7 +858,8 @@ static inline int lnvm_lba_to_chunk_no(LnvmCtrl *ln, uint64_t lba)
     if (chk >= ln->params.chk_per_lun ||
             lun >= ln->params.num_lun ||
             ch >= ln->params.num_ch) {
-        printf("nvme: accessing unmapped chunk: ch:%lu, lun:%lu, chk:%lu cno: %u\n", ch, lun, chk, cno);
+        printf("nvme: accessing unmapped chunk: ch:%"PRIu64", lun:%"PRIu64
+		", chk:%"PRIu64" cno: %"PRIu64"\n", ch, lun, chk, cno);
         return -1;
     }
 
@@ -1094,7 +1095,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     if (req->is_write) {
         if (lnvm_chunk_advance_wp(ns, ln, slba, nlb)) {
-            printf("nvme_rw: advance chunk wp failed (slba: %llu)\n", slba);
+            printf("nvme_rw: advance chunk wp failed (slba: %"PRIu64")\n", slba);
             print_lba(ln, req->slba);
             return NVME_INVALID_FIELD | NVME_DNR;
         }
