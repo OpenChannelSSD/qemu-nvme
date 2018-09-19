@@ -56,8 +56,6 @@
  *  meta=<int>       : Meta-data size, Default:16
  *  oncs=<oncs>      : Optional NVMe command support, Default:DSM
  *  oacs=<oacs>      : Optional Admin command support, Default:Format
- *  cmbsz=<cmbsz>    : Controller Memory Buffer CMBSZ register, Default:0
- *  cmbloc=<cmbloc>  : Controller Memory Buffer CMBLOC register, Default:0
  *  lsec_per_chk=<int> : Number of sectors in a chunk. Default: 65536
  *  lsec_size        : Sector Size. Default: 4096
  *  lws_min=<int>      : Mininum write size for device in sectors. Default: 4
@@ -3259,10 +3257,21 @@ static void nvme_init_pci(NvmeCtrl *n)
     msix_init_exclusive_bar(&n->parent_obj, n->num_queues, 4);
     msi_init(&n->parent_obj, 0x50, 32, true, false);
 
-    if (n->cmbsz) {
+    if (n->cmb_size_mb) {
 
-        n->bar.cmbloc = n->cmbloc;
-        n->bar.cmbsz  = n->cmbsz;
+        NVME_CMBLOC_SET_BIR(n->bar.cmbloc, 2);
+        NVME_CMBLOC_SET_OFST(n->bar.cmbloc, 0);
+
+        NVME_CMBSZ_SET_SQS(n->bar.cmbsz, 1);
+        NVME_CMBSZ_SET_CQS(n->bar.cmbsz, 0);
+        NVME_CMBSZ_SET_LISTS(n->bar.cmbsz, 0);
+        NVME_CMBSZ_SET_RDS(n->bar.cmbsz, 1);
+        NVME_CMBSZ_SET_WDS(n->bar.cmbsz, 1);
+        NVME_CMBSZ_SET_SZU(n->bar.cmbsz, 2); /* MBs */
+        NVME_CMBSZ_SET_SZ(n->bar.cmbsz, n->cmb_size_mb);
+
+        n->cmbloc = n->bar.cmbloc;
+        n->cmbsz = n->bar.cmbsz;
 
         n->cmbuf = g_malloc0(NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
         memory_region_init_io(&n->ctrl_mem, OBJECT(n), &nvme_cmb_ops, n, "nvme-cmb",
@@ -3375,8 +3384,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("dps", NvmeCtrl, dps, 0),
     DEFINE_PROP_UINT8("mc", NvmeCtrl, mc, 2),
     DEFINE_PROP_UINT8("meta", NvmeCtrl, meta, 16),
-    DEFINE_PROP_UINT32("cmbsz", NvmeCtrl, cmbsz, 0),
-    DEFINE_PROP_UINT32("cmbloc", NvmeCtrl, cmbloc, 0),
+    DEFINE_PROP_UINT32("cmb_size_mb", NvmeCtrl, cmb_size_mb, 0),
     DEFINE_PROP_UINT16("oacs", NvmeCtrl, oacs, NVME_OACS_FORMAT),
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, 0x1d1d),

@@ -1091,6 +1091,7 @@ typedef struct NvmeCtrl {
     uint8_t     cqes_pending;
     uint16_t    vid;
     uint16_t    did;
+    uint32_t    cmb_size_mb;
     uint32_t    cmbsz;
     uint32_t    cmbloc;
     uint8_t     *cmbuf;
