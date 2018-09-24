@@ -14,7 +14,6 @@
 #define OPTS_VISITOR_H
 
 #include "qapi/visitor.h"
-#include "qemu/option.h"
 
 /* Inclusive upper bound on the size of any flattened range. This is a safety
  * (= anti-annoyance) measure; wrong ranges should not cause long startup
@@ -29,9 +28,12 @@ typedef struct OptsVisitor OptsVisitor;
  * - string representations of negative numbers yield negative values,
  * - values below INT64_MIN or LLONG_MIN are rejected,
  * - values above INT64_MAX or LLONG_MAX are rejected.
+ *
+ * The Opts input visitor does not implement support for visiting QAPI
+ * alternates, numbers (other than integers), null, or arbitrary
+ * QTypes.  It also requires a non-null list argument to
+ * visit_start_list().
  */
-OptsVisitor *opts_visitor_new(const QemuOpts *opts);
-void opts_visitor_cleanup(OptsVisitor *nv);
-Visitor *opts_get_visitor(OptsVisitor *nv);
+Visitor *opts_visitor_new(const QemuOpts *opts);
 
 #endif

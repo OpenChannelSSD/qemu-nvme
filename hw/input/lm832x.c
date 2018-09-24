@@ -18,6 +18,7 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/i2c/i2c.h"
 #include "qemu/timer.h"
@@ -238,7 +239,7 @@ static uint8_t lm_kbd_read(LM823KbdState *s, int reg, int byte)
 
     default:
         lm_kbd_error(s, ERR_CMDUNK);
-        fprintf(stderr, "%s: unknown command %02x\n", __FUNCTION__, reg);
+        fprintf(stderr, "%s: unknown command %02x\n", __func__, reg);
         return 0x00;
     }
 
@@ -330,7 +331,7 @@ static void lm_kbd_write(LM823KbdState *s, int reg, int byte, uint8_t value)
         if ((value & 3) && (value & 3) != 3) {
             lm_kbd_error(s, ERR_BADPAR);
             fprintf(stderr, "%s: invalid clock setting in RCPWM\n",
-                            __FUNCTION__);
+                            __func__);
         }
         /* TODO: Validate that the command is only issued once */
         break;
@@ -377,12 +378,12 @@ static void lm_kbd_write(LM823KbdState *s, int reg, int byte, uint8_t value)
         break;
     default:
         lm_kbd_error(s, ERR_CMDUNK);
-        fprintf(stderr, "%s: unknown command %02x\n", __FUNCTION__, reg);
+        fprintf(stderr, "%s: unknown command %02x\n", __func__, reg);
         break;
     }
 }
 
-static void lm_i2c_event(I2CSlave *i2c, enum i2c_event event)
+static int lm_i2c_event(I2CSlave *i2c, enum i2c_event event)
 {
     LM823KbdState *s = LM8323(i2c);
 
@@ -396,6 +397,8 @@ static void lm_i2c_event(I2CSlave *i2c, enum i2c_event event)
     default:
         break;
     }
+
+    return 0;
 }
 
 static int lm_i2c_rx(I2CSlave *i2c)
@@ -455,26 +458,25 @@ static const VMStateDescription vmstate_lm_kbd = {
         VMSTATE_UINT16_ARRAY(pwm.file, LM823KbdState, 256),
         VMSTATE_UINT8(pwm.faddr, LM823KbdState),
         VMSTATE_BUFFER(pwm.addr, LM823KbdState),
-        VMSTATE_TIMER_ARRAY(pwm.tm, LM823KbdState, 3),
+        VMSTATE_TIMER_PTR_ARRAY(pwm.tm, LM823KbdState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
 
 
-static int lm8323_init(I2CSlave *i2c)
+static void lm8323_realize(DeviceState *dev, Error **errp)
 {
-    LM823KbdState *s = LM8323(i2c);
+    LM823KbdState *s = LM8323(dev);
 
     s->model = 0x8323;
     s->pwm.tm[0] = timer_new_ns(QEMU_CLOCK_VIRTUAL, lm_kbd_pwm0_tick, s);
     s->pwm.tm[1] = timer_new_ns(QEMU_CLOCK_VIRTUAL, lm_kbd_pwm1_tick, s);
     s->pwm.tm[2] = timer_new_ns(QEMU_CLOCK_VIRTUAL, lm_kbd_pwm2_tick, s);
-    qdev_init_gpio_out(DEVICE(i2c), &s->nirq, 1);
+    qdev_init_gpio_out(dev, &s->nirq, 1);
 
     lm_kbd_reset(s);
 
     qemu_register_reset((void *) lm_kbd_reset, s);
-    return 0;
 }
 
 void lm832x_key_event(DeviceState *dev, int key, int state)
@@ -502,7 +504,7 @@ static void lm8323_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     I2CSlaveClass *k = I2C_SLAVE_CLASS(klass);
 
-    k->init = lm8323_init;
+    dc->realize = lm8323_realize;
     k->event = lm_i2c_event;
     k->recv = lm_i2c_rx;
     k->send = lm_i2c_tx;

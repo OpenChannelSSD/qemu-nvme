@@ -11,25 +11,49 @@
  *
  */
 
+#include "qemu/osdep.h"
 #include "qemu-common.h"
+#include "qemu/error-report.h"
 #include "hw/hw.h"
 #include "hw/boards.h"
+#include "sysemu/sysemu.h"
+#include "exec/address-spaces.h"
+#include "cpu.h"
 
-static void machine_none_init(MachineState *machine)
+static void machine_none_init(MachineState *mch)
 {
+    CPUState *cpu = NULL;
+
+    /* Initialize CPU (if user asked for it) */
+    if (mch->cpu_type) {
+        cpu = cpu_create(mch->cpu_type);
+        if (!cpu) {
+            error_report("Unable to initialize CPU");
+            exit(1);
+        }
+    }
+
+    /* RAM at address zero */
+    if (mch->ram_size) {
+        MemoryRegion *ram = g_new(MemoryRegion, 1);
+
+        memory_region_allocate_system_memory(ram, NULL, "ram", mch->ram_size);
+        memory_region_add_subregion(get_system_memory(), 0, ram);
+    }
+
+    if (mch->kernel_filename) {
+        error_report("The -kernel parameter is not supported "
+                     "(use the generic 'loader' device instead).");
+        exit(1);
+    }
 }
 
-static QEMUMachine machine_none = {
-    .name = "none",
-    .desc = "empty machine",
-    .init = machine_none_init,
-    .max_cpus = 0,
-};
-
-static void register_machines(void)
+static void machine_none_machine_init(MachineClass *mc)
 {
-    qemu_register_machine(&machine_none);
+    mc->desc = "empty machine";
+    mc->init = machine_none_init;
+    mc->max_cpus = 1;
+    mc->default_ram_size = 0;
 }
 
-machine_init(register_machines);
-
+DEFINE_MACHINE("none", machine_none_machine_init)

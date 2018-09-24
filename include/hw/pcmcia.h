@@ -1,5 +1,5 @@
 #ifndef HW_PCMCIA_H
-#define HW_PCMCIA_H 1
+#define HW_PCMCIA_H
 
 /* PCMCIA/Cardbus */
 
@@ -8,13 +8,7 @@
 typedef struct PCMCIASocket {
     qemu_irq irq;
     bool attached;
-    const char *slot_string;
-    const char *card_string;
 } PCMCIASocket;
-
-void pcmcia_socket_register(PCMCIASocket *socket);
-void pcmcia_socket_unregister(PCMCIASocket *socket);
-void pcmcia_info(Monitor *mon, const QDict *qdict);
 
 #define TYPE_PCMCIA_CARD "pcmcia-card"
 #define PCMCIA_CARD(obj) \

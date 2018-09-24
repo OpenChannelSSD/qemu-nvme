@@ -10,10 +10,11 @@
  * GNU GPL, version 2 or (at your option) any later version.
  */
 
-#include "sysemu/block-backend.h"
+#include "qemu/osdep.h"
 #include "sysemu/blockdev.h"
-#include "hw/ssi.h"
-#include "hw/sd.h"
+#include "hw/ssi/ssi.h"
+#include "hw/sd/sd.h"
+#include "qapi/error.h"
 
 //#define DEBUG_SSI_SD 1
 
@@ -29,7 +30,7 @@ do { fprintf(stderr, "ssi_sd: error: " fmt , ## __VA_ARGS__);} while (0)
 #endif
 
 typedef enum {
-    SSI_SD_CMD,
+    SSI_SD_CMD = 0,
     SSI_SD_CMDARG,
     SSI_SD_RESPONSE,
     SSI_SD_DATA_START,
@@ -38,15 +39,18 @@ typedef enum {
 
 typedef struct {
     SSISlave ssidev;
-    ssi_sd_mode mode;
+    uint32_t mode;
     int cmd;
     uint8_t cmdarg[4];
     uint8_t response[5];
-    int arglen;
-    int response_pos;
-    int stopping;
-    SDState *sd;
+    int32_t arglen;
+    int32_t response_pos;
+    int32_t stopping;
+    SDBus sdbus;
 } ssi_sd_state;
+
+#define TYPE_SSI_SD "ssi-sd"
+#define SSI_SD(obj) OBJECT_CHECK(ssi_sd_state, (obj), TYPE_SSI_SD)
 
 /* State word bits.  */
 #define SSI_SDR_LOCKED          0x0001
@@ -92,10 +96,9 @@ static uint32_t ssi_sd_transfer(SSISlave *dev, uint32_t val)
             uint8_t longresp[16];
             /* FIXME: Check CRC.  */
             request.cmd = s->cmd;
-            request.arg = (s->cmdarg[0] << 24) | (s->cmdarg[1] << 16)
-                           | (s->cmdarg[2] << 8) | s->cmdarg[3];
+            request.arg = ldl_be_p(s->cmdarg);
             DPRINTF("CMD%d arg 0x%08x\n", s->cmd, request.arg);
-            s->arglen = sd_do_command(s->sd, &request, longresp);
+            s->arglen = sdbus_do_command(&s->sdbus, &request, longresp);
             if (s->arglen <= 0) {
                 s->arglen = 1;
                 s->response[0] = 4;
@@ -118,8 +121,7 @@ static uint32_t ssi_sd_transfer(SSISlave *dev, uint32_t val)
                 /* CMD13 returns a 2-byte statuse work. Other commands
                    only return the first byte.  */
                 s->arglen = (s->cmd == 13) ? 2 : 1;
-                cardstatus = (longresp[0] << 24) | (longresp[1] << 16)
-                             | (longresp[2] << 8) | longresp[3];
+                cardstatus = ldl_be_p(longresp);
                 status = 0;
                 if (((cardstatus >> 9) & 0xf) < 4)
                     status |= SSI_SDR_IDLE;
@@ -172,7 +174,7 @@ static uint32_t ssi_sd_transfer(SSISlave *dev, uint32_t val)
             DPRINTF("Response 0x%02x\n", s->response[s->response_pos]);
             return s->response[s->response_pos++];
         }
-        if (sd_data_ready(s->sd)) {
+        if (sdbus_data_ready(&s->sdbus)) {
             DPRINTF("Data read\n");
             s->mode = SSI_SD_DATA_START;
         } else {
@@ -185,8 +187,8 @@ static uint32_t ssi_sd_transfer(SSISlave *dev, uint32_t val)
         s->mode = SSI_SD_DATA_READ;
         return 0xfe;
     case SSI_SD_DATA_READ:
-        val = sd_read_data(s->sd);
-        if (!sd_data_ready(s->sd)) {
+        val = sdbus_read_data(&s->sdbus);
+        if (!sdbus_data_ready(&s->sdbus)) {
             DPRINTF("Data read end\n");
             s->mode = SSI_SD_CMD;
         }
@@ -196,85 +198,96 @@ static uint32_t ssi_sd_transfer(SSISlave *dev, uint32_t val)
     return 0xff;
 }
 
-static void ssi_sd_save(QEMUFile *f, void *opaque)
+static int ssi_sd_post_load(void *opaque, int version_id)
 {
-    SSISlave *ss = SSI_SLAVE(opaque);
     ssi_sd_state *s = (ssi_sd_state *)opaque;
-    int i;
 
-    qemu_put_be32(f, s->mode);
-    qemu_put_be32(f, s->cmd);
-    for (i = 0; i < 4; i++)
-        qemu_put_be32(f, s->cmdarg[i]);
-    for (i = 0; i < 5; i++)
-        qemu_put_be32(f, s->response[i]);
-    qemu_put_be32(f, s->arglen);
-    qemu_put_be32(f, s->response_pos);
-    qemu_put_be32(f, s->stopping);
-
-    qemu_put_be32(f, ss->cs);
-}
-
-static int ssi_sd_load(QEMUFile *f, void *opaque, int version_id)
-{
-    SSISlave *ss = SSI_SLAVE(opaque);
-    ssi_sd_state *s = (ssi_sd_state *)opaque;
-    int i;
-
-    if (version_id != 1)
+    if (s->mode > SSI_SD_DATA_READ) {
         return -EINVAL;
-
-    s->mode = qemu_get_be32(f);
-    s->cmd = qemu_get_be32(f);
-    for (i = 0; i < 4; i++)
-        s->cmdarg[i] = qemu_get_be32(f);
-    for (i = 0; i < 5; i++)
-        s->response[i] = qemu_get_be32(f);
-    s->arglen = qemu_get_be32(f);
+    }
     if (s->mode == SSI_SD_CMDARG &&
         (s->arglen < 0 || s->arglen >= ARRAY_SIZE(s->cmdarg))) {
         return -EINVAL;
     }
-    s->response_pos = qemu_get_be32(f);
-    s->stopping = qemu_get_be32(f);
     if (s->mode == SSI_SD_RESPONSE &&
         (s->response_pos < 0 || s->response_pos >= ARRAY_SIZE(s->response) ||
         (!s->stopping && s->arglen > ARRAY_SIZE(s->response)))) {
         return -EINVAL;
     }
 
-    ss->cs = qemu_get_be32(f);
-
     return 0;
 }
 
-static int ssi_sd_init(SSISlave *d)
+static const VMStateDescription vmstate_ssi_sd = {
+    .name = "ssi_sd",
+    .version_id = 2,
+    .minimum_version_id = 2,
+    .post_load = ssi_sd_post_load,
+    .fields = (VMStateField []) {
+        VMSTATE_UINT32(mode, ssi_sd_state),
+        VMSTATE_INT32(cmd, ssi_sd_state),
+        VMSTATE_UINT8_ARRAY(cmdarg, ssi_sd_state, 4),
+        VMSTATE_UINT8_ARRAY(response, ssi_sd_state, 5),
+        VMSTATE_INT32(arglen, ssi_sd_state),
+        VMSTATE_INT32(response_pos, ssi_sd_state),
+        VMSTATE_INT32(stopping, ssi_sd_state),
+        VMSTATE_SSI_SLAVE(ssidev, ssi_sd_state),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static void ssi_sd_realize(SSISlave *d, Error **errp)
 {
-    DeviceState *dev = DEVICE(d);
     ssi_sd_state *s = FROM_SSI_SLAVE(ssi_sd_state, d);
+    DeviceState *carddev;
     DriveInfo *dinfo;
+    Error *err = NULL;
+
+    qbus_create_inplace(&s->sdbus, sizeof(s->sdbus), TYPE_SD_BUS,
+                        DEVICE(d), "sd-bus");
+
+    /* Create and plug in the sd card */
+    /* FIXME use a qdev drive property instead of drive_get_next() */
+    dinfo = drive_get_next(IF_SD);
+    carddev = qdev_create(&s->sdbus.qbus, TYPE_SD_CARD);
+    if (dinfo) {
+        qdev_prop_set_drive(carddev, "drive", blk_by_legacy_dinfo(dinfo), &err);
+    }
+    object_property_set_bool(OBJECT(carddev), true, "spi", &err);
+    object_property_set_bool(OBJECT(carddev), true, "realized", &err);
+    if (err) {
+        error_setg(errp, "failed to init SD card: %s", error_get_pretty(err));
+        return;
+    }
+}
+
+static void ssi_sd_reset(DeviceState *dev)
+{
+    ssi_sd_state *s = SSI_SD(dev);
 
     s->mode = SSI_SD_CMD;
-    dinfo = drive_get_next(IF_SD);
-    s->sd = sd_init(dinfo ? blk_by_legacy_dinfo(dinfo) : NULL, true);
-    if (s->sd == NULL) {
-        return -1;
-    }
-    register_savevm(dev, "ssi_sd", -1, 1, ssi_sd_save, ssi_sd_load, s);
-    return 0;
+    s->cmd = 0;
+    memset(s->cmdarg, 0, sizeof(s->cmdarg));
+    memset(s->response, 0, sizeof(s->response));
+    s->arglen = 0;
+    s->response_pos = 0;
+    s->stopping = 0;
 }
 
 static void ssi_sd_class_init(ObjectClass *klass, void *data)
 {
+    DeviceClass *dc = DEVICE_CLASS(klass);
     SSISlaveClass *k = SSI_SLAVE_CLASS(klass);
 
-    k->init = ssi_sd_init;
+    k->realize = ssi_sd_realize;
     k->transfer = ssi_sd_transfer;
     k->cs_polarity = SSI_CS_LOW;
+    dc->vmsd = &vmstate_ssi_sd;
+    dc->reset = ssi_sd_reset;
 }
 
 static const TypeInfo ssi_sd_info = {
-    .name          = "ssi-sd",
+    .name          = TYPE_SSI_SD,
     .parent        = TYPE_SSI_SLAVE,
     .instance_size = sizeof(ssi_sd_state),
     .class_init    = ssi_sd_class_init,

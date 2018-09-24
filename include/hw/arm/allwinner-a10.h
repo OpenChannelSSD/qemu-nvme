@@ -7,15 +7,17 @@
 #include "hw/timer/allwinner-a10-pit.h"
 #include "hw/intc/allwinner-a10-pic.h"
 #include "hw/net/allwinner_emac.h"
+#include "hw/ide/pci.h"
+#include "hw/ide/ahci.h"
 
 #include "sysemu/sysemu.h"
-#include "exec/address-spaces.h"
 
 
 #define AW_A10_PIC_REG_BASE     0x01c20400
 #define AW_A10_PIT_REG_BASE     0x01c20c00
 #define AW_A10_UART0_REG_BASE   0x01c28000
 #define AW_A10_EMAC_BASE        0x01c0b000
+#define AW_A10_SATA_BASE        0x01c18000
 
 #define AW_A10_SDRAM_BASE       0x40000000
 
@@ -32,6 +34,7 @@ typedef struct AwA10State {
     AwA10PITState timer;
     AwA10PICState intc;
     AwEmacState emac;
+    AllwinnerAHCIState sata;
 } AwA10State;
 
 #define ALLWINNER_H_

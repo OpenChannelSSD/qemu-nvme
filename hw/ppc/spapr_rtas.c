@@ -24,19 +24,32 @@
  * THE SOFTWARE.
  *
  */
+#include "qemu/osdep.h"
 #include "cpu.h"
+#include "qemu/log.h"
+#include "qemu/error-report.h"
 #include "sysemu/sysemu.h"
-#include "sysemu/char.h"
 #include "hw/qdev.h"
 #include "sysemu/device_tree.h"
+#include "sysemu/cpus.h"
+#include "sysemu/hw_accel.h"
 
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_vio.h"
-#include "qapi-event.h"
+#include "hw/ppc/spapr_rtas.h"
+#include "hw/ppc/spapr_cpu_core.h"
+#include "hw/ppc/ppc.h"
+#include "hw/boards.h"
 
 #include <libfdt.h>
+#include "hw/ppc/spapr_drc.h"
+#include "qemu/cutils.h"
+#include "trace.h"
+#include "hw/ppc/fdt.h"
+#include "target/ppc/mmu-hash64.h"
+#include "target/ppc/mmu-book3s-v3.h"
 
-static void rtas_display_character(PowerPCCPU *cpu, sPAPREnvironment *spapr,
+static void rtas_display_character(PowerPCCPU *cpu, sPAPRMachineState *spapr,
                                    uint32_t token, uint32_t nargs,
                                    target_ulong args,
                                    uint32_t nret, target_ulong rets)
@@ -52,52 +65,7 @@ static void rtas_display_character(PowerPCCPU *cpu, sPAPREnvironment *spapr,
     }
 }
 
-static void rtas_get_time_of_day(PowerPCCPU *cpu, sPAPREnvironment *spapr,
-                                 uint32_t token, uint32_t nargs,
-                                 target_ulong args,
-                                 uint32_t nret, target_ulong rets)
-{
-    struct tm tm;
-
-    if (nret != 8) {
-        rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
-        return;
-    }
-
-    qemu_get_timedate(&tm, spapr->rtc_offset);
-
-    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
-    rtas_st(rets, 1, tm.tm_year + 1900);
-    rtas_st(rets, 2, tm.tm_mon + 1);
-    rtas_st(rets, 3, tm.tm_mday);
-    rtas_st(rets, 4, tm.tm_hour);
-    rtas_st(rets, 5, tm.tm_min);
-    rtas_st(rets, 6, tm.tm_sec);
-    rtas_st(rets, 7, 0); /* we don't do nanoseconds */
-}
-
-static void rtas_set_time_of_day(PowerPCCPU *cpu, sPAPREnvironment *spapr,
-                                 uint32_t token, uint32_t nargs,
-                                 target_ulong args,
-                                 uint32_t nret, target_ulong rets)
-{
-    struct tm tm;
-
-    tm.tm_year = rtas_ld(args, 0) - 1900;
-    tm.tm_mon = rtas_ld(args, 1) - 1;
-    tm.tm_mday = rtas_ld(args, 2);
-    tm.tm_hour = rtas_ld(args, 3);
-    tm.tm_min = rtas_ld(args, 4);
-    tm.tm_sec = rtas_ld(args, 5);
-
-    /* Just generate a monitor event for the change */
-    qapi_event_send_rtc_change(qemu_timedate_diff(&tm), &error_abort);
-    spapr->rtc_offset = qemu_timedate_diff(&tm);
-
-    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
-}
-
-static void rtas_power_off(PowerPCCPU *cpu, sPAPREnvironment *spapr,
+static void rtas_power_off(PowerPCCPU *cpu, sPAPRMachineState *spapr,
                            uint32_t token, uint32_t nargs, target_ulong args,
                            uint32_t nret, target_ulong rets)
 {
@@ -105,11 +73,12 @@ static void rtas_power_off(PowerPCCPU *cpu, sPAPREnvironment *spapr,
         rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
         return;
     }
-    qemu_system_shutdown_request();
+    qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+    cpu_stop_current();
     rtas_st(rets, 0, RTAS_OUT_SUCCESS);
 }
 
-static void rtas_system_reboot(PowerPCCPU *cpu, sPAPREnvironment *spapr,
+static void rtas_system_reboot(PowerPCCPU *cpu, sPAPRMachineState *spapr,
                                uint32_t token, uint32_t nargs,
                                target_ulong args,
                                uint32_t nret, target_ulong rets)
@@ -118,12 +87,12 @@ static void rtas_system_reboot(PowerPCCPU *cpu, sPAPREnvironment *spapr,
         rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
         return;
     }
-    qemu_system_reset_request();
+    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
     rtas_st(rets, 0, RTAS_OUT_SUCCESS);
 }
 
 static void rtas_query_cpu_stopped_state(PowerPCCPU *cpu_,
-                                         sPAPREnvironment *spapr,
+                                         sPAPRMachineState *spapr,
                                          uint32_t token, uint32_t nargs,
                                          target_ulong args,
                                          uint32_t nret, target_ulong rets)
@@ -137,7 +106,7 @@ static void rtas_query_cpu_stopped_state(PowerPCCPU *cpu_,
     }
 
     id = rtas_ld(args, 0);
-    cpu = ppc_get_vcpu_by_dt_id(id);
+    cpu = spapr_find_cpu(id);
     if (cpu != NULL) {
         if (CPU(cpu)->halted) {
             rtas_st(rets, 1, 0);
@@ -153,13 +122,16 @@ static void rtas_query_cpu_stopped_state(PowerPCCPU *cpu_,
     rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
 }
 
-static void rtas_start_cpu(PowerPCCPU *cpu_, sPAPREnvironment *spapr,
+static void rtas_start_cpu(PowerPCCPU *callcpu, sPAPRMachineState *spapr,
                            uint32_t token, uint32_t nargs,
                            target_ulong args,
                            uint32_t nret, target_ulong rets)
 {
     target_ulong id, start, r3;
-    PowerPCCPU *cpu;
+    PowerPCCPU *newcpu;
+    CPUPPCState *env;
+    PowerPCCPUClass *pcc;
+    target_ulong lpcr;
 
     if (nargs != 3 || nret != 1) {
         rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
@@ -170,60 +142,89 @@ static void rtas_start_cpu(PowerPCCPU *cpu_, sPAPREnvironment *spapr,
     start = rtas_ld(args, 1);
     r3 = rtas_ld(args, 2);
 
-    cpu = ppc_get_vcpu_by_dt_id(id);
-    if (cpu != NULL) {
-        CPUState *cs = CPU(cpu);
-        CPUPPCState *env = &cpu->env;
-
-        if (!cs->halted) {
-            rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
-            return;
-        }
-
-        /* This will make sure qemu state is up to date with kvm, and
-         * mark it dirty so our changes get flushed back before the
-         * new cpu enters */
-        kvm_cpu_synchronize_state(cs);
-
-        env->msr = (1ULL << MSR_SF) | (1ULL << MSR_ME);
-        env->nip = start;
-        env->gpr[3] = r3;
-        cs->halted = 0;
-
-        qemu_cpu_kick(cs);
-
-        rtas_st(rets, 0, RTAS_OUT_SUCCESS);
+    newcpu = spapr_find_cpu(id);
+    if (!newcpu) {
+        /* Didn't find a matching cpu */
+        rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
         return;
     }
 
-    /* Didn't find a matching cpu */
-    rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
+    env = &newcpu->env;
+    pcc = POWERPC_CPU_GET_CLASS(newcpu);
+
+    if (!CPU(newcpu)->halted) {
+        rtas_st(rets, 0, RTAS_OUT_HW_ERROR);
+        return;
+    }
+
+    cpu_synchronize_state(CPU(newcpu));
+
+    env->msr = (1ULL << MSR_SF) | (1ULL << MSR_ME);
+
+    /* Enable Power-saving mode Exit Cause exceptions for the new CPU */
+    lpcr = env->spr[SPR_LPCR];
+    if (!pcc->interrupts_big_endian(callcpu)) {
+        lpcr |= LPCR_ILE;
+    }
+    if (env->mmu_model == POWERPC_MMU_3_00) {
+        /*
+         * New cpus are expected to start in the same radix/hash mode
+         * as the existing CPUs
+         */
+        if (ppc64_radix_guest(callcpu)) {
+            lpcr |= LPCR_UPRT | LPCR_GTSE;
+        } else {
+            lpcr &= ~(LPCR_UPRT | LPCR_GTSE);
+        }
+    }
+    ppc_store_lpcr(newcpu, lpcr);
+
+    /*
+     * Set the timebase offset of the new CPU to that of the invoking
+     * CPU.  This helps hotplugged CPU to have the correct timebase
+     * offset.
+     */
+    newcpu->env.tb_env->tb_offset = callcpu->env.tb_env->tb_offset;
+
+    spapr_cpu_set_entry_state(newcpu, start, r3);
+
+    qemu_cpu_kick(CPU(newcpu));
+
+    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
 }
 
-static void rtas_stop_self(PowerPCCPU *cpu, sPAPREnvironment *spapr,
+static void rtas_stop_self(PowerPCCPU *cpu, sPAPRMachineState *spapr,
                            uint32_t token, uint32_t nargs,
                            target_ulong args,
                            uint32_t nret, target_ulong rets)
 {
     CPUState *cs = CPU(cpu);
     CPUPPCState *env = &cpu->env;
+    PowerPCCPUClass *pcc = POWERPC_CPU_GET_CLASS(cpu);
 
+    /* Disable Power-saving mode Exit Cause exceptions for the CPU.
+     * This could deliver an interrupt on a dying CPU and crash the
+     * guest */
+    ppc_store_lpcr(cpu, env->spr[SPR_LPCR] & ~pcc->lpcr_pm);
     cs->halted = 1;
-    cpu_exit(cs);
-    /*
-     * While stopping a CPU, the guest calls H_CPPR which
-     * effectively disables interrupts on XICS level.
-     * However decrementer interrupts in TCG can still
-     * wake the CPU up so here we disable interrupts in MSR
-     * as well.
-     * As rtas_start_cpu() resets the whole MSR anyway, there is
-     * no need to bother with specific bits, we just clear it.
-     */
-    env->msr = 0;
+    qemu_cpu_kick(cs);
+}
+
+static inline int sysparm_st(target_ulong addr, target_ulong len,
+                             const void *val, uint16_t vallen)
+{
+    hwaddr phys = ppc64_phys_to_real(addr);
+
+    if (len < 2) {
+        return RTAS_OUT_SYSPARM_PARAM_ERROR;
+    }
+    stw_be_phys(&address_space_memory, phys, vallen);
+    cpu_physical_memory_write(phys + 2, val, MIN(len - 2, vallen));
+    return RTAS_OUT_SUCCESS;
 }
 
 static void rtas_ibm_get_system_parameter(PowerPCCPU *cpu,
-                                          sPAPREnvironment *spapr,
+                                          sPAPRMachineState *spapr,
                                           uint32_t token, uint32_t nargs,
                                           target_ulong args,
                                           uint32_t nret, target_ulong rets)
@@ -231,24 +232,31 @@ static void rtas_ibm_get_system_parameter(PowerPCCPU *cpu,
     target_ulong parameter = rtas_ld(args, 0);
     target_ulong buffer = rtas_ld(args, 1);
     target_ulong length = rtas_ld(args, 2);
-    target_ulong ret = RTAS_OUT_SUCCESS;
+    target_ulong ret;
 
     switch (parameter) {
     case RTAS_SYSPARM_SPLPAR_CHARACTERISTICS: {
-        char *param_val = g_strdup_printf("MaxEntCap=%d,MaxPlatProcs=%d",
-                                          max_cpus, smp_cpus);
-        rtas_st_buffer(buffer, length, (uint8_t *)param_val, strlen(param_val));
+        char *param_val = g_strdup_printf("MaxEntCap=%d,"
+                                          "DesMem=%" PRIu64 ","
+                                          "DesProcs=%d,"
+                                          "MaxPlatProcs=%d",
+                                          max_cpus,
+                                          current_machine->ram_size / MiB,
+                                          smp_cpus,
+                                          max_cpus);
+        ret = sysparm_st(buffer, length, param_val, strlen(param_val) + 1);
         g_free(param_val);
         break;
     }
     case RTAS_SYSPARM_DIAGNOSTICS_RUN_MODE: {
         uint8_t param_val = DIAGNOSTICS_RUN_MODE_DISABLED;
 
-        rtas_st_buffer(buffer, length, &param_val, sizeof(param_val));
+        ret = sysparm_st(buffer, length, &param_val, sizeof(param_val));
         break;
     }
     case RTAS_SYSPARM_UUID:
-        rtas_st_buffer(buffer, length, qemu_uuid, (qemu_uuid_set ? 16 : 0));
+        ret = sysparm_st(buffer, length, (unsigned char *)&qemu_uuid,
+                         (qemu_uuid_set ? 16 : 0));
         break;
     default:
         ret = RTAS_OUT_NOT_SUPPORTED;
@@ -258,7 +266,7 @@ static void rtas_ibm_get_system_parameter(PowerPCCPU *cpu,
 }
 
 static void rtas_ibm_set_system_parameter(PowerPCCPU *cpu,
-                                          sPAPREnvironment *spapr,
+                                          sPAPRMachineState *spapr,
                                           uint32_t token, uint32_t nargs,
                                           target_ulong args,
                                           uint32_t nret, target_ulong rets)
@@ -278,16 +286,64 @@ static void rtas_ibm_set_system_parameter(PowerPCCPU *cpu,
 }
 
 static void rtas_ibm_os_term(PowerPCCPU *cpu,
-                            sPAPREnvironment *spapr,
+                            sPAPRMachineState *spapr,
                             uint32_t token, uint32_t nargs,
                             target_ulong args,
                             uint32_t nret, target_ulong rets)
 {
-    target_ulong ret = 0;
+    qemu_system_guest_panicked(NULL);
 
-    qapi_event_send_guest_panicked(GUEST_PANIC_ACTION_PAUSE, &error_abort);
+    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
+}
 
-    rtas_st(rets, 0, ret);
+static void rtas_set_power_level(PowerPCCPU *cpu, sPAPRMachineState *spapr,
+                                 uint32_t token, uint32_t nargs,
+                                 target_ulong args, uint32_t nret,
+                                 target_ulong rets)
+{
+    int32_t power_domain;
+
+    if (nargs != 2 || nret != 2) {
+        rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
+        return;
+    }
+
+    /* we currently only use a single, "live insert" powerdomain for
+     * hotplugged/dlpar'd resources, so the power is always live/full (100)
+     */
+    power_domain = rtas_ld(args, 0);
+    if (power_domain != -1) {
+        rtas_st(rets, 0, RTAS_OUT_NOT_SUPPORTED);
+        return;
+    }
+
+    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
+    rtas_st(rets, 1, 100);
+}
+
+static void rtas_get_power_level(PowerPCCPU *cpu, sPAPRMachineState *spapr,
+                                  uint32_t token, uint32_t nargs,
+                                  target_ulong args, uint32_t nret,
+                                  target_ulong rets)
+{
+    int32_t power_domain;
+
+    if (nargs != 1 || nret != 2) {
+        rtas_st(rets, 0, RTAS_OUT_PARAM_ERROR);
+        return;
+    }
+
+    /* we currently only use a single, "live insert" powerdomain for
+     * hotplugged/dlpar'd resources, so the power is always live/full (100)
+     */
+    power_domain = rtas_ld(args, 0);
+    if (power_domain != -1) {
+        rtas_st(rets, 0, RTAS_OUT_NOT_SUPPORTED);
+        return;
+    }
+
+    rtas_st(rets, 0, RTAS_OUT_SUCCESS);
+    rtas_st(rets, 1, 100);
 }
 
 static struct rtas_call {
@@ -295,7 +351,7 @@ static struct rtas_call {
     spapr_rtas_fn fn;
 } rtas_table[RTAS_TOKEN_MAX - RTAS_TOKEN_BASE];
 
-target_ulong spapr_rtas_call(PowerPCCPU *cpu, sPAPREnvironment *spapr,
+target_ulong spapr_rtas_call(PowerPCCPU *cpu, sPAPRMachineState *spapr,
                              uint32_t token, uint32_t nargs, target_ulong args,
                              uint32_t nret, target_ulong rets)
 {
@@ -322,60 +378,39 @@ target_ulong spapr_rtas_call(PowerPCCPU *cpu, sPAPREnvironment *spapr,
     return H_PARAMETER;
 }
 
+uint64_t qtest_rtas_call(char *cmd, uint32_t nargs, uint64_t args,
+                         uint32_t nret, uint64_t rets)
+{
+    int token;
+
+    for (token = 0; token < RTAS_TOKEN_MAX - RTAS_TOKEN_BASE; token++) {
+        if (strcmp(cmd, rtas_table[token].name) == 0) {
+            sPAPRMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
+            PowerPCCPU *cpu = POWERPC_CPU(first_cpu);
+
+            rtas_table[token].fn(cpu, spapr, token + RTAS_TOKEN_BASE,
+                                 nargs, args, nret, rets);
+            return H_SUCCESS;
+        }
+    }
+    return H_PARAMETER;
+}
+
 void spapr_rtas_register(int token, const char *name, spapr_rtas_fn fn)
 {
-    if (!((token >= RTAS_TOKEN_BASE) && (token < RTAS_TOKEN_MAX))) {
-        fprintf(stderr, "RTAS invalid token 0x%x\n", token);
-        exit(1);
-    }
+    assert((token >= RTAS_TOKEN_BASE) && (token < RTAS_TOKEN_MAX));
 
     token -= RTAS_TOKEN_BASE;
-    if (rtas_table[token].name) {
-        fprintf(stderr, "RTAS call \"%s\" is registered already as 0x%x\n",
-                rtas_table[token].name, token);
-        exit(1);
-    }
+
+    assert(!rtas_table[token].name);
 
     rtas_table[token].name = name;
     rtas_table[token].fn = fn;
 }
 
-int spapr_rtas_device_tree_setup(void *fdt, hwaddr rtas_addr,
-                                 hwaddr rtas_size)
+void spapr_dt_rtas_tokens(void *fdt, int rtas)
 {
-    int ret;
     int i;
-
-    ret = fdt_add_mem_rsv(fdt, rtas_addr, rtas_size);
-    if (ret < 0) {
-        fprintf(stderr, "Couldn't add RTAS reserve entry: %s\n",
-                fdt_strerror(ret));
-        return ret;
-    }
-
-    ret = qemu_fdt_setprop_cell(fdt, "/rtas", "linux,rtas-base",
-                                rtas_addr);
-    if (ret < 0) {
-        fprintf(stderr, "Couldn't add linux,rtas-base property: %s\n",
-                fdt_strerror(ret));
-        return ret;
-    }
-
-    ret = qemu_fdt_setprop_cell(fdt, "/rtas", "linux,rtas-entry",
-                                rtas_addr);
-    if (ret < 0) {
-        fprintf(stderr, "Couldn't add linux,rtas-entry property: %s\n",
-                fdt_strerror(ret));
-        return ret;
-    }
-
-    ret = qemu_fdt_setprop_cell(fdt, "/rtas", "rtas-size",
-                                rtas_size);
-    if (ret < 0) {
-        fprintf(stderr, "Couldn't add rtas-size property: %s\n",
-                fdt_strerror(ret));
-        return ret;
-    }
 
     for (i = 0; i < RTAS_TOKEN_MAX - RTAS_TOKEN_BASE; i++) {
         struct rtas_call *call = &rtas_table[i];
@@ -384,26 +419,55 @@ int spapr_rtas_device_tree_setup(void *fdt, hwaddr rtas_addr,
             continue;
         }
 
-        ret = qemu_fdt_setprop_cell(fdt, "/rtas", call->name,
-                                    i + RTAS_TOKEN_BASE);
-        if (ret < 0) {
-            fprintf(stderr, "Couldn't add rtas token for %s: %s\n",
-                    call->name, fdt_strerror(ret));
-            return ret;
-        }
-
+        _FDT(fdt_setprop_cell(fdt, rtas, call->name, i + RTAS_TOKEN_BASE));
     }
-    return 0;
+}
+
+void spapr_load_rtas(sPAPRMachineState *spapr, void *fdt, hwaddr addr)
+{
+    int rtas_node;
+    int ret;
+
+    /* Copy RTAS blob into guest RAM */
+    cpu_physical_memory_write(addr, spapr->rtas_blob, spapr->rtas_size);
+
+    ret = fdt_add_mem_rsv(fdt, addr, spapr->rtas_size);
+    if (ret < 0) {
+        error_report("Couldn't add RTAS reserve entry: %s",
+                     fdt_strerror(ret));
+        exit(1);
+    }
+
+    /* Update the device tree with the blob's location */
+    rtas_node = fdt_path_offset(fdt, "/rtas");
+    assert(rtas_node >= 0);
+
+    ret = fdt_setprop_cell(fdt, rtas_node, "linux,rtas-base", addr);
+    if (ret < 0) {
+        error_report("Couldn't add linux,rtas-base property: %s",
+                     fdt_strerror(ret));
+        exit(1);
+    }
+
+    ret = fdt_setprop_cell(fdt, rtas_node, "linux,rtas-entry", addr);
+    if (ret < 0) {
+        error_report("Couldn't add linux,rtas-entry property: %s",
+                     fdt_strerror(ret));
+        exit(1);
+    }
+
+    ret = fdt_setprop_cell(fdt, rtas_node, "rtas-size", spapr->rtas_size);
+    if (ret < 0) {
+        error_report("Couldn't add rtas-size property: %s",
+                     fdt_strerror(ret));
+        exit(1);
+    }
 }
 
 static void core_rtas_register_types(void)
 {
     spapr_rtas_register(RTAS_DISPLAY_CHARACTER, "display-character",
                         rtas_display_character);
-    spapr_rtas_register(RTAS_GET_TIME_OF_DAY, "get-time-of-day",
-                        rtas_get_time_of_day);
-    spapr_rtas_register(RTAS_SET_TIME_OF_DAY, "set-time-of-day",
-                        rtas_set_time_of_day);
     spapr_rtas_register(RTAS_POWER_OFF, "power-off", rtas_power_off);
     spapr_rtas_register(RTAS_SYSTEM_REBOOT, "system-reboot",
                         rtas_system_reboot);
@@ -419,6 +483,10 @@ static void core_rtas_register_types(void)
                         rtas_ibm_set_system_parameter);
     spapr_rtas_register(RTAS_IBM_OS_TERM, "ibm,os-term",
                         rtas_ibm_os_term);
+    spapr_rtas_register(RTAS_SET_POWER_LEVEL, "set-power-level",
+                        rtas_set_power_level);
+    spapr_rtas_register(RTAS_GET_POWER_LEVEL, "get-power-level",
+                        rtas_get_power_level);
 }
 
 type_init(core_rtas_register_types)

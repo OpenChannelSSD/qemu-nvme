@@ -18,9 +18,11 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/i2c/i2c.h"
 #include "tmp105.h"
+#include "qapi/error.h"
 #include "qapi/visitor.h"
 
 static void tmp105_interrupt_update(TMP105State *s)
@@ -52,26 +54,26 @@ static void tmp105_alarm_update(TMP105State *s)
     tmp105_interrupt_update(s);
 }
 
-static void tmp105_get_temperature(Object *obj, Visitor *v, void *opaque,
-                                   const char *name, Error **errp)
+static void tmp105_get_temperature(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
 {
     TMP105State *s = TMP105(obj);
     int64_t value = s->temperature * 1000 / 256;
 
-    visit_type_int(v, &value, name, errp);
+    visit_type_int(v, name, &value, errp);
 }
 
 /* Units are 0.001 centigrades relative to 0 C.  s->temperature is 8.8
  * fixed point, so units are 1/256 centigrades.  A simple ratio will do.
  */
-static void tmp105_set_temperature(Object *obj, Visitor *v, void *opaque,
-                                   const char *name, Error **errp)
+static void tmp105_set_temperature(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
 {
     TMP105State *s = TMP105(obj);
     Error *local_err = NULL;
     int64_t temp;
 
-    visit_type_int(v, &temp, name, &local_err);
+    visit_type_int(v, name, &temp, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
         return;
@@ -129,7 +131,7 @@ static void tmp105_write(TMP105State *s)
 
     case TMP105_REG_CONFIG:
         if (s->buf[0] & ~s->config & (1 << 0))			/* SD */
-            printf("%s: TMP105 shutdown\n", __FUNCTION__);
+            printf("%s: TMP105 shutdown\n", __func__);
         s->config = s->buf[0];
         s->faults = tmp105_faultq[(s->config >> 3) & 3];	/* F */
         tmp105_alarm_update(s);
@@ -174,7 +176,7 @@ static int tmp105_tx(I2CSlave *i2c, uint8_t data)
     return 0;
 }
 
-static void tmp105_event(I2CSlave *i2c, enum i2c_event event)
+static int tmp105_event(I2CSlave *i2c, enum i2c_event event)
 {
     TMP105State *s = TMP105(i2c);
 
@@ -183,6 +185,7 @@ static void tmp105_event(I2CSlave *i2c, enum i2c_event event)
     }
 
     s->len = 0;
+    return 0;
 }
 
 static int tmp105_post_load(void *opaque, int version_id)
@@ -226,15 +229,14 @@ static void tmp105_reset(I2CSlave *i2c)
     tmp105_interrupt_update(s);
 }
 
-static int tmp105_init(I2CSlave *i2c)
+static void tmp105_realize(DeviceState *dev, Error **errp)
 {
+    I2CSlave *i2c = I2C_SLAVE(dev);
     TMP105State *s = TMP105(i2c);
 
     qdev_init_gpio_out(&i2c->qdev, &s->pin, 1);
 
     tmp105_reset(&s->i2c);
-
-    return 0;
 }
 
 static void tmp105_initfn(Object *obj)
@@ -249,7 +251,7 @@ static void tmp105_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     I2CSlaveClass *k = I2C_SLAVE_CLASS(klass);
 
-    k->init = tmp105_init;
+    dc->realize = tmp105_realize;
     k->event = tmp105_event;
     k->recv = tmp105_rx;
     k->send = tmp105_tx;

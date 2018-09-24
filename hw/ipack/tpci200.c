@@ -2,16 +2,17 @@
  * QEMU TEWS TPCI200 IndustryPack carrier emulation
  *
  * Copyright (C) 2012 Igalia, S.L.
- * Author: Alberto Garcia <agarcia@igalia.com>
+ * Author: Alberto Garcia <berto@igalia.com>
  *
  * This code is licensed under the GNU GPL v2 or (at your option) any
  * later version.
  */
 
+#include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "hw/ipack/ipack.h"
 #include "hw/pci/pci.h"
 #include "qemu/bitops.h"
-#include <stdio.h>
 
 /* #define DEBUG_TPCI */
 
@@ -573,7 +574,7 @@ static const MemoryRegionOps tpci200_las3_ops = {
     }
 };
 
-static int tpci200_initfn(PCIDevice *pci_dev)
+static void tpci200_realize(PCIDevice *pci_dev, Error **errp)
 {
     TPCI200State *s = TPCI200(pci_dev);
     uint8_t *c = s->dev.config;
@@ -597,9 +598,9 @@ static int tpci200_initfn(PCIDevice *pci_dev)
     memory_region_init_io(&s->las1, OBJECT(s), &tpci200_las1_ops,
                           s, "tpci200_las1", 1024);
     memory_region_init_io(&s->las2, OBJECT(s), &tpci200_las2_ops,
-                          s, "tpci200_las2", 1024*1024*32);
+                          s, "tpci200_las2", 32 * MiB);
     memory_region_init_io(&s->las3, OBJECT(s), &tpci200_las3_ops,
-                          s, "tpci200_las3", 1024*1024*16);
+                          s, "tpci200_las3", 16 * MiB);
     pci_register_bar(&s->dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->mmio);
     pci_register_bar(&s->dev, 1, PCI_BASE_ADDRESS_SPACE_IO,     &s->io);
     pci_register_bar(&s->dev, 2, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->las0);
@@ -609,8 +610,6 @@ static int tpci200_initfn(PCIDevice *pci_dev)
 
     ipack_bus_new_inplace(&s->bus, sizeof(s->bus), DEVICE(pci_dev), NULL,
                           N_MODULES, tpci200_set_irq);
-
-    return 0;
 }
 
 static const VMStateDescription vmstate_tpci200 = {
@@ -632,7 +631,7 @@ static void tpci200_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->init = tpci200_initfn;
+    k->realize = tpci200_realize;
     k->vendor_id = PCI_VENDOR_ID_TEWS;
     k->device_id = PCI_DEVICE_ID_TEWS_TPCI200;
     k->class_id = PCI_CLASS_BRIDGE_OTHER;
@@ -648,6 +647,10 @@ static const TypeInfo tpci200_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(TPCI200State),
     .class_init    = tpci200_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void tpci200_register_types(void)

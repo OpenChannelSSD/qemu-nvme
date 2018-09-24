@@ -29,9 +29,11 @@
  *                    VA Linux Systems Japan K.K.
  */
 
+#include "qemu/osdep.h"
 #include "hw/pci/pci_bridge.h"
 #include "hw/pci/pci_bus.h"
 #include "qemu/range.h"
+#include "qapi/error.h"
 
 /* PCI bridge subsystem vendor ID helper functions */
 #define PCI_SSVID_SIZEOF        8
@@ -39,10 +41,13 @@
 #define PCI_SSVID_SSID          6
 
 int pci_bridge_ssvid_init(PCIDevice *dev, uint8_t offset,
-                          uint16_t svid, uint16_t ssid)
+                          uint16_t svid, uint16_t ssid,
+                          Error **errp)
 {
     int pos;
-    pos = pci_add_capability(dev, PCI_CAP_ID_SSVID, offset, PCI_SSVID_SIZEOF);
+
+    pos = pci_add_capability(dev, PCI_CAP_ID_SSVID, offset,
+                             PCI_SSVID_SIZEOF, errp);
     if (pos < 0) {
         return pos;
     }
@@ -115,7 +120,7 @@ pcibus_t pci_bridge_get_base(const PCIDevice *bridge, uint8_t type)
     return base;
 }
 
-/* accessor funciton to get bridge filtering limit */
+/* accessor function to get bridge filtering limit */
 pcibus_t pci_bridge_get_limit(const PCIDevice *bridge, uint8_t type)
 {
     pcibus_t limit;
@@ -178,7 +183,7 @@ static void pci_bridge_init_vga_aliases(PCIBridge *br, PCIBus *parent,
 static PCIBridgeWindows *pci_bridge_region_init(PCIBridge *br)
 {
     PCIDevice *pd = PCI_DEVICE(br);
-    PCIBus *parent = pd->bus;
+    PCIBus *parent = pci_get_bus(pd);
     PCIBridgeWindows *w = g_new(PCIBridgeWindows, 1);
     uint16_t cmd = pci_get_word(pd->config + PCI_COMMAND);
 
@@ -209,7 +214,7 @@ static PCIBridgeWindows *pci_bridge_region_init(PCIBridge *br)
 static void pci_bridge_region_del(PCIBridge *br, PCIBridgeWindows *w)
 {
     PCIDevice *pd = PCI_DEVICE(br);
-    PCIBus *parent = pd->bus;
+    PCIBus *parent = pci_get_bus(pd);
 
     memory_region_del_subregion(parent->address_space_io, &w->alias_io);
     memory_region_del_subregion(parent->address_space_mem, &w->alias_mem);
@@ -332,9 +337,9 @@ void pci_bridge_reset(DeviceState *qdev)
 }
 
 /* default qdev initialization function for PCI-to-PCI bridge */
-int pci_bridge_initfn(PCIDevice *dev, const char *typename)
+void pci_bridge_initfn(PCIDevice *dev, const char *typename)
 {
-    PCIBus *parent = dev->bus;
+    PCIBus *parent = pci_get_bus(dev);
     PCIBridge *br = PCI_BRIDGE(dev);
     PCIBus *sec_bus = &br->sec_bus;
 
@@ -374,11 +379,11 @@ int pci_bridge_initfn(PCIDevice *dev, const char *typename)
     sec_bus->address_space_mem = &br->address_space_mem;
     memory_region_init(&br->address_space_mem, OBJECT(br), "pci_bridge_pci", UINT64_MAX);
     sec_bus->address_space_io = &br->address_space_io;
-    memory_region_init(&br->address_space_io, OBJECT(br), "pci_bridge_io", 65536);
+    memory_region_init(&br->address_space_io, OBJECT(br), "pci_bridge_io",
+                       UINT32_MAX);
     br->windows = pci_bridge_region_init(br);
     QLIST_INIT(&sec_bus->child);
     QLIST_INSERT_HEAD(&parent->child, sec_bus, sibling);
-    return 0;
 }
 
 /* default qdev clean up function for PCI-to-PCI bridge */
@@ -402,6 +407,66 @@ void pci_bridge_map_irq(PCIBridge *br, const char* bus_name,
 {
     br->map_irq = map_irq;
     br->bus_name = bus_name;
+}
+
+
+int pci_bridge_qemu_reserve_cap_init(PCIDevice *dev, int cap_offset,
+                                     uint32_t bus_reserve, uint64_t io_reserve,
+                                     uint64_t mem_non_pref_reserve,
+                                     uint64_t mem_pref_32_reserve,
+                                     uint64_t mem_pref_64_reserve,
+                                     Error **errp)
+{
+    if (mem_pref_32_reserve != (uint64_t)-1 &&
+        mem_pref_64_reserve != (uint64_t)-1) {
+        error_setg(errp,
+                   "PCI resource reserve cap: PREF32 and PREF64 conflict");
+        return -EINVAL;
+    }
+
+    if (mem_non_pref_reserve != (uint64_t)-1 &&
+        mem_non_pref_reserve >= (1ULL << 32)) {
+        error_setg(errp,
+                   "PCI resource reserve cap: mem-reserve must be less than 4G");
+        return -EINVAL;
+    }
+
+    if (mem_pref_32_reserve != (uint64_t)-1 &&
+        mem_pref_32_reserve >= (1ULL << 32)) {
+        error_setg(errp,
+                   "PCI resource reserve cap: pref32-reserve  must be less than 4G");
+        return -EINVAL;
+    }
+
+    if (bus_reserve == (uint32_t)-1 &&
+        io_reserve == (uint64_t)-1 &&
+        mem_non_pref_reserve == (uint64_t)-1 &&
+        mem_pref_32_reserve == (uint64_t)-1 &&
+        mem_pref_64_reserve == (uint64_t)-1) {
+        return 0;
+    }
+
+    size_t cap_len = sizeof(PCIBridgeQemuCap);
+    PCIBridgeQemuCap cap = {
+            .len = cap_len,
+            .type = REDHAT_PCI_CAP_RESOURCE_RESERVE,
+            .bus_res = bus_reserve,
+            .io = io_reserve,
+            .mem = mem_non_pref_reserve,
+            .mem_pref_32 = mem_pref_32_reserve,
+            .mem_pref_64 = mem_pref_64_reserve
+    };
+
+    int offset = pci_add_capability(dev, PCI_CAP_ID_VNDR,
+                                    cap_offset, cap_len, errp);
+    if (offset < 0) {
+        return offset;
+    }
+
+    memcpy(dev->config + offset + PCI_CAP_FLAGS,
+           (char *)&cap + PCI_CAP_FLAGS,
+           cap_len - PCI_CAP_FLAGS);
+    return 0;
 }
 
 static const TypeInfo pci_bridge_type_info = {

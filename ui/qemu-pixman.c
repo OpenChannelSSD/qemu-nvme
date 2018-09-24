@@ -3,8 +3,10 @@
  * See the COPYING file in the top-level directory.
  */
 
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "ui/console.h"
+#include "standard-headers/drm/drm_fourcc.h"
 
 PixelFormat qemu_pixelformat_from_pixman(pixman_format_code_t format)
 {
@@ -84,7 +86,28 @@ pixman_format_code_t qemu_default_pixman_format(int bpp, bool native_endian)
         break;
         }
     }
-    g_assert_not_reached();
+    return 0;
+}
+
+/* Note: drm is little endian, pixman is native endian */
+pixman_format_code_t qemu_drm_format_to_pixman(uint32_t drm_format)
+{
+    static const struct {
+        uint32_t drm_format;
+        pixman_format_code_t pixman;
+    } map[] = {
+        { DRM_FORMAT_RGB888,   PIXMAN_LE_r8g8b8   },
+        { DRM_FORMAT_ARGB8888, PIXMAN_LE_a8r8g8b8 },
+        { DRM_FORMAT_XRGB8888, PIXMAN_LE_x8r8g8b8 }
+    };
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(map); i++) {
+        if (drm_format == map[i].drm_format) {
+            return map[i].pixman;
+        }
+    }
+    return 0;
 }
 
 int qemu_pixman_get_type(int rshift, int gshift, int bshift)
@@ -95,17 +118,13 @@ int qemu_pixman_get_type(int rshift, int gshift, int bshift)
         if (bshift == 0) {
             type = PIXMAN_TYPE_ARGB;
         } else {
-#if PIXMAN_VERSION >= PIXMAN_VERSION_ENCODE(0, 21, 8)
             type = PIXMAN_TYPE_RGBA;
-#endif
         }
     } else if (rshift < gshift && gshift < bshift) {
         if (rshift == 0) {
             type = PIXMAN_TYPE_ABGR;
         } else {
-#if PIXMAN_VERSION >= PIXMAN_VERSION_ENCODE(0, 16, 0)
             type = PIXMAN_TYPE_BGRA;
-#endif
         }
     }
     return type;
@@ -123,6 +142,33 @@ pixman_format_code_t qemu_pixman_get_format(PixelFormat *pf)
         return 0;
     }
     return format;
+}
+
+/*
+ * Return true for known-good pixman conversions.
+ *
+ * UIs using pixman for format conversion can hook this into
+ * DisplayChangeListenerOps->dpy_gfx_check_format
+ */
+bool qemu_pixman_check_format(DisplayChangeListener *dcl,
+                              pixman_format_code_t format)
+{
+    switch (format) {
+    /* 32 bpp */
+    case PIXMAN_x8r8g8b8:
+    case PIXMAN_a8r8g8b8:
+    case PIXMAN_b8g8r8x8:
+    case PIXMAN_b8g8r8a8:
+    /* 24 bpp */
+    case PIXMAN_r8g8b8:
+    case PIXMAN_b8g8r8:
+    /* 16 bpp */
+    case PIXMAN_x1r5g5b5:
+    case PIXMAN_r5g6b5:
+        return true;
+    default:
+        return false;
+    }
 }
 
 pixman_image_t *qemu_pixman_linebuf_create(pixman_format_code_t format,
@@ -152,14 +198,11 @@ void qemu_pixman_linebuf_copy(pixman_image_t *fb, int width, int x, int y,
 pixman_image_t *qemu_pixman_mirror_create(pixman_format_code_t format,
                                           pixman_image_t *image)
 {
-    pixman_image_t *mirror;
-
-    mirror = pixman_image_create_bits(format,
-                                      pixman_image_get_width(image),
-                                      pixman_image_get_height(image),
-                                      NULL,
-                                      pixman_image_get_stride(image));
-    return mirror;
+    return pixman_image_create_bits(format,
+                                    pixman_image_get_width(image),
+                                    pixman_image_get_height(image),
+                                    NULL,
+                                    pixman_image_get_stride(image));
 }
 
 void qemu_pixman_image_unref(pixman_image_t *image)

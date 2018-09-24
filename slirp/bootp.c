@@ -21,7 +21,14 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#include <slirp.h>
+#include "qemu/osdep.h"
+#include "slirp.h"
+
+#if defined(_WIN32)
+/* Windows ntohl() returns an u_long value.
+ * Add a type cast to match the format strings. */
+# define ntohl(n) ((uint32_t)ntohl(n))
+#endif
 
 /* XXX: only DHCP is supported */
 
@@ -116,6 +123,9 @@ static void dhcp_decode(const struct bootp_t *bp, int *pmsg_type,
             if (p >= p_end)
                 break;
             len = *p++;
+            if (p + len > p_end) {
+                break;
+            }
             DPRINTF("dhcp: tag=%d len=%d\n", tag, len);
 
             switch(tag) {
@@ -155,7 +165,7 @@ static void bootp_reply(Slirp *slirp, const struct bootp_t *bp)
     dhcp_decode(bp, &dhcp_msg_type, &preq_addr);
     DPRINTF("bootp packet op=%d msgtype=%d", bp->bp_op, dhcp_msg_type);
     if (preq_addr.s_addr != htonl(0L))
-        DPRINTF(" req_addr=%08x\n", ntohl(preq_addr.s_addr));
+        DPRINTF(" req_addr=%08" PRIx32 "\n", ntohl(preq_addr.s_addr));
     else
         DPRINTF("\n");
 
@@ -234,7 +244,7 @@ static void bootp_reply(Slirp *slirp, const struct bootp_t *bp)
     q += 4;
 
     if (bc) {
-        DPRINTF("%s addr=%08x\n",
+        DPRINTF("%s addr=%08" PRIx32 "\n",
                 (dhcp_msg_type == DHCPDISCOVER) ? "offered" : "ack'ed",
                 ntohl(daddr.sin_addr.s_addr));
 
@@ -288,6 +298,14 @@ static void bootp_reply(Slirp *slirp, const struct bootp_t *bp)
             q += val;
         }
 
+        if (slirp->vdomainname) {
+            val = strlen(slirp->vdomainname);
+            *q++ = RFC1533_DOMAINNAME;
+            *q++ = val;
+            memcpy(q, slirp->vdomainname, val);
+            q += val;
+        }
+
         if (slirp->vdnssearch) {
             size_t spaceleft = sizeof(rbp->bp_vend) - (q - rbp->bp_vend);
             val = slirp->vdnssearch_len;
@@ -302,7 +320,7 @@ static void bootp_reply(Slirp *slirp, const struct bootp_t *bp)
     } else {
         static const char nak_msg[] = "requested address not available";
 
-        DPRINTF("nak'ed addr=%08x\n", ntohl(preq_addr.s_addr));
+        DPRINTF("nak'ed addr=%08" PRIx32 "\n", ntohl(preq_addr.s_addr));
 
         *q++ = RFC2132_MSG_TYPE;
         *q++ = 1;
@@ -319,7 +337,7 @@ static void bootp_reply(Slirp *slirp, const struct bootp_t *bp)
 
     m->m_len = sizeof(struct bootp_t) -
         sizeof(struct ip) - sizeof(struct udphdr);
-    udp_output2(NULL, m, &saddr, &daddr, IPTOS_LOWDELAY);
+    udp_output(NULL, m, &saddr, &daddr, IPTOS_LOWDELAY);
 }
 
 void bootp_input(struct mbuf *m)

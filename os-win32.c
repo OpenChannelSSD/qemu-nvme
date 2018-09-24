@@ -22,15 +22,9 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
 #include <windows.h>
 #include <mmsystem.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <time.h>
-#include <errno.h>
-#include <sys/time.h>
-#include "config-host.h"
 #include "sysemu/sysemu.h"
 #include "qemu-options.h"
 
@@ -58,7 +52,7 @@ int setenv(const char *name, const char *value, int overwrite)
 
 static BOOL WINAPI qemu_ctrl_handler(DWORD type)
 {
-    qemu_system_shutdown_request();
+    qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_SIGNAL);
     /* Windows 7 kills application when the function returns.
        Sleep here to give QEMU a try for closing.
        Sleep period is 10000ms because Windows kills the program
@@ -99,14 +93,9 @@ void os_set_line_buffering(void)
  * Parse OS specific command line options.
  * return 0 if option handled, -1 otherwise
  */
-void os_parse_cmd_args(int index, const char *optarg)
+int os_parse_cmd_args(int index, const char *optarg)
 {
-    return;
-}
-
-void os_pidfile_error(void)
-{
-    fprintf(stderr, "Could not acquire pid file: %s\n", strerror(errno));
+    return -1;
 }
 
 int qemu_create_pidfile(const char *filename)

@@ -120,7 +120,9 @@
 #define TARGET_NR_sysinfo                116
 #define TARGET_NR_ipc                    117
 #define TARGET_NR_fsync                  118
+#if !defined(TARGET_PPC64)
 #define TARGET_NR_sigreturn              119
+#endif
 #define TARGET_NR_clone                  120
 #define TARGET_NR_setdomainname          121
 #define TARGET_NR_uname                  122
@@ -319,7 +321,7 @@
 #define TARGET_NR_epoll_pwait	303
 #define TARGET_NR_utimensat		304
 #define TARGET_NR_signalfd		305
-#define TARGET_NR_timerfd		306
+#define TARGET_NR_timerfd_create	306
 #define TARGET_NR_eventfd		307
 #define TARGET_NR_sync_file_range2	308
 #define TARGET_NR_fallocate		309
@@ -368,3 +370,27 @@
 #define TARGET_NR_process_vm_writev     352
 #define TARGET_NR_finit_module          353
 #define TARGET_NR_kcmp                  354
+#define TARGET_NR_sched_setattr         355
+#define TARGET_NR_sched_getattr         356
+#define TARGET_NR_renameat2             357
+#define TARGET_NR_seccomp               358
+#define TARGET_NR_getrandom             359
+#define TARGET_NR_memfd_create          360
+#define TARGET_NR_bpf                   361
+#define TARGET_NR_execveat              362
+#define TARGET_NR_switch_endian         363
+#define TARGET_NR_userfaultfd           364
+#define TARGET_NR_membarrier            365
+#define TARGET_NR_semop                 366
+#define TARGET_NR_semget                367
+#define TARGET_NR_semctl                368
+#define TARGET_NR_semtimedop            369
+#define TARGET_NR_msgsnd                370
+#define TARGET_NR_msgrcv                371
+#define TARGET_NR_msgget                372
+#define TARGET_NR_msgctl                373
+#define TARGET_NR_shmat                 374
+#define TARGET_NR_shmdt                 375
+#define TARGET_NR_shmget                376
+#define TARGET_NR_shmctl                377
+#define TARGET_NR_mlock2                378

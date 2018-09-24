@@ -53,9 +53,28 @@ struct PCIESlot {
 };
 
 void pcie_chassis_create(uint8_t chassis_number);
-void pcie_main_chassis_create(void);
 PCIESlot *pcie_chassis_find_slot(uint8_t chassis, uint16_t slot);
 int pcie_chassis_add_slot(struct PCIESlot *slot);
 void pcie_chassis_del_slot(PCIESlot *s);
+
+#define TYPE_PCIE_ROOT_PORT         "pcie-root-port-base"
+#define PCIE_ROOT_PORT_CLASS(klass) \
+     OBJECT_CLASS_CHECK(PCIERootPortClass, (klass), TYPE_PCIE_ROOT_PORT)
+#define PCIE_ROOT_PORT_GET_CLASS(obj) \
+     OBJECT_GET_CLASS(PCIERootPortClass, (obj), TYPE_PCIE_ROOT_PORT)
+
+typedef struct PCIERootPortClass {
+    PCIDeviceClass parent_class;
+    DeviceRealize parent_realize;
+
+    uint8_t (*aer_vector)(const PCIDevice *dev);
+    int (*interrupts_init)(PCIDevice *dev, Error **errp);
+    void (*interrupts_uninit)(PCIDevice *dev);
+
+    int exp_offset;
+    int aer_offset;
+    int ssvid_offset;
+    int ssid;
+} PCIERootPortClass;
 
 #endif /* QEMU_PCIE_PORT_H */

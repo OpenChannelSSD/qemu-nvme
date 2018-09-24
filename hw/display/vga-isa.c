@@ -23,9 +23,9 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
 #include "hw/hw.h"
-#include "ui/console.h"
-#include "hw/i386/pc.h"
+#include "hw/isa/isa.h"
 #include "vga_int.h"
 #include "ui/pixel_ops.h"
 #include "qemu/timer.h"
@@ -38,6 +38,8 @@ typedef struct ISAVGAState {
     ISADevice parent_obj;
 
     struct VGACommonState state;
+    PortioList portio_vga;
+    PortioList portio_vbe;
 } ISAVGAState;
 
 static void vga_isa_reset(DeviceState *dev)
@@ -56,15 +58,18 @@ static void vga_isa_realizefn(DeviceState *dev, Error **errp)
     MemoryRegion *vga_io_memory;
     const MemoryRegionPortio *vga_ports, *vbe_ports;
 
-    vga_common_init(s, OBJECT(dev), true);
+    s->global_vmstate = true;
+    vga_common_init(s, OBJECT(dev));
     s->legacy_address_space = isa_address_space(isadev);
     vga_io_memory = vga_init_io(s, OBJECT(dev), &vga_ports, &vbe_ports);
-    isa_register_portio_list(isadev, 0x3b0, vga_ports, s, "vga");
+    isa_register_portio_list(isadev, &d->portio_vga,
+                             0x3b0, vga_ports, s, "vga");
     if (vbe_ports) {
-        isa_register_portio_list(isadev, 0x1ce, vbe_ports, s, "vbe");
+        isa_register_portio_list(isadev, &d->portio_vbe,
+                                 0x1ce, vbe_ports, s, "vbe");
     }
     memory_region_add_subregion_overlap(isa_address_space(isadev),
-                                        isa_mem_base + 0x000a0000,
+                                        0x000a0000,
                                         vga_io_memory, 1);
     memory_region_set_coalescing(vga_io_memory);
     s->con = graphic_console_init(DEVICE(dev), 0, s->hw_ops, s);

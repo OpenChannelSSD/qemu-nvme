@@ -11,6 +11,7 @@
  * GNU GPL, version 2 or (at your option) any later version.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/arm/pxa.h"
 #include "ui/console.h"
@@ -230,7 +231,7 @@ static uint64_t pxa2xx_keypad_read(void *opaque, hwaddr offset,
         return s->kpkdi;
         break;
     default:
-        hw_error("%s: Bad offset " REG_FMT "\n", __FUNCTION__, offset);
+        hw_error("%s: Bad offset " REG_FMT "\n", __func__, offset);
     }
 
     return 0;
@@ -277,7 +278,7 @@ static void pxa2xx_keypad_write(void *opaque, hwaddr offset,
         break;
 
     default:
-        hw_error("%s: Bad offset " REG_FMT "\n", __FUNCTION__, offset);
+        hw_error("%s: Bad offset " REG_FMT "\n", __func__, offset);
     }
 }
 
@@ -325,7 +326,7 @@ void pxa27x_register_keypad(PXA2xxKeyPadState *kp,
                             const struct keymap *map, int size)
 {
     if(!map || size < 0x80) {
-        fprintf(stderr, "%s - No PXA keypad map defined\n", __FUNCTION__);
+        fprintf(stderr, "%s - No PXA keypad map defined\n", __func__);
         exit(-1);
     }
 

@@ -21,9 +21,13 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
+#include "qapi/error.h"
+#include "qemu/error-report.h"
 #include "qemu-common.h"
 #include "block/block_int.h"
 #include "qemu/module.h"
+#include "qemu/bswap.h"
 #include <zlib.h>
 
 /* Maximum compressed block size */
@@ -63,7 +67,22 @@ static int cloop_open(BlockDriverState *bs, QDict *options, int flags,
     uint32_t offsets_size, max_compressed_block_size = 1, i;
     int ret;
 
-    bs->read_only = 1;
+    bs->file = bdrv_open_child(NULL, options, "file", bs, &child_file,
+                               false, errp);
+    if (!bs->file) {
+        return -EINVAL;
+    }
+
+    if (!bdrv_is_read_only(bs)) {
+        error_report("Opening cloop images without an explicit read-only=on "
+                     "option is deprecated. Future versions will refuse to "
+                     "open the image instead of automatically marking the "
+                     "image read-only.");
+        ret = bdrv_set_read_only(bs, true, errp);
+        if (ret < 0) {
+            return ret;
+        }
+    }
 
     /* read header */
     ret = bdrv_pread(bs->file, 128, &s->block_size, 4);
@@ -195,6 +214,11 @@ fail:
     return ret;
 }
 
+static void cloop_refresh_limits(BlockDriverState *bs, Error **errp)
+{
+    bs->bl.request_alignment = BDRV_SECTOR_SIZE; /* No sub-sector I/O */
+}
+
 static inline int cloop_read_block(BlockDriverState *bs, int block_num)
 {
     BDRVCloopState *s = bs->opaque;
@@ -203,8 +227,8 @@ static inline int cloop_read_block(BlockDriverState *bs, int block_num)
         int ret;
         uint32_t bytes = s->offsets[block_num + 1] - s->offsets[block_num];
 
-        ret = bdrv_pread(bs->file, s->offsets[block_num], s->compressed_block,
-                         bytes);
+        ret = bdrv_pread(bs->file, s->offsets[block_num],
+                         s->compressed_block, bytes);
         if (ret != bytes) {
             return -1;
         }
@@ -227,33 +251,38 @@ static inline int cloop_read_block(BlockDriverState *bs, int block_num)
     return 0;
 }
 
-static int cloop_read(BlockDriverState *bs, int64_t sector_num,
-                    uint8_t *buf, int nb_sectors)
+static int coroutine_fn
+cloop_co_preadv(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
+                QEMUIOVector *qiov, int flags)
 {
     BDRVCloopState *s = bs->opaque;
-    int i;
+    uint64_t sector_num = offset >> BDRV_SECTOR_BITS;
+    int nb_sectors = bytes >> BDRV_SECTOR_BITS;
+    int ret, i;
+
+    assert((offset & (BDRV_SECTOR_SIZE - 1)) == 0);
+    assert((bytes & (BDRV_SECTOR_SIZE - 1)) == 0);
+
+    qemu_co_mutex_lock(&s->lock);
 
     for (i = 0; i < nb_sectors; i++) {
+        void *data;
         uint32_t sector_offset_in_block =
             ((sector_num + i) % s->sectors_per_block),
             block_num = (sector_num + i) / s->sectors_per_block;
         if (cloop_read_block(bs, block_num) != 0) {
-            return -1;
+            ret = -EIO;
+            goto fail;
         }
-        memcpy(buf + i * 512,
-            s->uncompressed_block + sector_offset_in_block * 512, 512);
-    }
-    return 0;
-}
 
-static coroutine_fn int cloop_co_read(BlockDriverState *bs, int64_t sector_num,
-                                      uint8_t *buf, int nb_sectors)
-{
-    int ret;
-    BDRVCloopState *s = bs->opaque;
-    qemu_co_mutex_lock(&s->lock);
-    ret = cloop_read(bs, sector_num, buf, nb_sectors);
+        data = s->uncompressed_block + sector_offset_in_block * 512;
+        qemu_iovec_from_buf(qiov, i * 512, data, 512);
+    }
+
+    ret = 0;
+fail:
     qemu_co_mutex_unlock(&s->lock);
+
     return ret;
 }
 
@@ -271,7 +300,9 @@ static BlockDriver bdrv_cloop = {
     .instance_size  = sizeof(BDRVCloopState),
     .bdrv_probe     = cloop_probe,
     .bdrv_open      = cloop_open,
-    .bdrv_read      = cloop_co_read,
+    .bdrv_child_perm     = bdrv_format_default_perms,
+    .bdrv_refresh_limits = cloop_refresh_limits,
+    .bdrv_co_preadv = cloop_co_preadv,
     .bdrv_close     = cloop_close,
 };
 

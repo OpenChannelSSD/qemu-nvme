@@ -23,6 +23,7 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include "dec.h"
 #include "hw/sysbus.h"
 #include "hw/pci/pci.h"
@@ -51,9 +52,9 @@ static int dec_map_irq(PCIDevice *pci_dev, int irq_num)
     return irq_num;
 }
 
-static int dec_pci_bridge_initfn(PCIDevice *pci_dev)
+static void dec_pci_bridge_realize(PCIDevice *pci_dev, Error **errp)
 {
-    return pci_bridge_initfn(pci_dev, TYPE_PCI_BUS);
+    pci_bridge_initfn(pci_dev, TYPE_PCI_BUS);
 }
 
 static void dec_21154_pci_bridge_class_init(ObjectClass *klass, void *data)
@@ -61,7 +62,8 @@ static void dec_21154_pci_bridge_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->init = dec_pci_bridge_initfn;
+    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
+    k->realize = dec_pci_bridge_realize;
     k->exit = pci_bridge_exitfn;
     k->vendor_id = PCI_VENDOR_ID_DEC;
     k->device_id = PCI_DEVICE_ID_DEC_21154;
@@ -77,6 +79,10 @@ static const TypeInfo dec_21154_pci_bridge_info = {
     .parent        = TYPE_PCI_BRIDGE,
     .instance_size = sizeof(PCIBridge),
     .class_init    = dec_21154_pci_bridge_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 PCIBus *pci_dec_21154_init(PCIBus *parent_bus, int devfn)
@@ -107,10 +113,9 @@ static int pci_dec_21154_device_init(SysBusDevice *dev)
     return 0;
 }
 
-static int dec_21154_pci_host_init(PCIDevice *d)
+static void dec_21154_pci_host_realize(PCIDevice *d, Error **errp)
 {
     /* PCI2PCI bridge same values as PearPC - check this */
-    return 0;
 }
 
 static void dec_21154_pci_host_class_init(ObjectClass *klass, void *data)
@@ -118,7 +123,8 @@ static void dec_21154_pci_host_class_init(ObjectClass *klass, void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    k->init = dec_21154_pci_host_init;
+    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
+    k->realize = dec_21154_pci_host_realize;
     k->vendor_id = PCI_VENDOR_ID_DEC;
     k->device_id = PCI_DEVICE_ID_DEC_21154;
     k->revision = 0x02;
@@ -128,7 +134,7 @@ static void dec_21154_pci_host_class_init(ObjectClass *klass, void *data)
      * PCI-facing part of the host bridge, not usable without the
      * host-facing part, which can't be device_add'ed, yet.
      */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
 }
 
 static const TypeInfo dec_21154_pci_host_info = {
@@ -136,6 +142,10 @@ static const TypeInfo dec_21154_pci_host_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(PCIDevice),
     .class_init    = dec_21154_pci_host_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void pci_dec_21154_device_class_init(ObjectClass *klass, void *data)

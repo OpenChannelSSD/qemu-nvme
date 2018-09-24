@@ -10,6 +10,7 @@
  * GNU GPL, version 2 or (at your option) any later version.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "ui/console.h"
 #include "hw/arm/pxa.h"
@@ -35,6 +36,7 @@ struct DMAChannel {
 struct PXA2xxLCDState {
     MemoryRegion *sysmem;
     MemoryRegion iomem;
+    MemoryRegionSection fbsection;
     qemu_irq irq;
     int irqlevel;
 
@@ -308,10 +310,10 @@ static void pxa2xx_descriptor_load(PXA2xxLCDState *s)
         }
 
         cpu_physical_memory_read(descptr, &desc, sizeof(desc));
-        s->dma_ch[i].descriptor = tswap32(desc.fdaddr);
-        s->dma_ch[i].source = tswap32(desc.fsaddr);
-        s->dma_ch[i].id = tswap32(desc.fidr);
-        s->dma_ch[i].command = tswap32(desc.ldcmd);
+        s->dma_ch[i].descriptor = le32_to_cpu(desc.fdaddr);
+        s->dma_ch[i].source = le32_to_cpu(desc.fsaddr);
+        s->dma_ch[i].id = le32_to_cpu(desc.fidr);
+        s->dma_ch[i].command = le32_to_cpu(desc.ldcmd);
     }
 }
 
@@ -403,7 +405,7 @@ static uint64_t pxa2xx_lcdc_read(void *opaque, hwaddr offset,
 
     default:
     fail:
-        hw_error("%s: Bad offset " REG_FMT "\n", __FUNCTION__, offset);
+        hw_error("%s: Bad offset " REG_FMT "\n", __func__, offset);
     }
 
     return 0;
@@ -422,7 +424,7 @@ static void pxa2xx_lcdc_write(void *opaque, hwaddr offset,
             s->status[0] |= LCSR0_QD;
 
         if (!(s->control[0] & LCCR0_LCDT) && (value & LCCR0_LCDT))
-            printf("%s: internal frame buffer unsupported\n", __FUNCTION__);
+            printf("%s: internal frame buffer unsupported\n", __func__);
 
         if ((s->control[3] & LCCR3_API) &&
                 (value & LCCR0_ENB) && !(value & LCCR0_LCDT))
@@ -458,7 +460,7 @@ static void pxa2xx_lcdc_write(void *opaque, hwaddr offset,
 
     case OVL1C1:
         if (!(s->ovl1c[0] & OVLC1_EN) && (value & OVLC1_EN))
-            printf("%s: Overlay 1 not supported\n", __FUNCTION__);
+            printf("%s: Overlay 1 not supported\n", __func__);
 
         s->ovl1c[0] = value & 0x80ffffff;
         s->dma_ch[1].up = (value & OVLC1_EN) || (s->control[0] & LCCR0_SDS);
@@ -470,7 +472,7 @@ static void pxa2xx_lcdc_write(void *opaque, hwaddr offset,
 
     case OVL2C1:
         if (!(s->ovl2c[0] & OVLC1_EN) && (value & OVLC1_EN))
-            printf("%s: Overlay 2 not supported\n", __FUNCTION__);
+            printf("%s: Overlay 2 not supported\n", __func__);
 
         s->ovl2c[0] = value & 0x80ffffff;
         s->dma_ch[2].up = !!(value & OVLC1_EN);
@@ -484,7 +486,7 @@ static void pxa2xx_lcdc_write(void *opaque, hwaddr offset,
 
     case CCR:
         if (!(s->ccr & CCR_CEN) && (value & CCR_CEN))
-            printf("%s: Hardware cursor unimplemented\n", __FUNCTION__);
+            printf("%s: Hardware cursor unimplemented\n", __func__);
 
         s->ccr = value & 0x81ffffe7;
         s->dma_ch[5].up = !!(value & CCR_CEN);
@@ -558,7 +560,7 @@ static void pxa2xx_lcdc_write(void *opaque, hwaddr offset,
 
     default:
     fail:
-        hw_error("%s: Bad offset " REG_FMT "\n", __FUNCTION__, offset);
+        hw_error("%s: Bad offset " REG_FMT "\n", __func__, offset);
     }
 }
 
@@ -687,8 +689,11 @@ static void pxa2xx_lcdc_dma0_redraw_rot0(PXA2xxLCDState *s,
 
     dest_width = s->xres * s->dest_width;
     *miny = 0;
-    framebuffer_update_display(surface, s->sysmem,
-                               addr, s->xres, s->yres,
+    if (s->invalidated) {
+        framebuffer_update_memory_section(&s->fbsection, s->sysmem,
+                                          addr, s->yres, src_width);
+    }
+    framebuffer_update_display(surface, &s->fbsection, s->xres, s->yres,
                                src_width, dest_width, s->dest_width,
                                s->invalidated,
                                fn, s->dma_ch[0].palette, miny, maxy);
@@ -715,8 +720,11 @@ static void pxa2xx_lcdc_dma0_redraw_rot90(PXA2xxLCDState *s,
 
     dest_width = s->yres * s->dest_width;
     *miny = 0;
-    framebuffer_update_display(surface, s->sysmem,
-                               addr, s->xres, s->yres,
+    if (s->invalidated) {
+        framebuffer_update_memory_section(&s->fbsection, s->sysmem,
+                                          addr, s->yres, src_width);
+    }
+    framebuffer_update_display(surface, &s->fbsection, s->xres, s->yres,
                                src_width, s->dest_width, -dest_width,
                                s->invalidated,
                                fn, s->dma_ch[0].palette,
@@ -747,8 +755,11 @@ static void pxa2xx_lcdc_dma0_redraw_rot180(PXA2xxLCDState *s,
 
     dest_width = s->xres * s->dest_width;
     *miny = 0;
-    framebuffer_update_display(surface, s->sysmem,
-                               addr, s->xres, s->yres,
+    if (s->invalidated) {
+        framebuffer_update_memory_section(&s->fbsection, s->sysmem,
+                                          addr, s->yres, src_width);
+    }
+    framebuffer_update_display(surface, &s->fbsection, s->xres, s->yres,
                                src_width, -dest_width, -s->dest_width,
                                s->invalidated,
                                fn, s->dma_ch[0].palette, miny, maxy);
@@ -778,8 +789,11 @@ static void pxa2xx_lcdc_dma0_redraw_rot270(PXA2xxLCDState *s,
 
     dest_width = s->yres * s->dest_width;
     *miny = 0;
-    framebuffer_update_display(surface, s->sysmem,
-                               addr, s->xres, s->yres,
+    if (s->invalidated) {
+        framebuffer_update_memory_section(&s->fbsection, s->sysmem,
+                                          addr, s->yres, src_width);
+    }
+    framebuffer_update_display(surface, &s->fbsection, s->xres, s->yres,
                                src_width, -s->dest_width, dest_width,
                                s->invalidated,
                                fn, s->dma_ch[0].palette,
@@ -1036,7 +1050,7 @@ PXA2xxLCDState *pxa2xx_lcdc_init(MemoryRegion *sysmem,
         s->dest_width = 4;
         break;
     default:
-        fprintf(stderr, "%s: Bad color depth\n", __FUNCTION__);
+        fprintf(stderr, "%s: Bad color depth\n", __func__);
         exit(1);
     }
 

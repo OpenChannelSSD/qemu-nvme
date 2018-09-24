@@ -33,11 +33,16 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
+#ifndef CONFIG_WIN32
 #include <poll.h>
+#endif
 #include <libusb.h>
 
+#include "qapi/error.h"
 #include "qemu-common.h"
 #include "monitor/monitor.h"
+#include "qemu/error-report.h"
 #include "sysemu/sysemu.h"
 #include "trace.h"
 
@@ -76,6 +81,7 @@ struct USBHostDevice {
     uint32_t                         iso_urb_frames;
     uint32_t                         options;
     uint32_t                         loglevel;
+    bool                             needs_autoscan;
 
     /* state */
     QTAILQ_ENTRY(USBHostDevice)      next;
@@ -96,6 +102,7 @@ struct USBHostDevice {
     /* callbacks & friends */
     QEMUBH                           *bh_nodev;
     QEMUBH                           *bh_postld;
+    bool                             bh_postld_pending;
     Notifier                         exit;
 
     /* request queues */
@@ -143,11 +150,20 @@ static void usb_host_attach_kernel(USBHostDevice *s);
 
 /* ------------------------------------------------------------------------ */
 
+#ifndef LIBUSB_LOG_LEVEL_WARNING /* older libusb didn't define these */
+#define LIBUSB_LOG_LEVEL_WARNING 2
+#endif
+
+/* ------------------------------------------------------------------------ */
+
 #define CONTROL_TIMEOUT  10000        /* 10 sec    */
 #define BULK_TIMEOUT         0        /* unlimited */
 #define INTR_TIMEOUT         0        /* unlimited */
 
-#if LIBUSBX_API_VERSION >= 0x01000103
+#ifndef LIBUSB_API_VERSION
+# define LIBUSB_API_VERSION LIBUSBX_API_VERSION
+#endif
+#if LIBUSB_API_VERSION >= 0x01000103
 # define HAVE_STREAMS 1
 #endif
 
@@ -195,6 +211,8 @@ static const char *err_names[] = {
 static libusb_context *ctx;
 static uint32_t loglevel;
 
+#ifndef CONFIG_WIN32
+
 static void usb_host_handle_fd(void *opaque)
 {
     struct timeval tv = { 0, 0 };
@@ -214,10 +232,14 @@ static void usb_host_del_fd(int fd, void *user_data)
     qemu_set_fd_handler(fd, NULL, NULL, NULL);
 }
 
+#endif /* !CONFIG_WIN32 */
+
 static int usb_host_init(void)
 {
+#ifndef CONFIG_WIN32
     const struct libusb_pollfd **poll;
-    int i, rc;
+#endif
+    int rc;
 
     if (ctx) {
         return 0;
@@ -226,18 +248,26 @@ static int usb_host_init(void)
     if (rc != 0) {
         return -1;
     }
+#if LIBUSB_API_VERSION >= 0x01000106
+    libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, loglevel);
+#else
     libusb_set_debug(ctx, loglevel);
-
+#endif
+#ifdef CONFIG_WIN32
+    /* FIXME: add support for Windows. */
+#else
     libusb_set_pollfd_notifiers(ctx, usb_host_add_fd,
                                 usb_host_del_fd,
                                 ctx);
     poll = libusb_get_pollfds(ctx);
     if (poll) {
+        int i;
         for (i = 0; poll[i] != NULL; i++) {
             usb_host_add_fd(poll[i]->fd, poll[i]->events, ctx);
         }
     }
     free(poll);
+#endif
     return 0;
 }
 
@@ -247,7 +277,7 @@ static int usb_host_get_port(libusb_device *dev, char *port, size_t len)
     size_t off;
     int rc, i;
 
-#if LIBUSBX_API_VERSION >= 0x01000102
+#if LIBUSB_API_VERSION >= 0x01000102
     rc = libusb_get_port_numbers(dev, path, 7);
 #else
     rc = libusb_get_port_path(ctx, dev, path, 7);
@@ -337,7 +367,7 @@ static USBHostRequest *usb_host_req_find(USBHostDevice *s, USBPacket *p)
     return NULL;
 }
 
-static void usb_host_req_complete_ctrl(struct libusb_transfer *xfer)
+static void LIBUSB_CALL usb_host_req_complete_ctrl(struct libusb_transfer *xfer)
 {
     USBHostRequest *r = xfer->user_data;
     USBHostDevice  *s = r->host;
@@ -370,7 +400,7 @@ out:
     }
 }
 
-static void usb_host_req_complete_data(struct libusb_transfer *xfer)
+static void LIBUSB_CALL usb_host_req_complete_data(struct libusb_transfer *xfer)
 {
     USBHostRequest *r = xfer->user_data;
     USBHostDevice  *s = r->host;
@@ -426,7 +456,8 @@ static void usb_host_req_abort(USBHostRequest *r)
 
 /* ------------------------------------------------------------------------ */
 
-static void usb_host_req_complete_iso(struct libusb_transfer *transfer)
+static void LIBUSB_CALL
+usb_host_req_complete_iso(struct libusb_transfer *transfer)
 {
     USBHostIsoXfer *xfer = transfer->user_data;
 
@@ -444,6 +475,7 @@ static void usb_host_req_complete_iso(struct libusb_transfer *transfer)
     }
     if (xfer->ring->ep->pid == USB_TOKEN_IN) {
         QTAILQ_INSERT_TAIL(&xfer->ring->copy, xfer, next);
+        usb_wakeup(xfer->ring->ep, 0);
     } else {
         QTAILQ_INSERT_TAIL(&xfer->ring->unused, xfer, next);
     }
@@ -719,10 +751,13 @@ static void usb_host_speed_compat(USBHostDevice *s)
                         rc = libusb_get_ss_endpoint_companion_descriptor
                             (ctx, endp, &endp_ss_comp);
                         if (rc == LIBUSB_SUCCESS) {
+                            int streams = endp_ss_comp->bmAttributes & 0x1f;
+                            if (streams) {
+                                compat_full = false;
+                                compat_high = false;
+                            }
                             libusb_free_ss_endpoint_companion_descriptor
                                 (endp_ss_comp);
-                            compat_full = false;
-                            compat_high = false;
                         }
 #endif
                         break;
@@ -743,13 +778,13 @@ static void usb_host_speed_compat(USBHostDevice *s)
 
     udev->speedmask = (1 << udev->speed);
     if (udev->speed == USB_SPEED_SUPER && compat_high) {
-        udev->speedmask |= USB_SPEED_HIGH;
+        udev->speedmask |= USB_SPEED_MASK_HIGH;
     }
     if (udev->speed == USB_SPEED_SUPER && compat_full) {
-        udev->speedmask |= USB_SPEED_FULL;
+        udev->speedmask |= USB_SPEED_MASK_FULL;
     }
     if (udev->speed == USB_SPEED_HIGH && compat_full) {
-        udev->speedmask |= USB_SPEED_FULL;
+        udev->speedmask |= USB_SPEED_MASK_FULL;
     }
 }
 
@@ -836,6 +871,10 @@ static int usb_host_open(USBHostDevice *s, libusb_device *dev)
     int rc;
     Error *local_err = NULL;
 
+    if (s->bh_postld_pending) {
+        return -1;
+    }
+
     trace_usb_host_open_started(bus_num, addr);
 
     if (s->dh != NULL) {
@@ -872,8 +911,7 @@ static int usb_host_open(USBHostDevice *s, libusb_device *dev)
 
     usb_device_attach(udev, &local_err);
     if (local_err) {
-        error_report("%s", error_get_pretty(local_err));
-        error_free(local_err);
+        error_report_err(local_err);
         goto fail;
     }
 
@@ -883,6 +921,9 @@ static int usb_host_open(USBHostDevice *s, libusb_device *dev)
 fail:
     trace_usb_host_open_failure(bus_num, addr);
     if (s->dh != NULL) {
+        usb_host_release_interfaces(s);
+        libusb_reset_device(s->dh);
+        usb_host_attach_kernel(s);
         libusb_close(s->dh);
         s->dh = NULL;
         s->dev = NULL;
@@ -951,9 +992,32 @@ static void usb_host_exit_notifier(struct Notifier *n, void *data)
     }
 }
 
+static libusb_device *usb_host_find_ref(int bus, int addr)
+{
+    libusb_device **devs = NULL;
+    libusb_device *ret = NULL;
+    int i, n;
+
+    if (usb_host_init() != 0) {
+        return NULL;
+    }
+    n = libusb_get_device_list(ctx, &devs);
+    for (i = 0; i < n; i++) {
+        if (libusb_get_bus_number(devs[i]) == bus &&
+            libusb_get_device_address(devs[i]) == addr) {
+            ret = libusb_ref_device(devs[i]);
+            break;
+        }
+    }
+    libusb_free_device_list(devs, 1);
+    return ret;
+}
+
 static void usb_host_realize(USBDevice *udev, Error **errp)
 {
     USBHostDevice *s = USB_HOST_DEVICE(udev);
+    libusb_device *ldev;
+    int rc;
 
     if (s->match.vendor_id > 0xffff) {
         error_setg(errp, "vendorid out of range");
@@ -974,11 +1038,33 @@ static void usb_host_realize(USBDevice *udev, Error **errp)
     QTAILQ_INIT(&s->requests);
     QTAILQ_INIT(&s->isorings);
 
+    if (s->match.addr && s->match.bus_num &&
+        !s->match.vendor_id &&
+        !s->match.product_id &&
+        !s->match.port) {
+        s->needs_autoscan = false;
+        ldev = usb_host_find_ref(s->match.bus_num,
+                                 s->match.addr);
+        if (!ldev) {
+            error_setg(errp, "failed to find host usb device %d:%d",
+                       s->match.bus_num, s->match.addr);
+            return;
+        }
+        rc = usb_host_open(s, ldev);
+        libusb_unref_device(ldev);
+        if (rc < 0) {
+            error_setg(errp, "failed to open host usb device %d:%d",
+                       s->match.bus_num, s->match.addr);
+            return;
+        }
+    } else {
+        s->needs_autoscan = true;
+        QTAILQ_INSERT_TAIL(&hostdevs, s, next);
+        usb_host_auto_check(NULL);
+    }
+
     s->exit.notify = usb_host_exit_notifier;
     qemu_add_exit_notifier(&s->exit);
-
-    QTAILQ_INSERT_TAIL(&hostdevs, s, next);
-    usb_host_auto_check(NULL);
 }
 
 static void usb_host_instance_init(Object *obj)
@@ -991,12 +1077,14 @@ static void usb_host_instance_init(Object *obj)
                                   &udev->qdev, NULL);
 }
 
-static void usb_host_handle_destroy(USBDevice *udev)
+static void usb_host_unrealize(USBDevice *udev, Error **errp)
 {
     USBHostDevice *s = USB_HOST_DEVICE(udev);
 
     qemu_remove_exit_notifier(&s->exit);
-    QTAILQ_REMOVE(&hostdevs, s, next);
+    if (s->needs_autoscan) {
+        QTAILQ_REMOVE(&hostdevs, s, next);
+    }
     usb_host_close(s);
 }
 
@@ -1028,7 +1116,7 @@ static void usb_host_detach_kernel(USBHostDevice *s)
     if (rc != 0) {
         return;
     }
-    for (i = 0; i < conf->bNumInterfaces; i++) {
+    for (i = 0; i < USB_MAX_INTERFACES; i++) {
         rc = libusb_kernel_driver_active(s->dh, i);
         usb_host_libusb_error("libusb_kernel_driver_active", rc);
         if (rc != 1) {
@@ -1051,7 +1139,7 @@ static void usb_host_attach_kernel(USBHostDevice *s)
     if (rc != 0) {
         return;
     }
-    for (i = 0; i < conf->bNumInterfaces; i++) {
+    for (i = 0; i < USB_MAX_INTERFACES; i++) {
         if (!s->ifs[i].detached) {
             continue;
         }
@@ -1066,7 +1154,7 @@ static int usb_host_claim_interfaces(USBHostDevice *s, int configuration)
 {
     USBDevice *udev = USB_DEVICE(s);
     struct libusb_config_descriptor *conf;
-    int rc, i;
+    int rc, i, claimed;
 
     for (i = 0; i < USB_MAX_INTERFACES; i++) {
         udev->altsetting[i] = 0;
@@ -1085,14 +1173,19 @@ static int usb_host_claim_interfaces(USBHostDevice *s, int configuration)
         return USB_RET_STALL;
     }
 
-    for (i = 0; i < conf->bNumInterfaces; i++) {
+    claimed = 0;
+    for (i = 0; i < USB_MAX_INTERFACES; i++) {
         trace_usb_host_claim_interface(s->bus_num, s->addr, configuration, i);
         rc = libusb_claim_interface(s->dh, i);
-        usb_host_libusb_error("libusb_claim_interface", rc);
-        if (rc != 0) {
-            return USB_RET_STALL;
+        if (rc == 0) {
+            s->ifs[i].claimed = true;
+            if (++claimed == conf->bNumInterfaces) {
+                break;
+            }
         }
-        s->ifs[i].claimed = true;
+    }
+    if (claimed != conf->bNumInterfaces) {
+        return USB_RET_STALL;
     }
 
     udev->ninterfaces   = conf->bNumInterfaces;
@@ -1104,10 +1197,9 @@ static int usb_host_claim_interfaces(USBHostDevice *s, int configuration)
 
 static void usb_host_release_interfaces(USBHostDevice *s)
 {
-    USBDevice *udev = USB_DEVICE(s);
     int i, rc;
 
-    for (i = 0; i < udev->ninterfaces; i++) {
+    for (i = 0; i < USB_MAX_INTERFACES; i++) {
         if (!s->ifs[i].claimed) {
             continue;
         }
@@ -1230,8 +1322,8 @@ static void usb_host_handle_control(USBDevice *udev, USBPacket *p,
 
     /* Fix up USB-3 ep0 maxpacket size to allow superspeed connected devices
      * to work redirected to a not superspeed capable hcd */
-    if (udev->speed == USB_SPEED_SUPER &&
-        !((udev->port->speedmask & USB_SPEED_MASK_SUPER)) &&
+    if ((udev->speedmask & USB_SPEED_MASK_SUPER) &&
+        !(udev->port->speedmask & USB_SPEED_MASK_SUPER) &&
         request == 0x8006 && value == 0x100 && index == 0) {
         r->usb3ep0quirk = true;
     }
@@ -1420,7 +1512,7 @@ static void usb_host_free_streams(USBDevice *udev, USBEndpoint **eps,
  * still present in the first place.  Attemping to contine where we
  * left off is impossible.
  *
- * What we are going to to to here is emulate a surprise removal of
+ * What we are going to do here is emulate a surprise removal of
  * the usb device passed through, then kick host scan so the device
  * will get re-attached (and re-initialized by the guest) in case it
  * is still present.
@@ -1441,6 +1533,7 @@ static void usb_host_post_load_bh(void *opaque)
     if (udev->attached) {
         usb_device_detach(udev);
     }
+    dev->bh_postld_pending = false;
     usb_host_auto_check(NULL);
 }
 
@@ -1452,6 +1545,7 @@ static int usb_host_post_load(void *opaque, int version_id)
         dev->bh_postld = qemu_bh_new(usb_host_post_load_bh, dev);
     }
     qemu_bh_schedule(dev->bh_postld);
+    dev->bh_postld_pending = true;
     return 0;
 }
 
@@ -1492,7 +1586,7 @@ static void usb_host_class_initfn(ObjectClass *klass, void *data)
     uc->handle_data    = usb_host_handle_data;
     uc->handle_control = usb_host_handle_control;
     uc->handle_reset   = usb_host_handle_reset;
-    uc->handle_destroy = usb_host_handle_destroy;
+    uc->unrealize      = usb_host_unrealize;
     uc->flush_ep_queue = usb_host_flush_ep_queue;
     uc->alloc_streams  = usb_host_alloc_streams;
     uc->free_streams   = usb_host_free_streams;
@@ -1631,7 +1725,36 @@ static void usb_host_auto_check(void *unused)
     timer_mod(usb_auto_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 2000);
 }
 
-void usb_host_info(Monitor *mon, const QDict *qdict)
+/**
+ * Check whether USB host device has a USB mass storage SCSI interface
+ */
+bool usb_host_dev_is_scsi_storage(USBDevice *ud)
+{
+    USBHostDevice *uhd = USB_HOST_DEVICE(ud);
+    struct libusb_config_descriptor *conf;
+    const struct libusb_interface_descriptor *intf;
+    bool is_scsi_storage = false;
+    int i;
+
+    if (!uhd || libusb_get_active_config_descriptor(uhd->dev, &conf) != 0) {
+        return false;
+    }
+
+    for (i = 0; i < conf->bNumInterfaces; i++) {
+        intf = &conf->interface[i].altsetting[ud->altsetting[i]];
+        if (intf->bInterfaceClass == LIBUSB_CLASS_MASS_STORAGE &&
+            intf->bInterfaceSubClass == 6) {                 /* 6 means SCSI */
+            is_scsi_storage = true;
+            break;
+        }
+    }
+
+    libusb_free_config_descriptor(conf);
+
+    return is_scsi_storage;
+}
+
+void hmp_info_usbhost(Monitor *mon, const QDict *qdict)
 {
     libusb_device **devs = NULL;
     struct libusb_device_descriptor ddesc;

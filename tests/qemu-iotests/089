@@ -25,7 +25,6 @@ seq="$(basename $0)"
 echo "QA output created by $seq"
 
 here="$PWD"
-tmp=/tmp/$$
 status=1	# failure is the default!
 
 _cleanup()
@@ -41,6 +40,8 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 _supported_fmt qcow2
 _supported_proto file
 _supported_os Linux
+# Because anything other than 16 would change the output of qemu_io -c info
+_unsupported_imgopts 'refcount_bits=\([^1]\|.\([^6]\|$\)\)'
 
 # Using an image filename containing quotation marks will render the JSON data
 # below invalid. In that case, we have little choice but simply not to run this
@@ -65,7 +66,8 @@ $QEMU_IO -c 'write -P 42 0 512' -c 'write -P 23 512 512' \
 
 $QEMU_IMG convert -f raw -O $IMGFMT "$TEST_IMG.base" "$TEST_IMG"
 
-$QEMU_IO -c 'read -P 42 0 512' -c 'read -P 23 512 512' \
+$QEMU_IO_PROG --cache $CACHEMODE \
+         -c 'read -P 42 0 512' -c 'read -P 23 512 512' \
          -c 'read -P 66 1024 512' "json:{
     \"driver\": \"$IMGFMT\",
     \"file\": {
@@ -80,6 +82,26 @@ $QEMU_IO -c 'read -P 42 0 512' -c 'read -P 23 512 512' \
 $QEMU_IO -c 'read -P 42 0 512' "$TEST_IMG" | _filter_qemu_io
 
 
+echo
+echo "=== Testing correct handling of 'backing':null ==="
+echo
+
+_make_test_img -b "$TEST_IMG.base" $IMG_SIZE
+
+# This should read 42
+$QEMU_IO -c 'read -P 42 0 512' "$TEST_IMG" | _filter_qemu_io
+
+# This should read 0
+$QEMU_IO -c 'read -P 0 0 512' "json:{\
+    'driver': '$IMGFMT',
+    'file': {
+        'driver': 'file',
+        'filename': '$TEST_IMG'
+    },
+    'backing': null
+}" | _filter_qemu_io
+
+
 # Taken from test 071
 echo
 echo "=== Testing blkdebug ==="
@@ -91,7 +113,8 @@ $QEMU_IO -c 'write -P 42 0x38000 512' "$TEST_IMG" | _filter_qemu_io
 
 # The "image.filename" part tests whether "a": { "b": "c" } and "a.b": "c" do
 # the same (which they should).
-$QEMU_IO -c 'read -P 42 0x38000 512' "json:{
+$QEMU_IO_PROG --cache $CACHEMODE \
+     -c 'read -P 42 0x38000 512' "json:{
     \"driver\": \"$IMGFMT\",
     \"file\": {
         \"driver\": \"blkdebug\",
@@ -116,11 +139,11 @@ echo
 
 # Both options given directly and those given in the filename should be used
 $QEMU_IO -c "open -o driver=qcow2 json:{\"file.filename\":\"$TEST_IMG\"}" \
-         -c "info" 2>&1 | _filter_testdir | _filter_imgfmt
+         -c "info" 2>&1 | _filter_img_info
 
 # Options given directly should be prioritized over those given in the filename
 $QEMU_IO -c "open -o driver=qcow2 json:{\"driver\":\"raw\",\"file.filename\":\"$TEST_IMG\"}" \
-         -c "info" 2>&1 | _filter_testdir | _filter_imgfmt
+         -c "info" 2>&1 | _filter_img_info
 
 
 # success, all done

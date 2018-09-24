@@ -1,10 +1,13 @@
-#include "hw/qdev.h"
+#include "qemu/osdep.h"
 #include "sysemu/sysemu.h"
-#include "qapi-types.h"
-#include "qmp-commands.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-ui.h"
+#include "qapi/qmp/qdict.h"
+#include "qemu/error-report.h"
 #include "trace.h"
 #include "ui/input.h"
 #include "ui/console.h"
+#include "sysemu/replay.h"
 
 struct QemuInputHandlerState {
     DeviceState       *dev;
@@ -38,6 +41,8 @@ static QTAILQ_HEAD(QemuInputEventQueueHead, QemuInputEventQueue) kbd_queue =
     QTAILQ_HEAD_INITIALIZER(kbd_queue);
 static QEMUTimer *kbd_timer;
 static uint32_t kbd_default_delay_ms = 10;
+static uint32_t queue_count;
+static uint32_t queue_limit = 1024;
 
 QemuInputHandlerState *qemu_input_handler_register(DeviceState *dev,
                                                    QemuInputHandler *handler)
@@ -79,18 +84,12 @@ void qemu_input_handler_bind(QemuInputHandlerState *s,
                              const char *device_id, int head,
                              Error **errp)
 {
-    DeviceState *dev;
     QemuConsole *con;
+    Error *err = NULL;
 
-    dev = qdev_find_recursive(sysbus_get_default(), device_id);
-    if (dev == NULL) {
-        error_set(errp, QERR_DEVICE_NOT_FOUND, device_id);
-        return;
-    }
-
-    con = qemu_console_lookup_by_device(dev, head);
-    if (con == NULL) {
-        error_setg(errp, "Device %s is not bound to a QemuConsole", device_id);
+    con = qemu_console_lookup_by_device_name(device_id, head, &err);
+    if (err) {
+        error_propagate(errp, err);
         return;
     }
 
@@ -122,16 +121,24 @@ qemu_input_find_handler(uint32_t mask, QemuConsole *con)
     return NULL;
 }
 
-void qmp_input_send_event(int64_t console, InputEventList *events,
-                          Error **errp)
+void qmp_input_send_event(bool has_device, const char *device,
+                          bool has_head, int64_t head,
+                          InputEventList *events, Error **errp)
 {
     InputEventList *e;
     QemuConsole *con;
+    Error *err = NULL;
 
-    con = qemu_console_lookup_by_index(console);
-    if (!con) {
-        error_setg(errp, "console %" PRId64 " not found", console);
-        return;
+    con = NULL;
+    if (has_device) {
+        if (!has_head) {
+            head = 0;
+        }
+        con = qemu_console_lookup_by_device_name(device, head, &err);
+        if (err) {
+            error_propagate(errp, err);
+            return;
+        }
     }
 
     if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED)) {
@@ -142,43 +149,56 @@ void qmp_input_send_event(int64_t console, InputEventList *events,
     for (e = events; e != NULL; e = e->next) {
         InputEvent *event = e->value;
 
-        if (!qemu_input_find_handler(1 << event->kind, con)) {
+        if (!qemu_input_find_handler(1 << event->type, con)) {
             error_setg(errp, "Input handler not found for "
                              "event type %s",
-                            InputEventKind_lookup[event->kind]);
+                            InputEventKind_str(event->type));
             return;
         }
     }
 
     for (e = events; e != NULL; e = e->next) {
-        InputEvent *event = e->value;
+        InputEvent *evt = e->value;
 
-        qemu_input_event_send(con, event);
+        if (evt->type == INPUT_EVENT_KIND_KEY &&
+            evt->u.key.data->key->type == KEY_VALUE_KIND_NUMBER) {
+            KeyValue *key = evt->u.key.data->key;
+            QKeyCode code = qemu_input_key_number_to_qcode(key->u.number.data);
+            qemu_input_event_send_key_qcode(con, code, evt->u.key.data->down);
+        } else {
+            qemu_input_event_send(con, evt);
+        }
     }
 
     qemu_input_event_sync();
 }
 
+static int qemu_input_transform_invert_abs_value(int value)
+{
+  return (int64_t)INPUT_EVENT_ABS_MAX - value + INPUT_EVENT_ABS_MIN;
+}
+
 static void qemu_input_transform_abs_rotate(InputEvent *evt)
 {
+    InputMoveEvent *move = evt->u.abs.data;
     switch (graphic_rotate) {
     case 90:
-        if (evt->abs->axis == INPUT_AXIS_X) {
-            evt->abs->axis = INPUT_AXIS_Y;
-        } else if (evt->abs->axis == INPUT_AXIS_Y) {
-            evt->abs->axis = INPUT_AXIS_X;
-            evt->abs->value = INPUT_EVENT_ABS_SIZE - 1 - evt->abs->value;
+        if (move->axis == INPUT_AXIS_X) {
+            move->axis = INPUT_AXIS_Y;
+        } else if (move->axis == INPUT_AXIS_Y) {
+            move->axis = INPUT_AXIS_X;
+            move->value = qemu_input_transform_invert_abs_value(move->value);
         }
         break;
     case 180:
-        evt->abs->value = INPUT_EVENT_ABS_SIZE - 1 - evt->abs->value;
+        move->value = qemu_input_transform_invert_abs_value(move->value);
         break;
     case 270:
-        if (evt->abs->axis == INPUT_AXIS_X) {
-            evt->abs->axis = INPUT_AXIS_Y;
-            evt->abs->value = INPUT_EVENT_ABS_SIZE - 1 - evt->abs->value;
-        } else if (evt->abs->axis == INPUT_AXIS_Y) {
-            evt->abs->axis = INPUT_AXIS_X;
+        if (move->axis == INPUT_AXIS_X) {
+            move->axis = INPUT_AXIS_Y;
+            move->value = qemu_input_transform_invert_abs_value(move->value);
+        } else if (move->axis == INPUT_AXIS_Y) {
+            move->axis = INPUT_AXIS_X;
         }
         break;
     }
@@ -188,41 +208,48 @@ static void qemu_input_event_trace(QemuConsole *src, InputEvent *evt)
 {
     const char *name;
     int qcode, idx = -1;
+    InputKeyEvent *key;
+    InputBtnEvent *btn;
+    InputMoveEvent *move;
 
     if (src) {
         idx = qemu_console_get_index(src);
     }
-    switch (evt->kind) {
+    switch (evt->type) {
     case INPUT_EVENT_KIND_KEY:
-        switch (evt->key->key->kind) {
+        key = evt->u.key.data;
+        switch (key->key->type) {
         case KEY_VALUE_KIND_NUMBER:
-            qcode = qemu_input_key_number_to_qcode(evt->key->key->number);
-            name = QKeyCode_lookup[qcode];
-            trace_input_event_key_number(idx, evt->key->key->number,
-                                         name, evt->key->down);
+            qcode = qemu_input_key_number_to_qcode(key->key->u.number.data);
+            name = QKeyCode_str(qcode);
+            trace_input_event_key_number(idx, key->key->u.number.data,
+                                         name, key->down);
             break;
         case KEY_VALUE_KIND_QCODE:
-            name = QKeyCode_lookup[evt->key->key->qcode];
-            trace_input_event_key_qcode(idx, name, evt->key->down);
+            name = QKeyCode_str(key->key->u.qcode.data);
+            trace_input_event_key_qcode(idx, name, key->down);
             break;
-        case KEY_VALUE_KIND_MAX:
+        case KEY_VALUE_KIND__MAX:
             /* keep gcc happy */
             break;
         }
         break;
     case INPUT_EVENT_KIND_BTN:
-        name = InputButton_lookup[evt->btn->button];
-        trace_input_event_btn(idx, name, evt->btn->down);
+        btn = evt->u.btn.data;
+        name = InputButton_str(btn->button);
+        trace_input_event_btn(idx, name, btn->down);
         break;
     case INPUT_EVENT_KIND_REL:
-        name = InputAxis_lookup[evt->rel->axis];
-        trace_input_event_rel(idx, name, evt->rel->value);
+        move = evt->u.rel.data;
+        name = InputAxis_str(move->axis);
+        trace_input_event_rel(idx, name, move->value);
         break;
     case INPUT_EVENT_KIND_ABS:
-        name = InputAxis_lookup[evt->abs->axis];
-        trace_input_event_abs(idx, name, evt->abs->value);
+        move = evt->u.abs.data;
+        name = InputAxis_str(move->axis);
+        trace_input_event_abs(idx, name, move->value);
         break;
-    case INPUT_EVENT_KIND_MAX:
+    case INPUT_EVENT_KIND__MAX:
         /* keep gcc happy */
         break;
     }
@@ -237,6 +264,7 @@ static void qemu_input_queue_process(void *opaque)
     item = QTAILQ_FIRST(queue);
     g_assert(item->type == QEMU_INPUT_QUEUE_DELAY);
     QTAILQ_REMOVE(queue, item, node);
+    queue_count--;
     g_free(item);
 
     while (!QTAILQ_EMPTY(queue)) {
@@ -255,6 +283,7 @@ static void qemu_input_queue_process(void *opaque)
             break;
         }
         QTAILQ_REMOVE(queue, item, node);
+        queue_count--;
         g_free(item);
     }
 }
@@ -269,6 +298,7 @@ static void qemu_input_queue_delay(struct QemuInputEventQueueHead *queue,
     item->delay_ms = delay_ms;
     item->timer = timer;
     QTAILQ_INSERT_TAIL(queue, item, node);
+    queue_count++;
 
     if (start_timer) {
         timer_mod(item->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL)
@@ -285,6 +315,7 @@ static void qemu_input_queue_event(struct QemuInputEventQueueHead *queue,
     item->src = src;
     item->evt = evt;
     QTAILQ_INSERT_TAIL(queue, item, node);
+    queue_count++;
 }
 
 static void qemu_input_queue_sync(struct QemuInputEventQueueHead *queue)
@@ -293,25 +324,22 @@ static void qemu_input_queue_sync(struct QemuInputEventQueueHead *queue)
 
     item->type = QEMU_INPUT_QUEUE_SYNC;
     QTAILQ_INSERT_TAIL(queue, item, node);
+    queue_count++;
 }
 
-void qemu_input_event_send(QemuConsole *src, InputEvent *evt)
+void qemu_input_event_send_impl(QemuConsole *src, InputEvent *evt)
 {
     QemuInputHandlerState *s;
-
-    if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED)) {
-        return;
-    }
 
     qemu_input_event_trace(src, evt);
 
     /* pre processing */
-    if (graphic_rotate && (evt->kind == INPUT_EVENT_KIND_ABS)) {
+    if (graphic_rotate && (evt->type == INPUT_EVENT_KIND_ABS)) {
             qemu_input_transform_abs_rotate(evt);
     }
 
     /* send event */
-    s = qemu_input_find_handler(1 << evt->kind, src);
+    s = qemu_input_find_handler(1 << evt->type, src);
     if (!s) {
         return;
     }
@@ -319,13 +347,37 @@ void qemu_input_event_send(QemuConsole *src, InputEvent *evt)
     s->events++;
 }
 
-void qemu_input_event_sync(void)
+void qemu_input_event_send(QemuConsole *src, InputEvent *evt)
 {
-    QemuInputHandlerState *s;
+    /* Expect all parts of QEMU to send events with QCodes exclusively.
+     * Key numbers are only supported as end-user input via QMP */
+    assert(!(evt->type == INPUT_EVENT_KIND_KEY &&
+             evt->u.key.data->key->type == KEY_VALUE_KIND_NUMBER));
+
+
+    /*
+     * 'sysrq' was mistakenly added to hack around the fact that
+     * the ps2 driver was not generating correct scancodes sequences
+     * when 'alt+print' was pressed. This flaw is now fixed and the
+     * 'sysrq' key serves no further purpose. We normalize it to
+     * 'print', so that downstream receivers of the event don't
+     * neeed to deal with this mistake
+     */
+    if (evt->type == INPUT_EVENT_KIND_KEY &&
+        evt->u.key.data->key->u.qcode.data == Q_KEY_CODE_SYSRQ) {
+        evt->u.key.data->key->u.qcode.data = Q_KEY_CODE_PRINT;
+    }
 
     if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED)) {
         return;
     }
+
+    replay_input_event(src, evt);
+}
+
+void qemu_input_event_sync_impl(void)
+{
+    QemuInputHandlerState *s;
 
     trace_input_event_sync();
 
@@ -340,13 +392,22 @@ void qemu_input_event_sync(void)
     }
 }
 
-InputEvent *qemu_input_event_new_key(KeyValue *key, bool down)
+void qemu_input_event_sync(void)
+{
+    if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED)) {
+        return;
+    }
+
+    replay_input_sync_event();
+}
+
+static InputEvent *qemu_input_event_new_key(KeyValue *key, bool down)
 {
     InputEvent *evt = g_new0(InputEvent, 1);
-    evt->key = g_new0(InputKeyEvent, 1);
-    evt->kind = INPUT_EVENT_KIND_KEY;
-    evt->key->key = key;
-    evt->key->down = down;
+    evt->u.key.data = g_new0(InputKeyEvent, 1);
+    evt->type = INPUT_EVENT_KIND_KEY;
+    evt->u.key.data->key = key;
+    evt->u.key.data->down = down;
     return evt;
 }
 
@@ -358,45 +419,51 @@ void qemu_input_event_send_key(QemuConsole *src, KeyValue *key, bool down)
         qemu_input_event_send(src, evt);
         qemu_input_event_sync();
         qapi_free_InputEvent(evt);
-    } else {
+    } else if (queue_count < queue_limit) {
         qemu_input_queue_event(&kbd_queue, src, evt);
         qemu_input_queue_sync(&kbd_queue);
+    } else {
+        qapi_free_InputEvent(evt);
     }
 }
 
 void qemu_input_event_send_key_number(QemuConsole *src, int num, bool down)
 {
-    KeyValue *key = g_new0(KeyValue, 1);
-    key->kind = KEY_VALUE_KIND_NUMBER;
-    key->number = num;
-    qemu_input_event_send_key(src, key, down);
+    QKeyCode code = qemu_input_key_number_to_qcode(num);
+    qemu_input_event_send_key_qcode(src, code, down);
 }
 
 void qemu_input_event_send_key_qcode(QemuConsole *src, QKeyCode q, bool down)
 {
     KeyValue *key = g_new0(KeyValue, 1);
-    key->kind = KEY_VALUE_KIND_QCODE;
-    key->qcode = q;
+    key->type = KEY_VALUE_KIND_QCODE;
+    key->u.qcode.data = q;
     qemu_input_event_send_key(src, key, down);
 }
 
 void qemu_input_event_send_key_delay(uint32_t delay_ms)
 {
+    if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED)) {
+        return;
+    }
+
     if (!kbd_timer) {
         kbd_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, qemu_input_queue_process,
                                  &kbd_queue);
     }
-    qemu_input_queue_delay(&kbd_queue, kbd_timer,
-                           delay_ms ? delay_ms : kbd_default_delay_ms);
+    if (queue_count < queue_limit) {
+        qemu_input_queue_delay(&kbd_queue, kbd_timer,
+                               delay_ms ? delay_ms : kbd_default_delay_ms);
+    }
 }
 
 InputEvent *qemu_input_event_new_btn(InputButton btn, bool down)
 {
     InputEvent *evt = g_new0(InputEvent, 1);
-    evt->btn = g_new0(InputBtnEvent, 1);
-    evt->kind = INPUT_EVENT_KIND_BTN;
-    evt->btn->button = btn;
-    evt->btn->down = down;
+    evt->u.btn.data = g_new0(InputBtnEvent, 1);
+    evt->type = INPUT_EVENT_KIND_BTN;
+    evt->u.btn.data->button = btn;
+    evt->u.btn.data->down = down;
     return evt;
 }
 
@@ -414,7 +481,7 @@ void qemu_input_update_buttons(QemuConsole *src, uint32_t *button_map,
     InputButton btn;
     uint32_t mask;
 
-    for (btn = 0; btn < INPUT_BUTTON_MAX; btn++) {
+    for (btn = 0; btn < INPUT_BUTTON__MAX; btn++) {
         mask = button_map[btn];
         if ((button_old & mask) == (button_new & mask)) {
             continue;
@@ -432,12 +499,17 @@ bool qemu_input_is_absolute(void)
     return (s != NULL) && (s->handler->mask & INPUT_EVENT_MASK_ABS);
 }
 
-int qemu_input_scale_axis(int value, int size_in, int size_out)
+int qemu_input_scale_axis(int value,
+                          int min_in, int max_in,
+                          int min_out, int max_out)
 {
-    if (size_in < 2) {
-        return size_out / 2;
+    int64_t range_in = (int64_t)max_in - min_in;
+    int64_t range_out = (int64_t)max_out - min_out;
+
+    if (range_in < 1) {
+        return min_out + range_out / 2;
     }
-    return (int64_t)value * (size_out - 1) / (size_in - 1);
+    return ((int64_t)value - min_in) * range_out / range_in + min_out;
 }
 
 InputEvent *qemu_input_event_new_move(InputEventKind kind,
@@ -446,8 +518,8 @@ InputEvent *qemu_input_event_new_move(InputEventKind kind,
     InputEvent *evt = g_new0(InputEvent, 1);
     InputMoveEvent *move = g_new0(InputMoveEvent, 1);
 
-    evt->kind = kind;
-    evt->data = move;
+    evt->type = kind;
+    evt->u.rel.data = move; /* evt->u.rel is the same as evt->u.abs */
     move->axis = axis;
     move->value = value;
     return evt;
@@ -461,10 +533,13 @@ void qemu_input_queue_rel(QemuConsole *src, InputAxis axis, int value)
     qapi_free_InputEvent(evt);
 }
 
-void qemu_input_queue_abs(QemuConsole *src, InputAxis axis, int value, int size)
+void qemu_input_queue_abs(QemuConsole *src, InputAxis axis, int value,
+                          int min_in, int max_in)
 {
     InputEvent *evt;
-    int scaled = qemu_input_scale_axis(value, size, INPUT_EVENT_ABS_SIZE);
+    int scaled = qemu_input_scale_axis(value, min_in, max_in,
+                                       INPUT_EVENT_ABS_MIN,
+                                       INPUT_EVENT_ABS_MAX);
     evt = qemu_input_event_new_move(INPUT_EVENT_KIND_ABS, axis, scaled);
     qemu_input_event_send(src, evt);
     qapi_free_InputEvent(evt);
@@ -523,7 +598,7 @@ MouseInfoList *qmp_query_mice(Error **errp)
     return mice_list;
 }
 
-void do_mouse_set(Monitor *mon, const QDict *qdict)
+void hmp_mouse_set(Monitor *mon, const QDict *qdict)
 {
     QemuInputHandlerState *s;
     int index = qdict_get_int(qdict, "index");

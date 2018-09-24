@@ -26,12 +26,13 @@
  * This implementation doesn't include ring priority, TCP/IP Off-Load, QoS.
  */
 
+#include "qemu/osdep.h"
 #include "sysemu/sysemu.h"
 #include "hw/sysbus.h"
-#include "trace.h"
 #include "hw/ptimer.h"
 #include "etsec.h"
 #include "registers.h"
+#include "qemu/log.h"
 
 /* #define HEX_DUMP */
 /* #define DEBUG_REGISTER */
@@ -47,6 +48,28 @@ static const int debug_etsec;
         qemu_log(fmt , ## __VA_ARGS__);        \
     }                                          \
     } while (0)
+
+/* call after any change to IEVENT or IMASK */
+void etsec_update_irq(eTSEC *etsec)
+{
+    uint32_t ievent = etsec->regs[IEVENT].value;
+    uint32_t imask  = etsec->regs[IMASK].value;
+    uint32_t active = ievent & imask;
+
+    int tx  = !!(active & IEVENT_TX_MASK);
+    int rx  = !!(active & IEVENT_RX_MASK);
+    int err = !!(active & IEVENT_ERR_MASK);
+
+    DPRINTF("%s IRQ ievent=%"PRIx32" imask=%"PRIx32" %c%c%c",
+            __func__, ievent, imask,
+            tx  ? 'T' : '_',
+            rx  ? 'R' : '_',
+            err ? 'E' : '_');
+
+    qemu_set_irq(etsec->tx_irq, tx);
+    qemu_set_irq(etsec->rx_irq, rx);
+    qemu_set_irq(etsec->err_irq, err);
+}
 
 static uint64_t etsec_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -138,31 +161,6 @@ static void write_rbasex(eTSEC          *etsec,
     etsec->regs[RBPTR0 + (reg_index - RBASE0)].value = value & ~0x7;
 }
 
-static void write_ievent(eTSEC          *etsec,
-                         eTSEC_Register *reg,
-                         uint32_t        reg_index,
-                         uint32_t        value)
-{
-    /* Write 1 to clear */
-    reg->value &= ~value;
-
-    if (!(reg->value & (IEVENT_TXF | IEVENT_TXF))) {
-        qemu_irq_lower(etsec->tx_irq);
-    }
-    if (!(reg->value & (IEVENT_RXF | IEVENT_RXF))) {
-        qemu_irq_lower(etsec->rx_irq);
-    }
-
-    if (!(reg->value & (IEVENT_MAG | IEVENT_GTSC | IEVENT_GRSC | IEVENT_TXC |
-                        IEVENT_RXC | IEVENT_BABR | IEVENT_BABT | IEVENT_LC |
-                        IEVENT_CRL | IEVENT_FGPI | IEVENT_FIR | IEVENT_FIQ |
-                        IEVENT_DPE | IEVENT_PERR | IEVENT_EBERR | IEVENT_TXE |
-                        IEVENT_XFUN | IEVENT_BSY | IEVENT_MSRO | IEVENT_MMRD |
-                        IEVENT_MMRW))) {
-        qemu_irq_lower(etsec->err_irq);
-    }
-}
-
 static void write_dmactrl(eTSEC          *etsec,
                           eTSEC_Register *reg,
                           uint32_t        reg_index,
@@ -177,9 +175,7 @@ static void write_dmactrl(eTSEC          *etsec,
         } else {
             /* Graceful receive stop now */
             etsec->regs[IEVENT].value |= IEVENT_GRSC;
-            if (etsec->regs[IMASK].value & IMASK_GRSCEN) {
-                qemu_irq_raise(etsec->err_irq);
-            }
+            etsec_update_irq(etsec);
         }
     }
 
@@ -190,9 +186,7 @@ static void write_dmactrl(eTSEC          *etsec,
         } else {
             /* Graceful transmit stop now */
             etsec->regs[IEVENT].value |= IEVENT_GTSC;
-            if (etsec->regs[IMASK].value & IMASK_GTSCEN) {
-                qemu_irq_raise(etsec->err_irq);
-            }
+            etsec_update_irq(etsec);
         }
     }
 
@@ -221,7 +215,16 @@ static void etsec_write(void     *opaque,
 
     switch (reg_index) {
     case IEVENT:
-        write_ievent(etsec, reg, reg_index, value);
+        /* Write 1 to clear */
+        reg->value &= ~value;
+
+        etsec_update_irq(etsec);
+        break;
+
+    case IMASK:
+        reg->value = value;
+
+        etsec_update_irq(etsec);
         break;
 
     case DMACTRL:
@@ -336,32 +339,30 @@ static void etsec_reset(DeviceState *d)
         MII_SR_EXTENDED_STATUS  | MII_SR_100T2_HD_CAPS | MII_SR_100T2_FD_CAPS |
         MII_SR_10T_HD_CAPS      | MII_SR_10T_FD_CAPS   | MII_SR_100X_HD_CAPS  |
         MII_SR_100X_FD_CAPS     | MII_SR_100T4_CAPS;
-}
 
-static void etsec_cleanup(NetClientState *nc)
-{
-    /* qemu_log("eTSEC cleanup\n"); */
-}
-
-static int etsec_can_receive(NetClientState *nc)
-{
-    eTSEC *etsec = qemu_get_nic_opaque(nc);
-
-    return etsec->rx_buffer_len == 0;
+    etsec_update_irq(etsec);
 }
 
 static ssize_t etsec_receive(NetClientState *nc,
                              const uint8_t  *buf,
                              size_t          size)
 {
+    ssize_t ret;
     eTSEC *etsec = qemu_get_nic_opaque(nc);
 
 #if defined(HEX_DUMP)
-    fprintf(stderr, "%s receive size:%d\n", etsec->nic->nc.name, size);
-    qemu_hexdump(buf, stderr, "", size);
+    fprintf(stderr, "%s receive size:%zd\n", nc->name, size);
+    qemu_hexdump((void *)buf, stderr, "", size);
 #endif
-    etsec_rx_ring_write(etsec, buf, size);
-    return size;
+    /* Flush is unnecessary as are already in receiving path */
+    etsec->need_flush = false;
+    ret = etsec_rx_ring_write(etsec, buf, size);
+    if (ret == 0) {
+        /* The packet will be queued, let's flush it when buffer is available
+         * again. */
+        etsec->need_flush = true;
+    }
+    return ret;
 }
 
 
@@ -373,11 +374,9 @@ static void etsec_set_link_status(NetClientState *nc)
 }
 
 static NetClientInfo net_etsec_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_NIC,
+    .type = NET_CLIENT_DRIVER_NIC,
     .size = sizeof(NICState),
-    .can_receive = etsec_can_receive,
     .receive = etsec_receive,
-    .cleanup = etsec_cleanup,
     .link_status_changed = etsec_set_link_status,
 };
 
@@ -391,7 +390,7 @@ static void etsec_realize(DeviceState *dev, Error **errp)
 
 
     etsec->bh     = qemu_bh_new(etsec_timer_hit, etsec);
-    etsec->ptimer = ptimer_init(etsec->bh);
+    etsec->ptimer = ptimer_init(etsec->bh, PTIMER_POLICY_DEFAULT);
     ptimer_set_freq(etsec->ptimer, 100);
 }
 
@@ -421,6 +420,8 @@ static void etsec_class_init(ObjectClass *klass, void *data)
     dc->realize = etsec_realize;
     dc->reset = etsec_reset;
     dc->props = etsec_properties;
+    /* Supported by ppce500 machine */
+    dc->user_creatable = true;
 }
 
 static TypeInfo etsec_info = {
@@ -449,10 +450,7 @@ DeviceState *etsec_create(hwaddr         base,
 
     dev = qdev_create(NULL, "eTSEC");
     qdev_set_nic_properties(dev, nd);
-
-    if (qdev_init(dev)) {
-        return NULL;
-    }
+    qdev_init_nofail(dev);
 
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, tx_irq);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1, rx_irq);

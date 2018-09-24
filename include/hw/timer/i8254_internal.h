@@ -26,8 +26,8 @@
 #define QEMU_I8254_INTERNAL_H
 
 #include "hw/hw.h"
-#include "hw/i386/pc.h"
 #include "hw/isa/isa.h"
+#include "qemu/timer.h"
 
 typedef struct PITChannelState {
     int count; /* can be 65536 */
@@ -57,14 +57,6 @@ typedef struct PITCommonState {
     PITChannelState channels[3];
 } PITCommonState;
 
-#define TYPE_PIT_COMMON "pit-common"
-#define PIT_COMMON(obj) \
-     OBJECT_CHECK(PITCommonState, (obj), TYPE_PIT_COMMON)
-#define PIT_COMMON_CLASS(klass) \
-     OBJECT_CLASS_CHECK(PITCommonClass, (klass), TYPE_PIT_COMMON)
-#define PIT_COMMON_GET_CLASS(obj) \
-     OBJECT_GET_CLASS(PITCommonClass, (obj), TYPE_PIT_COMMON)
-
 typedef struct PITCommonClass {
     ISADeviceClass parent_class;
 
@@ -81,4 +73,4 @@ void pit_get_channel_info_common(PITCommonState *s, PITChannelState *sc,
                                  PITChannelInfo *info);
 void pit_reset_common(PITCommonState *s);
 
-#endif /* !QEMU_I8254_INTERNAL_H */
+#endif /* QEMU_I8254_INTERNAL_H */

@@ -9,18 +9,34 @@ $(call set-vpath, $(SRC_PATH)/pc-bios/s390-ccw)
 
 .PHONY : all clean build-all
 
-OBJECTS=main.o bootmap.o sclp-ascii.o virtio.o start.o
-CFLAGS += -fno-stack-protector
-# XXX find a more clever to locate the bootloader
-LDFLAGS += -Wl,-Ttext,0x7e00000,-Tbss,0x7f00000 -nostdlib
+OBJECTS = start.o main.o bootmap.o jump2ipl.o sclp.o menu.o \
+	  virtio.o virtio-scsi.o virtio-blkdev.o libc.o
 
-build-all: s390-ccw.img
+QEMU_CFLAGS := $(filter -W%, $(QEMU_CFLAGS))
+QEMU_CFLAGS += -ffreestanding -fno-delete-null-pointer-checks -msoft-float
+QEMU_CFLAGS += -march=z900 -fPIE -fno-strict-aliasing
+QEMU_CFLAGS += -fno-asynchronous-unwind-tables
+QEMU_CFLAGS += $(call cc-option, $(QEMU_CFLAGS), -fno-stack-protector)
+LDFLAGS += -Wl,-pie -nostdlib
+
+build-all: s390-ccw.img s390-netboot.img
 
 s390-ccw.elf: $(OBJECTS)
-	$(call quiet-command,$(CC) $(LDFLAGS) -o $@ $(OBJECTS),"  Building $(TARGET_DIR)$@")
+	$(call quiet-command,$(CC) $(LDFLAGS) -o $@ $(OBJECTS),"BUILD","$(TARGET_DIR)$@")
+
+STRIP ?= strip
 
 s390-ccw.img: s390-ccw.elf
-	$(call quiet-command,strip $< -o $@,"  Stripping $(TARGET_DIR)$@")
+	$(call quiet-command,$(STRIP) --strip-unneeded $< -o $@,"STRIP","$(TARGET_DIR)$@")
+
+$(OBJECTS): Makefile
+
+ifneq ($(wildcard $(SRC_PATH)/roms/SLOF/lib/libnet),)
+include $(SRC_PATH)/pc-bios/s390-ccw/netboot.mak
+else
+s390-netboot.img:
+	@echo "s390-netboot.img not built since roms/SLOF/ is not available."
+endif
 
 clean:
-	rm -f *.o *.d *.img *.elf *~
+	rm -f *.o *.d *.img *.elf *~ *.a

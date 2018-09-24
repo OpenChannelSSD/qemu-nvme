@@ -23,10 +23,14 @@
  */
 /*
    Shix 2.0 board by Alexis Polti, described at
-   http://perso.enst.fr/~polti/realisations/shix20/
+   https://web.archive.org/web/20070917001736/perso.enst.fr/~polti/realisations/shix20
 
-   More information in target-sh4/README.sh4
+   More information in target/sh4/README.sh4
 */
+#include "qemu/osdep.h"
+#include "qapi/error.h"
+#include "qemu-common.h"
+#include "cpu.h"
 #include "hw/hw.h"
 #include "hw/sh4/sh.h"
 #include "sysemu/sysemu.h"
@@ -41,7 +45,6 @@
 
 static void shix_init(MachineState *machine)
 {
-    const char *cpu_model = machine->cpu_model;
     int ret;
     SuperHCPU *cpu;
     struct SH7750State *s;
@@ -49,27 +52,17 @@ static void shix_init(MachineState *machine)
     MemoryRegion *rom = g_new(MemoryRegion, 1);
     MemoryRegion *sdram = g_new(MemoryRegion, 2);
     
-    if (!cpu_model)
-        cpu_model = "any";
-
-    cpu = cpu_sh4_init(cpu_model);
-    if (cpu == NULL) {
-        fprintf(stderr, "Unable to find CPU definition\n");
-        exit(1);
-    }
+    cpu = SUPERH_CPU(cpu_create(machine->cpu_type));
 
     /* Allocate memory space */
-    memory_region_init_ram(rom, NULL, "shix.rom", 0x4000, &error_abort);
-    vmstate_register_ram_global(rom);
+    memory_region_init_ram(rom, NULL, "shix.rom", 0x4000, &error_fatal);
     memory_region_set_readonly(rom, true);
     memory_region_add_subregion(sysmem, 0x00000000, rom);
     memory_region_init_ram(&sdram[0], NULL, "shix.sdram1", 0x01000000,
-                           &error_abort);
-    vmstate_register_ram_global(&sdram[0]);
+                           &error_fatal);
     memory_region_add_subregion(sysmem, 0x08000000, &sdram[0]);
     memory_region_init_ram(&sdram[1], NULL, "shix.sdram2", 0x01000000,
-                           &error_abort);
-    vmstate_register_ram_global(&sdram[1]);
+                           &error_fatal);
     memory_region_add_subregion(sysmem, 0x0c000000, &sdram[1]);
 
     /* Load BIOS in 0 (and access it through P2, 0xA0000000) */
@@ -87,16 +80,12 @@ static void shix_init(MachineState *machine)
     tc58128_init(s, "shix_linux_nand.bin", NULL);
 }
 
-static QEMUMachine shix_machine = {
-    .name = "shix",
-    .desc = "shix card",
-    .init = shix_init,
-    .is_default = 1,
-};
-
-static void shix_machine_init(void)
+static void shix_machine_init(MachineClass *mc)
 {
-    qemu_register_machine(&shix_machine);
+    mc->desc = "shix card";
+    mc->init = shix_init;
+    mc->is_default = 1;
+    mc->default_cpu_type = TYPE_SH7750R_CPU;
 }
 
-machine_init(shix_machine_init);
+DEFINE_MACHINE("shix", shix_machine_init)

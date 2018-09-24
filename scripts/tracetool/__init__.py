@@ -6,7 +6,7 @@ Machinery for generating tracing-related intermediate files.
 """
 
 __author__     = "Lluís Vilanova <vilanova@ac.upc.edu>"
-__copyright__  = "Copyright 2012-2014, Lluís Vilanova <vilanova@ac.upc.edu>"
+__copyright__  = "Copyright 2012-2017, Lluís Vilanova <vilanova@ac.upc.edu>"
 __license__    = "GPL version 2 or (at your option) any later version"
 
 __maintainer__ = "Stefan Hajnoczi"
@@ -41,6 +41,49 @@ def out(*lines, **kwargs):
     lines = [ l % kwargs for l in lines ]
     sys.stdout.writelines("\n".join(lines) + "\n")
 
+# We only want to allow standard C types or fixed sized
+# integer types. We don't want QEMU specific types
+# as we can't assume trace backends can resolve all the
+# typedefs
+ALLOWED_TYPES = [
+    "int",
+    "long",
+    "short",
+    "char",
+    "bool",
+    "unsigned",
+    "signed",
+    "int8_t",
+    "uint8_t",
+    "int16_t",
+    "uint16_t",
+    "int32_t",
+    "uint32_t",
+    "int64_t",
+    "uint64_t",
+    "void",
+    "size_t",
+    "ssize_t",
+    "uintptr_t",
+    "ptrdiff_t",
+    # Magic substitution is done by tracetool
+    "TCGv",
+]
+
+def validate_type(name):
+    bits = name.split(" ")
+    for bit in bits:
+        bit = re.sub("\*", "", bit)
+        if bit == "":
+            continue
+        if bit == "const":
+            continue
+        if bit not in ALLOWED_TYPES:
+            raise ValueError("Argument type '%s' is not in whitelist. "
+                             "Only standard C types and fixed size integer "
+                             "types should be used. struct, union, and "
+                             "other complex pointer types should be "
+                             "declared as 'void *'" % name)
 
 class Arguments:
     """Event arguments description."""
@@ -50,9 +93,14 @@ class Arguments:
         Parameters
         ----------
         args :
-            List of (type, name) tuples.
+            List of (type, name) tuples or Arguments objects.
         """
-        self._args = args
+        self._args = []
+        for arg in args:
+            if isinstance(arg, Arguments):
+                self._args.extend(arg._args)
+            else:
+                self._args.append(arg)
 
     def copy(self):
         """Create a new copy."""
@@ -70,6 +118,8 @@ class Arguments:
         res = []
         for arg in arg_str.split(","):
             arg = arg.strip()
+            if not arg:
+                raise ValueError("Empty argument (did you forget to use 'void'?)")
             if arg == 'void':
                 continue
 
@@ -80,8 +130,15 @@ class Arguments:
             else:
                 arg_type, identifier = arg.rsplit(None, 1)
 
+            validate_type(arg_type)
             res.append((arg_type, identifier))
         return Arguments(res)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return Arguments(self._args[index])
+        else:
+            return self._args[index]
 
     def __iter__(self):
         """Iterate over the (type, name) pairs."""
@@ -109,6 +166,10 @@ class Arguments:
     def types(self):
         """List of argument types."""
         return [ type_ for type_, _ in self._args ]
+
+    def casted(self):
+        """List of argument names casted to their type."""
+        return ["(%s)%s" % (type_, name) for type_, name in self._args]
 
     def transform(self, *trans):
         """Return a new Arguments instance with transformed types.
@@ -146,9 +207,10 @@ class Event(object):
                       "(?:(?:(?P<fmt_trans>\".+),)?\s*(?P<fmt>\".+))?"
                       "\s*")
 
-    _VALID_PROPS = set(["disable", "tcg", "tcg-trans", "tcg-exec"])
+    _VALID_PROPS = set(["disable", "tcg", "tcg-trans", "tcg-exec", "vcpu"])
 
-    def __init__(self, name, props, fmt, args, orig=None):
+    def __init__(self, name, props, fmt, args, orig=None,
+                 event_trans=None, event_exec=None):
         """
         Parameters
         ----------
@@ -157,17 +219,27 @@ class Event(object):
         props : list of str
             Property names.
         fmt : str, list of str
-            Event printing format (or formats).
+            Event printing format string(s).
         args : Arguments
             Event arguments.
         orig : Event or None
-            Original Event before transformation.
+            Original Event before transformation/generation.
+        event_trans : Event or None
+            Generated translation-time event ("tcg" property).
+        event_exec : Event or None
+            Generated execution-time event ("tcg" property).
 
         """
         self.name = name
         self.properties = props
         self.fmt = fmt
         self.args = args
+        self.event_trans = event_trans
+        self.event_exec = event_exec
+
+        if len(args) > 10:
+            raise ValueError("Event '%s' has more than maximum permitted "
+                             "argument count" % name)
 
         if orig is None:
             self.original = weakref.ref(self)
@@ -183,7 +255,7 @@ class Event(object):
     def copy(self):
         """Create a new copy."""
         return Event(self.name, list(self.properties), self.fmt,
-                     self.args.copy(), self)
+                     self.args.copy(), self, self.event_trans, self.event_exec)
 
     @staticmethod
     def build(line_str):
@@ -211,11 +283,17 @@ class Event(object):
         if "tcg-exec" in props:
             raise ValueError("Invalid property 'tcg-exec'")
         if "tcg" not in props and not isinstance(fmt, str):
-            raise ValueError("Only events with 'tcg' property can have two formats")
+            raise ValueError("Only events with 'tcg' property can have two format strings")
         if "tcg" in props and isinstance(fmt, str):
-            raise ValueError("Events with 'tcg' property must have two formats")
+            raise ValueError("Events with 'tcg' property must have two format strings")
 
-        return Event(name, props, fmt, args)
+        event = Event(name, props, fmt, args)
+
+        # add implicit arguments when using the 'vcpu' property
+        import tracetool.vcpu
+        event = tracetool.vcpu.transform_event(event)
+
+        return event
 
     def __repr__(self):
         """Evaluable string representation for this object."""
@@ -227,21 +305,26 @@ class Event(object):
                                           self.name,
                                           self.args,
                                           fmt)
-
-    _FMT = re.compile("(%[\d\.]*\w+|%.*PRI\S+)")
+    # Star matching on PRI is dangerous as one might have multiple
+    # arguments with that format, hence the non-greedy version of it.
+    _FMT = re.compile("(%[\d\.]*\w+|%.*?PRI\S+)")
 
     def formats(self):
-        """List of argument print formats."""
+        """List conversion specifiers in the argument print format string."""
         assert not isinstance(self.fmt, list)
         return self._FMT.findall(self.fmt)
 
     QEMU_TRACE               = "trace_%(name)s"
+    QEMU_TRACE_NOCHECK       = "_nocheck__" + QEMU_TRACE
     QEMU_TRACE_TCG           = QEMU_TRACE + "_tcg"
+    QEMU_DSTATE              = "_TRACE_%(NAME)s_DSTATE"
+    QEMU_BACKEND_DSTATE      = "TRACE_%(NAME)s_BACKEND_DSTATE"
+    QEMU_EVENT               = "_TRACE_%(NAME)s_EVENT"
 
     def api(self, fmt=None):
         if fmt is None:
             fmt = Event.QEMU_TRACE
-        return fmt % {"name": self.name}
+        return fmt % {"name": self.name, "NAME": self.name.upper()}
 
     def transform(self, *trans):
         """Return a new Event with transformed Arguments."""
@@ -252,15 +335,62 @@ class Event(object):
                      self)
 
 
-def _read_events(fobj):
-    res = []
-    for line in fobj:
+def read_events(fobj, fname):
+    """Generate the output for the given (format, backends) pair.
+
+    Parameters
+    ----------
+    fobj : file
+        Event description file.
+    fname : str
+        Name of event file
+
+    Returns a list of Event objects
+    """
+
+    events = []
+    for lineno, line in enumerate(fobj, 1):
         if not line.strip():
             continue
         if line.lstrip().startswith('#'):
             continue
-        res.append(Event.build(line))
-    return res
+
+        try:
+            event = Event.build(line)
+        except ValueError as e:
+            arg0 = 'Error at %s:%d: %s' % (fname, lineno, e.args[0])
+            e.args = (arg0,) + e.args[1:]
+            raise
+
+        # transform TCG-enabled events
+        if "tcg" not in event.properties:
+            events.append(event)
+        else:
+            event_trans = event.copy()
+            event_trans.name += "_trans"
+            event_trans.properties += ["tcg-trans"]
+            event_trans.fmt = event.fmt[0]
+            # ignore TCG arguments
+            args_trans = []
+            for atrans, aorig in zip(
+                    event_trans.transform(tracetool.transform.TCG_2_HOST).args,
+                    event.args):
+                if atrans == aorig:
+                    args_trans.append(atrans)
+            event_trans.args = Arguments(args_trans)
+
+            event_exec = event.copy()
+            event_exec.name += "_exec"
+            event_exec.properties += ["tcg-exec"]
+            event_exec.fmt = event.fmt[1]
+            event_exec.args = event_exec.args.transform(tracetool.transform.TCG_2_HOST)
+
+            new_event = [event_trans, event_exec]
+            event.event_trans, event.event_exec = new_event
+
+            events.extend(new_event)
+
+    return events
 
 
 class TracetoolError (Exception):
@@ -294,14 +424,16 @@ def try_import(mod_name, attr_name=None, attr_default=None):
         return False, None
 
 
-def generate(fevents, format, backends,
+def generate(events, group, format, backends,
              binary=None, probe_prefix=None):
     """Generate the output for the given (format, backends) pair.
 
     Parameters
     ----------
-    fevents : file
-        Event description file.
+    events : list
+        list of Event objects to generate for
+    group: str
+        Name of the tracing group
     format : str
         Output format name.
     backends : list
@@ -331,37 +463,4 @@ def generate(fevents, format, backends,
     tracetool.backend.dtrace.BINARY = binary
     tracetool.backend.dtrace.PROBEPREFIX = probe_prefix
 
-    events = _read_events(fevents)
-
-    # transform TCG-enabled events
-    new_events = []
-    for event in events:
-        if "tcg" not in event.properties:
-            new_events.append(event)
-        else:
-            event_trans = event.copy()
-            event_trans.name += "_trans"
-            event_trans.properties += ["tcg-trans"]
-            event_trans.fmt = event.fmt[0]
-            args_trans = []
-            for atrans, aorig in zip(
-                    event_trans.transform(tracetool.transform.TCG_2_HOST).args,
-                    event.args):
-                if atrans == aorig:
-                    args_trans.append(atrans)
-            event_trans.args = Arguments(args_trans)
-            event_trans = event_trans.copy()
-
-            event_exec = event.copy()
-            event_exec.name += "_exec"
-            event_exec.properties += ["tcg-exec"]
-            event_exec.fmt = event.fmt[1]
-            event_exec = event_exec.transform(tracetool.transform.TCG_2_HOST)
-
-            new_event = [event_trans, event_exec]
-            event.event_trans, event.event_exec = new_event
-
-            new_events.extend(new_event)
-    events = new_events
-
-    tracetool.format.generate(events, format, backend)
+    tracetool.format.generate(events, format, backend, group)

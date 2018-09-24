@@ -22,14 +22,15 @@
  * THE SOFTWARE.
  */
 
-#include <stdint.h>
-#include <string.h>
-#include <stdio.h>
+#include "qemu/osdep.h"
 
-#include <glib.h>
 
 #include "libqtest.h"
+#include "qapi/qmp/qdict.h"
 #include "qemu-common.h"
+
+/* TODO actually test the results and get rid of this */
+#define qmp_discard_response(...) qobject_unref(qmp(__VA_ARGS__))
 
 #define TEST_IMAGE_SIZE 1440 * 1024
 
@@ -218,6 +219,10 @@ static uint8_t send_read_no_dma_command(int nb_sect, uint8_t expected_st0)
         inb(FLOPPY_BASE + reg_fifo);
     }
 
+    msr = inb(FLOPPY_BASE + reg_msr);
+    assert_bit_set(msr, BUSY | RQM | DIO);
+    g_assert(get_irq(FLOPPY_IRQ));
+
     st0 = floppy_recv();
     if (st0 != expected_st0) {
         ret = 1;
@@ -228,7 +233,14 @@ static uint8_t send_read_no_dma_command(int nb_sect, uint8_t expected_st0)
     floppy_recv();
     floppy_recv();
     floppy_recv();
+    g_assert(get_irq(FLOPPY_IRQ));
     floppy_recv();
+
+    /* Check that we're back in command phase */
+    msr = inb(FLOPPY_BASE + reg_msr);
+    assert_bit_clear(msr, BUSY | DIO);
+    assert_bit_set(msr, RQM);
+    g_assert(!get_irq(FLOPPY_IRQ));
 
     return ret;
 }
@@ -256,7 +268,7 @@ static void test_cmos(void)
     uint8_t cmos;
 
     cmos = cmos_read(CMOS_FLOPPY);
-    g_assert(cmos == 0x40);
+    g_assert(cmos == 0x40 || cmos == 0x50);
 }
 
 static void test_no_media_on_start(void)
@@ -290,12 +302,9 @@ static void test_media_insert(void)
 
     /* Insert media in drive. DSKCHK should not be reset until a step pulse
      * is sent. */
-    qmp_discard_response("{'execute':'change', 'arguments':{"
-                         " 'device':'floppy0', 'target': %s }}",
+    qmp_discard_response("{'execute':'blockdev-change-medium', 'arguments':{"
+                         " 'id':'floppy0', 'filename': %s, 'format': 'raw' }}",
                          test_image);
-    qmp_discard_response(""); /* ignore event
-                                 (FIXME open -> open transition?!) */
-    qmp_discard_response(""); /* ignore event */
 
     dir = inb(FLOPPY_BASE + reg_dir);
     assert_bit_set(dir, DSKCHG);
@@ -325,8 +334,7 @@ static void test_media_change(void)
     /* Eject the floppy and check that DSKCHG is set. Reading it out doesn't
      * reset the bit. */
     qmp_discard_response("{'execute':'eject', 'arguments':{"
-                         " 'device':'floppy0' }}");
-    qmp_discard_response(""); /* ignore event */
+                         " 'id':'floppy0' }}");
 
     dir = inb(FLOPPY_BASE + reg_dir);
     assert_bit_set(dir, DSKCHG);
@@ -403,6 +411,7 @@ static void test_read_id(void)
     uint8_t head = 0;
     uint8_t cyl;
     uint8_t st0;
+    uint8_t msr;
 
     /* Seek to track 0 and check with READ ID */
     send_seek(0);
@@ -411,10 +420,19 @@ static void test_read_id(void)
     g_assert(!get_irq(FLOPPY_IRQ));
     floppy_send(head << 2 | drive);
 
+    msr = inb(FLOPPY_BASE + reg_msr);
+    if (!get_irq(FLOPPY_IRQ)) {
+        assert_bit_set(msr, BUSY);
+        assert_bit_clear(msr, RQM);
+    }
+
     while (!get_irq(FLOPPY_IRQ)) {
         /* qemu involves a timer with READ ID... */
         clock_step(1000000000LL / 50);
     }
+
+    msr = inb(FLOPPY_BASE + reg_msr);
+    assert_bit_set(msr, BUSY | RQM | DIO);
 
     st0 = floppy_recv();
     floppy_recv();
@@ -422,7 +440,9 @@ static void test_read_id(void)
     cyl = floppy_recv();
     head = floppy_recv();
     floppy_recv();
+    g_assert(get_irq(FLOPPY_IRQ));
     floppy_recv();
+    g_assert(!get_irq(FLOPPY_IRQ));
 
     g_assert_cmpint(cyl, ==, 0);
     g_assert_cmpint(head, ==, 0);
@@ -443,10 +463,19 @@ static void test_read_id(void)
     g_assert(!get_irq(FLOPPY_IRQ));
     floppy_send(head << 2 | drive);
 
+    msr = inb(FLOPPY_BASE + reg_msr);
+    if (!get_irq(FLOPPY_IRQ)) {
+        assert_bit_set(msr, BUSY);
+        assert_bit_clear(msr, RQM);
+    }
+
     while (!get_irq(FLOPPY_IRQ)) {
         /* qemu involves a timer with READ ID... */
         clock_step(1000000000LL / 50);
     }
+
+    msr = inb(FLOPPY_BASE + reg_msr);
+    assert_bit_set(msr, BUSY | RQM | DIO);
 
     st0 = floppy_recv();
     floppy_recv();
@@ -454,7 +483,9 @@ static void test_read_id(void)
     cyl = floppy_recv();
     head = floppy_recv();
     floppy_recv();
+    g_assert(get_irq(FLOPPY_IRQ));
     floppy_recv();
+    g_assert(!get_irq(FLOPPY_IRQ));
 
     g_assert_cmpint(cyl, ==, 8);
     g_assert_cmpint(head, ==, 1);
@@ -537,7 +568,7 @@ int main(int argc, char **argv)
     /* Run the tests */
     g_test_init(&argc, &argv, NULL);
 
-    qtest_start(NULL);
+    qtest_start("-device floppy,id=floppy0");
     qtest_irq_intercept_in(global_qtest, "ioapic");
     qtest_add_func("/fdc/cmos", test_cmos);
     qtest_add_func("/fdc/no_media_on_start", test_no_media_on_start);

@@ -21,10 +21,13 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "hw/hw.h"
 #include "hw/isa/isa.h"
 #include "hw/i386/pc.h"
 #include "hw/input/ps2.h"
+#include "hw/input/i8042.h"
 #include "sysemu/sysemu.h"
 
 /* debug PC keyboard */
@@ -101,6 +104,12 @@
 #define KBD_OUT_OBF             0x10    /* Keyboard output buffer full */
 #define KBD_OUT_MOUSE_OBF       0x20    /* Mouse output buffer full */
 
+/* OSes typically write 0xdd/0xdf to turn the A20 line off and on.
+ * We make the default value of the outport include these four bits,
+ * so that the subsection is rarely necessary.
+ */
+#define KBD_OUT_ONES            0xcc
+
 /* Mouse Commands */
 #define AUX_SET_SCALE11		0xE6	/* Set 1:1 scaling */
 #define AUX_SET_SCALE21		0xE7	/* Set 2:1 scaling */
@@ -139,7 +148,7 @@ typedef struct KBDState {
 
     qemu_irq irq_kbd;
     qemu_irq irq_mouse;
-    qemu_irq *a20_out;
+    qemu_irq a20_out;
     hwaddr mask;
 } KBDState;
 
@@ -217,11 +226,9 @@ static void outport_write(KBDState *s, uint32_t val)
 {
     DPRINTF("kbd: write outport=0x%02x\n", val);
     s->outport = val;
-    if (s->a20_out) {
-        qemu_set_irq(*s->a20_out, (val >> 1) & 1);
-    }
+    qemu_set_irq(s->a20_out, (val >> 1) & 1);
     if (!(val & 1)) {
-        qemu_system_reset_request();
+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
     }
 }
 
@@ -288,25 +295,22 @@ static void kbd_write_command(void *opaque, hwaddr addr,
         kbd_queue(s, s->outport, 0);
         break;
     case KBD_CCMD_ENABLE_A20:
-        if (s->a20_out) {
-            qemu_irq_raise(*s->a20_out);
-        }
+        qemu_irq_raise(s->a20_out);
         s->outport |= KBD_OUT_A20;
         break;
     case KBD_CCMD_DISABLE_A20:
-        if (s->a20_out) {
-            qemu_irq_lower(*s->a20_out);
-        }
+        qemu_irq_lower(s->a20_out);
         s->outport &= ~KBD_OUT_A20;
         break;
     case KBD_CCMD_RESET:
-        qemu_system_reset_request();
+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
         break;
     case KBD_CCMD_NO_OP:
         /* ignore that */
         break;
     default:
-        fprintf(stderr, "qemu: unsupported keyboard cmd=0x%02x\n", (int)val);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "unsupported keyboard cmd=0x%02" PRIx64 "\n", val);
         break;
     }
 }
@@ -367,13 +371,13 @@ static void kbd_reset(void *opaque)
 
     s->mode = KBD_MODE_KBD_INT | KBD_MODE_MOUSE_INT;
     s->status = KBD_STAT_CMD | KBD_STAT_UNLOCKED;
-    s->outport = KBD_OUT_RESET | KBD_OUT_A20;
+    s->outport = KBD_OUT_RESET | KBD_OUT_A20 | KBD_OUT_ONES;
     s->outport_present = false;
 }
 
 static uint8_t kbd_outport_default(KBDState *s)
 {
-    return KBD_OUT_RESET | KBD_OUT_A20
+    return KBD_OUT_RESET | KBD_OUT_A20 | KBD_OUT_ONES
            | (s->status & KBD_STAT_OBF ? KBD_OUT_OBF : 0)
            | (s->status & KBD_STAT_MOUSE_OBF ? KBD_OUT_MOUSE_OBF : 0);
 }
@@ -385,22 +389,23 @@ static int kbd_outport_post_load(void *opaque, int version_id)
     return 0;
 }
 
-static const VMStateDescription vmstate_kbd_outport = {
-    .name = "pckbd_outport",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .post_load = kbd_outport_post_load,
-    .fields = (VMStateField[]) {
-        VMSTATE_UINT8(outport, KBDState),
-        VMSTATE_END_OF_LIST()
-    }
-};
-
 static bool kbd_outport_needed(void *opaque)
 {
     KBDState *s = opaque;
     return s->outport != kbd_outport_default(s);
 }
+
+static const VMStateDescription vmstate_kbd_outport = {
+    .name = "pckbd_outport",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = kbd_outport_post_load,
+    .needed = kbd_outport_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT8(outport, KBDState),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static int kbd_post_load(void *opaque, int version_id)
 {
@@ -424,17 +429,14 @@ static const VMStateDescription vmstate_kbd = {
         VMSTATE_UINT8(pending, KBDState),
         VMSTATE_END_OF_LIST()
     },
-    .subsections = (VMStateSubsection[]) {
-        {
-            .vmsd = &vmstate_kbd_outport,
-            .needed = kbd_outport_needed,
-        },
-        VMSTATE_END_OF_LIST()
+    .subsections = (const VMStateDescription*[]) {
+        &vmstate_kbd_outport,
+        NULL
     }
 };
 
 /* Memory mapped interface */
-static uint32_t kbd_mm_readb (void *opaque, hwaddr addr)
+static uint64_t kbd_mm_readfn(void *opaque, hwaddr addr, unsigned size)
 {
     KBDState *s = opaque;
 
@@ -444,7 +446,8 @@ static uint32_t kbd_mm_readb (void *opaque, hwaddr addr)
         return kbd_read_data(s, 0, 1) & 0xff;
 }
 
-static void kbd_mm_writeb (void *opaque, hwaddr addr, uint32_t value)
+static void kbd_mm_writefn(void *opaque, hwaddr addr,
+                           uint64_t value, unsigned size)
 {
     KBDState *s = opaque;
 
@@ -454,12 +457,13 @@ static void kbd_mm_writeb (void *opaque, hwaddr addr, uint32_t value)
         kbd_write_data(s, 0, value & 0xff, 1);
 }
 
+
 static const MemoryRegionOps i8042_mmio_ops = {
+    .read = kbd_mm_readfn,
+    .write = kbd_mm_writefn,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
     .endianness = DEVICE_NATIVE_ENDIAN,
-    .old_mmio = {
-        .read = { kbd_mm_readb, kbd_mm_readb, kbd_mm_readb },
-        .write = { kbd_mm_writeb, kbd_mm_writeb, kbd_mm_writeb },
-    },
 };
 
 void i8042_mm_init(qemu_irq kbd_irq, qemu_irq mouse_irq,
@@ -481,7 +485,6 @@ void i8042_mm_init(qemu_irq kbd_irq, qemu_irq mouse_irq,
     qemu_register_reset(kbd_reset, s);
 }
 
-#define TYPE_I8042 "i8042"
 #define I8042(obj) OBJECT_CHECK(ISAKBDState, (obj), TYPE_I8042)
 
 typedef struct ISAKBDState {
@@ -500,12 +503,9 @@ void i8042_isa_mouse_fake_event(void *opaque)
     ps2_mouse_fake_event(s->mouse);
 }
 
-void i8042_setup_a20_line(ISADevice *dev, qemu_irq *a20_out)
+void i8042_setup_a20_line(ISADevice *dev, qemu_irq a20_out)
 {
-    ISAKBDState *isa = I8042(dev);
-    KBDState *s = &isa->kbd;
-
-    s->a20_out = a20_out;
+    qdev_connect_gpio_out_named(DEVICE(dev), I8042_A20_LINE, 0, a20_out);
 }
 
 static const VMStateDescription vmstate_kbd_isa = {
@@ -547,6 +547,8 @@ static void i8042_initfn(Object *obj)
                           "i8042-data", 1);
     memory_region_init_io(isa_s->io + 1, obj, &i8042_cmd_ops, s,
                           "i8042-cmd", 1);
+
+    qdev_init_gpio_out_named(DEVICE(obj), &s->a20_out, I8042_A20_LINE, 1);
 }
 
 static void i8042_realizefn(DeviceState *dev, Error **errp)

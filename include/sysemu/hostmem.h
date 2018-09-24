@@ -9,14 +9,14 @@
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
  */
-#ifndef QEMU_RAM_H
-#define QEMU_RAM_H
+
+#ifndef SYSEMU_HOSTMEM_H
+#define SYSEMU_HOSTMEM_H
 
 #include "sysemu/sysemu.h" /* for MAX_NODES */
+#include "qapi/qapi-types-misc.h"
 #include "qom/object.h"
-#include "qapi/error.h"
 #include "exec/memory.h"
-#include "qemu/option.h"
 #include "qemu/bitmap.h"
 
 #define TYPE_MEMORY_BACKEND "memory-backend"
@@ -45,7 +45,6 @@ struct HostMemoryBackendClass {
  *
  * @parent: opaque parent object container
  * @size: amount of memory backend provides
- * @id: unique identification string in memdev namespace
  * @mr: MemoryRegion representing host memory belonging to backend
  */
 struct HostMemoryBackend {
@@ -55,14 +54,18 @@ struct HostMemoryBackend {
     /* protected */
     uint64_t size;
     bool merge, dump;
-    bool prealloc, force_prealloc;
+    bool prealloc, force_prealloc, is_mapped, share;
     DECLARE_BITMAP(host_nodes, MAX_NODES + 1);
     HostMemPolicy policy;
 
     MemoryRegion mr;
 };
 
-MemoryRegion *host_memory_backend_get_memory(HostMemoryBackend *backend,
-                                             Error **errp);
+bool host_memory_backend_mr_inited(HostMemoryBackend *backend);
+MemoryRegion *host_memory_backend_get_memory(HostMemoryBackend *backend);
+
+void host_memory_backend_set_mapped(HostMemoryBackend *backend, bool mapped);
+bool host_memory_backend_is_mapped(HostMemoryBackend *backend);
+size_t host_memory_backend_pagesize(HostMemoryBackend *memdev);
 
 #endif

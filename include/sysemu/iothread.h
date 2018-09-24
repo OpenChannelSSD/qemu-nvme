@@ -24,17 +24,36 @@ typedef struct {
 
     QemuThread thread;
     AioContext *ctx;
+    GMainContext *worker_context;
+    GMainLoop *main_loop;
+    GOnce once;
     QemuMutex init_done_lock;
     QemuCond init_done_cond;    /* is thread initialization done? */
-    bool stopping;
+    bool stopping;              /* has iothread_stop() been called? */
+    bool running;               /* should iothread_run() continue? */
     int thread_id;
+
+    /* AioContext poll parameters */
+    int64_t poll_max_ns;
+    int64_t poll_grow;
+    int64_t poll_shrink;
 } IOThread;
 
 #define IOTHREAD(obj) \
    OBJECT_CHECK(IOThread, obj, TYPE_IOTHREAD)
 
-IOThread *iothread_find(const char *id);
 char *iothread_get_id(IOThread *iothread);
+IOThread *iothread_by_id(const char *id);
 AioContext *iothread_get_aio_context(IOThread *iothread);
+GMainContext *iothread_get_g_main_context(IOThread *iothread);
+
+/*
+ * Helpers used to allocate iothreads for internal use.  These
+ * iothreads will not be seen by monitor clients when query using
+ * "query-iothreads".
+ */
+IOThread *iothread_create(const char *id, Error **errp);
+void iothread_stop(IOThread *iothread);
+void iothread_destroy(IOThread *iothread);
 
 #endif /* IOTHREAD_H */

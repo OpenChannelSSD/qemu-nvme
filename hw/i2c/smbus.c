@@ -9,6 +9,7 @@
 
 /* TODO: Implement PEC.  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/i2c/i2c.h"
 #include "hw/i2c/smbus.h"
@@ -66,7 +67,7 @@ static void smbus_do_write(SMBusDevice *dev)
     }
 }
 
-static void smbus_i2c_event(I2CSlave *s, enum i2c_event event)
+static int smbus_i2c_event(I2CSlave *s, enum i2c_event event)
 {
     SMBusDevice *dev = SMBUS_DEVICE(s);
 
@@ -147,6 +148,8 @@ static void smbus_i2c_event(I2CSlave *s, enum i2c_event event)
             break;
         }
     }
+
+    return 0;
 }
 
 static int smbus_i2c_recv(I2CSlave *s)
@@ -199,14 +202,6 @@ static int smbus_i2c_send(I2CSlave *s, uint8_t data)
     return 0;
 }
 
-static int smbus_device_init(I2CSlave *i2c)
-{
-    SMBusDevice *dev = SMBUS_DEVICE(i2c);
-    SMBusDeviceClass *sc = SMBUS_DEVICE_GET_CLASS(dev);
-
-    return sc->init(dev);
-}
-
 /* Master device commands.  */
 int smbus_quick_command(I2CBus *bus, uint8_t addr, int read)
 {
@@ -247,7 +242,10 @@ int smbus_read_byte(I2CBus *bus, uint8_t addr, uint8_t command)
         return -1;
     }
     i2c_send(bus, command);
-    i2c_start_transfer(bus, addr, 1);
+    if (i2c_start_transfer(bus, addr, 1)) {
+        i2c_end_transfer(bus);
+        return -1;
+    }
     data = i2c_recv(bus);
     i2c_nack(bus);
     i2c_end_transfer(bus);
@@ -272,7 +270,10 @@ int smbus_read_word(I2CBus *bus, uint8_t addr, uint8_t command)
         return -1;
     }
     i2c_send(bus, command);
-    i2c_start_transfer(bus, addr, 1);
+    if (i2c_start_transfer(bus, addr, 1)) {
+        i2c_end_transfer(bus);
+        return -1;
+    }
     data = i2c_recv(bus);
     data |= i2c_recv(bus) << 8;
     i2c_nack(bus);
@@ -292,30 +293,42 @@ int smbus_write_word(I2CBus *bus, uint8_t addr, uint8_t command, uint16_t data)
     return 0;
 }
 
-int smbus_read_block(I2CBus *bus, uint8_t addr, uint8_t command, uint8_t *data)
+int smbus_read_block(I2CBus *bus, uint8_t addr, uint8_t command, uint8_t *data,
+                     int len, bool recv_len, bool send_cmd)
 {
-    int len;
+    int rlen;
     int i;
 
-    if (i2c_start_transfer(bus, addr, 0)) {
+    if (send_cmd) {
+        if (i2c_start_transfer(bus, addr, 0)) {
+            return -1;
+        }
+        i2c_send(bus, command);
+    }
+    if (i2c_start_transfer(bus, addr, 1)) {
+        if (send_cmd) {
+            i2c_end_transfer(bus);
+        }
         return -1;
     }
-    i2c_send(bus, command);
-    i2c_start_transfer(bus, addr, 1);
-    len = i2c_recv(bus);
-    if (len > 32) {
-        len = 0;
+    if (recv_len) {
+        rlen = i2c_recv(bus);
+    } else {
+        rlen = len;
     }
-    for (i = 0; i < len; i++) {
+    if (rlen > len) {
+        rlen = 0;
+    }
+    for (i = 0; i < rlen; i++) {
         data[i] = i2c_recv(bus);
     }
     i2c_nack(bus);
     i2c_end_transfer(bus);
-    return len;
+    return rlen;
 }
 
 int smbus_write_block(I2CBus *bus, uint8_t addr, uint8_t command, uint8_t *data,
-                      int len)
+                      int len, bool send_len)
 {
     int i;
 
@@ -326,7 +339,9 @@ int smbus_write_block(I2CBus *bus, uint8_t addr, uint8_t command, uint8_t *data,
         return -1;
     }
     i2c_send(bus, command);
-    i2c_send(bus, len);
+    if (send_len) {
+        i2c_send(bus, len);
+    }
     for (i = 0; i < len; i++) {
         i2c_send(bus, data[i]);
     }
@@ -338,7 +353,6 @@ static void smbus_device_class_init(ObjectClass *klass, void *data)
 {
     I2CSlaveClass *sc = I2C_SLAVE_CLASS(klass);
 
-    sc->init = smbus_device_init;
     sc->event = smbus_i2c_event;
     sc->recv = smbus_i2c_recv;
     sc->send = smbus_i2c_send;

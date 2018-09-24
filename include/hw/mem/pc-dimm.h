@@ -19,8 +19,7 @@
 #include "exec/memory.h"
 #include "sysemu/hostmem.h"
 #include "hw/qdev.h"
-
-#define DEFAULT_PC_DIMMSIZE (1024*1024*1024)
+#include "hw/boards.h"
 
 #define TYPE_PC_DIMM "pc-dimm"
 #define PC_DIMM(obj) \
@@ -60,22 +59,28 @@ typedef struct PCDIMMDevice {
 
 /**
  * PCDIMMDeviceClass:
- * @get_memory_region: returns #MemoryRegion associated with @dimm
+ * @realize: called after common dimm is realized so that the dimm based
+ * devices get the chance to do specified operations.
+ * @get_memory_region: returns #MemoryRegion associated with @dimm which
+ * is directly mapped into the physical address space of guest. Will not
+ * fail after the device was realized.
+ * @get_vmstate_memory_region: returns #MemoryRegion which indicates the
+ * memory of @dimm should be kept during live migration. Will not fail
+ * after the device was realized.
  */
 typedef struct PCDIMMDeviceClass {
     /* private */
     DeviceClass parent_class;
 
     /* public */
-    MemoryRegion *(*get_memory_region)(PCDIMMDevice *dimm);
+    void (*realize)(PCDIMMDevice *dimm, Error **errp);
+    MemoryRegion *(*get_memory_region)(PCDIMMDevice *dimm, Error **errp);
+    MemoryRegion *(*get_vmstate_memory_region)(PCDIMMDevice *dimm,
+                                               Error **errp);
 } PCDIMMDeviceClass;
 
-uint64_t pc_dimm_get_free_addr(uint64_t address_space_start,
-                               uint64_t address_space_size,
-                               uint64_t *hint, uint64_t size,
-                               Error **errp);
-
-int pc_dimm_get_free_slot(const int *hint, int max_slots, Error **errp);
-
-int qmp_pc_dimm_device_list(Object *obj, void *opaque);
+void pc_dimm_pre_plug(DeviceState *dev, MachineState *machine,
+                      const uint64_t *legacy_align, Error **errp);
+void pc_dimm_plug(DeviceState *dev, MachineState *machine, Error **errp);
+void pc_dimm_unplug(DeviceState *dev, MachineState *machine);
 #endif

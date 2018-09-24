@@ -41,10 +41,10 @@ class ImageCommitTestCase(iotests.QMPTestCase):
         while not completed:
             for event in self.vm.get_qmp_events(wait=True):
                 if event['event'] == 'BLOCK_JOB_COMPLETED':
+                    self.assert_qmp_absent(event, 'data/error')
                     self.assert_qmp(event, 'data/type', 'commit')
                     self.assert_qmp(event, 'data/device', 'drive0')
-                    self.assert_qmp(event, 'data/offset', self.image_len)
-                    self.assert_qmp(event, 'data/len', self.image_len)
+                    self.assert_qmp(event, 'data/offset', event['data']['len'])
                     if need_ready:
                         self.assertTrue(ready, "Expecting BLOCK_JOB_COMPLETED event")
                     completed = True
@@ -52,7 +52,6 @@ class ImageCommitTestCase(iotests.QMPTestCase):
                     ready = True
                     self.assert_qmp(event, 'data/type', 'commit')
                     self.assert_qmp(event, 'data/device', 'drive0')
-                    self.assert_qmp(event, 'data/len', self.image_len)
                     self.vm.qmp('block-job-complete', device='drive0')
 
         self.assert_no_active_block_jobs()
@@ -71,16 +70,24 @@ class ImageCommitTestCase(iotests.QMPTestCase):
         self.wait_for_complete()
 
 class TestSingleDrive(ImageCommitTestCase):
-    image_len = 1 * 1024 * 1024
+    # Need some space after the copied data so that throttling is effective in
+    # tests that use it rather than just completing the job immediately
+    image_len = 2 * 1024 * 1024
     test_len = 1 * 1024 * 256
 
     def setUp(self):
         iotests.create_image(backing_img, self.image_len)
         qemu_img('create', '-f', iotests.imgfmt, '-o', 'backing_file=%s' % backing_img, mid_img)
         qemu_img('create', '-f', iotests.imgfmt, '-o', 'backing_file=%s' % mid_img, test_img)
-        qemu_io('-c', 'write -P 0xab 0 524288', backing_img)
-        qemu_io('-c', 'write -P 0xef 524288 524288', mid_img)
-        self.vm = iotests.VM().add_drive(test_img)
+        qemu_io('-f', 'raw', '-c', 'write -P 0xab 0 524288', backing_img)
+        qemu_io('-f', iotests.imgfmt, '-c', 'write -P 0xef 524288 524288', mid_img)
+        self.vm = iotests.VM().add_drive(test_img, "node-name=top,backing.node-name=mid,backing.backing.node-name=base", interface="none")
+        if iotests.qemu_default_machine == 's390-ccw-virtio':
+            self.vm.add_device("virtio-scsi-ccw")
+        else:
+            self.vm.add_device("virtio-scsi-pci")
+
+        self.vm.add_device("scsi-hd,id=scsi0,drive=drive0")
         self.vm.launch()
 
     def tearDown(self):
@@ -91,8 +98,8 @@ class TestSingleDrive(ImageCommitTestCase):
 
     def test_commit(self):
         self.run_commit_test(mid_img, backing_img)
-        self.assertEqual(-1, qemu_io('-c', 'read -P 0xab 0 524288', backing_img).find("verification failed"))
-        self.assertEqual(-1, qemu_io('-c', 'read -P 0xef 524288 524288', backing_img).find("verification failed"))
+        self.assertEqual(-1, qemu_io('-f', 'raw', '-c', 'read -P 0xab 0 524288', backing_img).find("verification failed"))
+        self.assertEqual(-1, qemu_io('-f', 'raw', '-c', 'read -P 0xef 524288 524288', backing_img).find("verification failed"))
 
     def test_device_not_found(self):
         result = self.vm.qmp('block-commit', device='nonexistent', top='%s' % mid_img)
@@ -118,13 +125,13 @@ class TestSingleDrive(ImageCommitTestCase):
 
     def test_top_is_active(self):
         self.run_commit_test(test_img, backing_img, need_ready=True)
-        self.assertEqual(-1, qemu_io('-c', 'read -P 0xab 0 524288', backing_img).find("verification failed"))
-        self.assertEqual(-1, qemu_io('-c', 'read -P 0xef 524288 524288', backing_img).find("verification failed"))
+        self.assertEqual(-1, qemu_io('-f', 'raw', '-c', 'read -P 0xab 0 524288', backing_img).find("verification failed"))
+        self.assertEqual(-1, qemu_io('-f', 'raw', '-c', 'read -P 0xef 524288 524288', backing_img).find("verification failed"))
 
     def test_top_is_default_active(self):
         self.run_default_commit_test()
-        self.assertEqual(-1, qemu_io('-c', 'read -P 0xab 0 524288', backing_img).find("verification failed"))
-        self.assertEqual(-1, qemu_io('-c', 'read -P 0xef 524288 524288', backing_img).find("verification failed"))
+        self.assertEqual(-1, qemu_io('-f', 'raw', '-c', 'read -P 0xab 0 524288', backing_img).find("verification failed"))
+        self.assertEqual(-1, qemu_io('-f', 'raw', '-c', 'read -P 0xef 524288 524288', backing_img).find("verification failed"))
 
     def test_top_and_base_reversed(self):
         self.assert_no_active_block_jobs()
@@ -132,6 +139,63 @@ class TestSingleDrive(ImageCommitTestCase):
         self.assert_qmp(result, 'error/class', 'GenericError')
         self.assert_qmp(result, 'error/desc', 'Base \'%s\' not found' % mid_img)
 
+    # When the job is running on a BB that is automatically deleted on hot
+    # unplug, the job is cancelled when the device disappears
+    def test_hot_unplug(self):
+        if self.image_len == 0:
+            return
+
+        self.assert_no_active_block_jobs()
+        result = self.vm.qmp('block-commit', device='drive0', top=mid_img,
+                             base=backing_img, speed=(self.image_len / 4))
+        self.assert_qmp(result, 'return', {})
+        result = self.vm.qmp('device_del', id='scsi0')
+        self.assert_qmp(result, 'return', {})
+
+        cancelled = False
+        deleted = False
+        while not cancelled or not deleted:
+            for event in self.vm.get_qmp_events(wait=True):
+                if event['event'] == 'DEVICE_DELETED':
+                    self.assert_qmp(event, 'data/device', 'scsi0')
+                    deleted = True
+                elif event['event'] == 'BLOCK_JOB_CANCELLED':
+                    self.assert_qmp(event, 'data/device', 'drive0')
+                    cancelled = True
+                elif event['event'] == 'JOB_STATUS_CHANGE':
+                    self.assert_qmp(event, 'data/id', 'drive0')
+                else:
+                    self.fail("Unexpected event %s" % (event['event']))
+
+        self.assert_no_active_block_jobs()
+
+    # Tests that the insertion of the commit_top filter node doesn't make a
+    # difference to query-blockstat
+    def test_implicit_node(self):
+        if self.image_len == 0:
+            return
+
+        self.assert_no_active_block_jobs()
+        result = self.vm.qmp('block-commit', device='drive0', top=mid_img,
+                             base=backing_img, speed=(self.image_len / 4))
+        self.assert_qmp(result, 'return', {})
+
+        result = self.vm.qmp('query-block')
+        self.assert_qmp(result, 'return[0]/inserted/file', test_img)
+        self.assert_qmp(result, 'return[0]/inserted/drv', iotests.imgfmt)
+        self.assert_qmp(result, 'return[0]/inserted/backing_file', mid_img)
+        self.assert_qmp(result, 'return[0]/inserted/backing_file_depth', 2)
+        self.assert_qmp(result, 'return[0]/inserted/image/filename', test_img)
+        self.assert_qmp(result, 'return[0]/inserted/image/backing-image/filename', mid_img)
+        self.assert_qmp(result, 'return[0]/inserted/image/backing-image/backing-image/filename', backing_img)
+
+        result = self.vm.qmp('query-blockstats')
+        self.assert_qmp(result, 'return[0]/node-name', 'top')
+        self.assert_qmp(result, 'return[0]/backing/node-name', 'mid')
+        self.assert_qmp(result, 'return[0]/backing/backing/node-name', 'base')
+
+        self.cancel_and_wait()
+        self.assert_no_active_block_jobs()
 
 class TestRelativePaths(ImageCommitTestCase):
     image_len = 1 * 1024 * 1024
@@ -161,8 +225,8 @@ class TestRelativePaths(ImageCommitTestCase):
         qemu_img('create', '-f', iotests.imgfmt, '-o', 'backing_file=%s' % self.mid_img_abs, self.test_img)
         qemu_img('rebase', '-u', '-b', self.backing_img, self.mid_img_abs)
         qemu_img('rebase', '-u', '-b', self.mid_img, self.test_img)
-        qemu_io('-c', 'write -P 0xab 0 524288', self.backing_img_abs)
-        qemu_io('-c', 'write -P 0xef 524288 524288', self.mid_img_abs)
+        qemu_io('-f', 'raw', '-c', 'write -P 0xab 0 524288', self.backing_img_abs)
+        qemu_io('-f', iotests.imgfmt, '-c', 'write -P 0xef 524288 524288', self.mid_img_abs)
         self.vm = iotests.VM().add_drive(self.test_img)
         self.vm.launch()
 
@@ -181,8 +245,8 @@ class TestRelativePaths(ImageCommitTestCase):
 
     def test_commit(self):
         self.run_commit_test(self.mid_img, self.backing_img)
-        self.assertEqual(-1, qemu_io('-c', 'read -P 0xab 0 524288', self.backing_img_abs).find("verification failed"))
-        self.assertEqual(-1, qemu_io('-c', 'read -P 0xef 524288 524288', self.backing_img_abs).find("verification failed"))
+        self.assertEqual(-1, qemu_io('-f', 'raw', '-c', 'read -P 0xab 0 524288', self.backing_img_abs).find("verification failed"))
+        self.assertEqual(-1, qemu_io('-f', 'raw', '-c', 'read -P 0xef 524288 524288', self.backing_img_abs).find("verification failed"))
 
     def test_device_not_found(self):
         result = self.vm.qmp('block-commit', device='nonexistent', top='%s' % self.mid_img)
@@ -208,8 +272,8 @@ class TestRelativePaths(ImageCommitTestCase):
 
     def test_top_is_active(self):
         self.run_commit_test(self.test_img, self.backing_img)
-        self.assertEqual(-1, qemu_io('-c', 'read -P 0xab 0 524288', self.backing_img_abs).find("verification failed"))
-        self.assertEqual(-1, qemu_io('-c', 'read -P 0xef 524288 524288', self.backing_img_abs).find("verification failed"))
+        self.assertEqual(-1, qemu_io('-f', 'raw', '-c', 'read -P 0xab 0 524288', self.backing_img_abs).find("verification failed"))
+        self.assertEqual(-1, qemu_io('-f', 'raw', '-c', 'read -P 0xef 524288 524288', self.backing_img_abs).find("verification failed"))
 
     def test_top_and_base_reversed(self):
         self.assert_no_active_block_jobs()
@@ -225,9 +289,9 @@ class TestSetSpeed(ImageCommitTestCase):
         qemu_img('create', backing_img, str(TestSetSpeed.image_len))
         qemu_img('create', '-f', iotests.imgfmt, '-o', 'backing_file=%s' % backing_img, mid_img)
         qemu_img('create', '-f', iotests.imgfmt, '-o', 'backing_file=%s' % mid_img, test_img)
-        qemu_io('-c', 'write -P 0x1 0 512', test_img)
-        qemu_io('-c', 'write -P 0xef 524288 524288', mid_img)
-        self.vm = iotests.VM().add_drive(test_img)
+        qemu_io('-f', iotests.imgfmt, '-c', 'write -P 0x1 0 512', test_img)
+        qemu_io('-f', iotests.imgfmt, '-c', 'write -P 0xef 524288 524288', mid_img)
+        self.vm = iotests.VM().add_drive('blkdebug::' + test_img)
         self.vm.launch()
 
     def tearDown(self):
@@ -252,6 +316,35 @@ class TestSetSpeed(ImageCommitTestCase):
 
 class TestActiveZeroLengthImage(TestSingleDrive):
     image_len = 0
+
+class TestReopenOverlay(ImageCommitTestCase):
+    image_len = 1024 * 1024
+    img0 = os.path.join(iotests.test_dir, '0.img')
+    img1 = os.path.join(iotests.test_dir, '1.img')
+    img2 = os.path.join(iotests.test_dir, '2.img')
+    img3 = os.path.join(iotests.test_dir, '3.img')
+
+    def setUp(self):
+        iotests.create_image(self.img0, self.image_len)
+        qemu_img('create', '-f', iotests.imgfmt, '-o', 'backing_file=%s' % self.img0, self.img1)
+        qemu_img('create', '-f', iotests.imgfmt, '-o', 'backing_file=%s' % self.img1, self.img2)
+        qemu_img('create', '-f', iotests.imgfmt, '-o', 'backing_file=%s' % self.img2, self.img3)
+        qemu_io('-f', iotests.imgfmt, '-c', 'write -P 0xab 0 128K', self.img1)
+        self.vm = iotests.VM().add_drive(self.img3)
+        self.vm.launch()
+
+    def tearDown(self):
+        self.vm.shutdown()
+        os.remove(self.img0)
+        os.remove(self.img1)
+        os.remove(self.img2)
+        os.remove(self.img3)
+
+    # This tests what happens when the overlay image of the 'top' node
+    # needs to be reopened in read-write mode in order to update the
+    # backing image string.
+    def test_reopen_overlay(self):
+        self.run_commit_test(self.img1, self.img0)
 
 if __name__ == '__main__':
     iotests.main(supported_fmts=['qcow2', 'qed'])

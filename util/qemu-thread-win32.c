@@ -10,11 +10,17 @@
  * See the COPYING file in the top-level directory.
  *
  */
+
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qemu/thread.h"
+#include "qemu/notify.h"
+#include "qemu-thread-common.h"
 #include <process.h>
-#include <assert.h>
-#include <limits.h>
 
 static bool name_threads;
 
@@ -39,188 +45,136 @@ static void error_exit(int err, const char *msg)
 
 void qemu_mutex_init(QemuMutex *mutex)
 {
-    mutex->owner = 0;
-    InitializeCriticalSection(&mutex->lock);
+    InitializeSRWLock(&mutex->lock);
+    qemu_mutex_post_init(mutex);
 }
 
 void qemu_mutex_destroy(QemuMutex *mutex)
 {
-    assert(mutex->owner == 0);
-    DeleteCriticalSection(&mutex->lock);
+    assert(mutex->initialized);
+    mutex->initialized = false;
+    InitializeSRWLock(&mutex->lock);
 }
 
-void qemu_mutex_lock(QemuMutex *mutex)
+void qemu_mutex_lock_impl(QemuMutex *mutex, const char *file, const int line)
 {
-    EnterCriticalSection(&mutex->lock);
-
-    /* Win32 CRITICAL_SECTIONs are recursive.  Assert that we're not
-     * using them as such.
-     */
-    assert(mutex->owner == 0);
-    mutex->owner = GetCurrentThreadId();
+    assert(mutex->initialized);
+    qemu_mutex_pre_lock(mutex, file, line);
+    AcquireSRWLockExclusive(&mutex->lock);
+    qemu_mutex_post_lock(mutex, file, line);
 }
 
-int qemu_mutex_trylock(QemuMutex *mutex)
+int qemu_mutex_trylock_impl(QemuMutex *mutex, const char *file, const int line)
 {
     int owned;
 
-    owned = TryEnterCriticalSection(&mutex->lock);
+    assert(mutex->initialized);
+    owned = TryAcquireSRWLockExclusive(&mutex->lock);
     if (owned) {
-        assert(mutex->owner == 0);
-        mutex->owner = GetCurrentThreadId();
+        qemu_mutex_post_lock(mutex, file, line);
+        return 0;
     }
-    return !owned;
+    return -EBUSY;
 }
 
-void qemu_mutex_unlock(QemuMutex *mutex)
+void qemu_mutex_unlock_impl(QemuMutex *mutex, const char *file, const int line)
 {
-    assert(mutex->owner == GetCurrentThreadId());
-    mutex->owner = 0;
+    assert(mutex->initialized);
+    qemu_mutex_pre_unlock(mutex, file, line);
+    ReleaseSRWLockExclusive(&mutex->lock);
+}
+
+void qemu_rec_mutex_init(QemuRecMutex *mutex)
+{
+    InitializeCriticalSection(&mutex->lock);
+    mutex->initialized = true;
+}
+
+void qemu_rec_mutex_destroy(QemuRecMutex *mutex)
+{
+    assert(mutex->initialized);
+    mutex->initialized = false;
+    DeleteCriticalSection(&mutex->lock);
+}
+
+void qemu_rec_mutex_lock_impl(QemuRecMutex *mutex, const char *file, int line)
+{
+    assert(mutex->initialized);
+    EnterCriticalSection(&mutex->lock);
+}
+
+int qemu_rec_mutex_trylock_impl(QemuRecMutex *mutex, const char *file, int line)
+{
+    assert(mutex->initialized);
+    return !TryEnterCriticalSection(&mutex->lock);
+}
+
+void qemu_rec_mutex_unlock(QemuRecMutex *mutex)
+{
+    assert(mutex->initialized);
     LeaveCriticalSection(&mutex->lock);
 }
 
 void qemu_cond_init(QemuCond *cond)
 {
     memset(cond, 0, sizeof(*cond));
-
-    cond->sema = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
-    if (!cond->sema) {
-        error_exit(GetLastError(), __func__);
-    }
-    cond->continue_event = CreateEvent(NULL,    /* security */
-                                       FALSE,   /* auto-reset */
-                                       FALSE,   /* not signaled */
-                                       NULL);   /* name */
-    if (!cond->continue_event) {
-        error_exit(GetLastError(), __func__);
-    }
+    InitializeConditionVariable(&cond->var);
+    cond->initialized = true;
 }
 
 void qemu_cond_destroy(QemuCond *cond)
 {
-    BOOL result;
-    result = CloseHandle(cond->continue_event);
-    if (!result) {
-        error_exit(GetLastError(), __func__);
-    }
-    cond->continue_event = 0;
-    result = CloseHandle(cond->sema);
-    if (!result) {
-        error_exit(GetLastError(), __func__);
-    }
-    cond->sema = 0;
+    assert(cond->initialized);
+    cond->initialized = false;
+    InitializeConditionVariable(&cond->var);
 }
 
 void qemu_cond_signal(QemuCond *cond)
 {
-    DWORD result;
-
-    /*
-     * Signal only when there are waiters.  cond->waiters is
-     * incremented by pthread_cond_wait under the external lock,
-     * so we are safe about that.
-     */
-    if (cond->waiters == 0) {
-        return;
-    }
-
-    /*
-     * Waiting threads decrement it outside the external lock, but
-     * only if another thread is executing pthread_cond_broadcast and
-     * has the mutex.  So, it also cannot be decremented concurrently
-     * with this particular access.
-     */
-    cond->target = cond->waiters - 1;
-    result = SignalObjectAndWait(cond->sema, cond->continue_event,
-                                 INFINITE, FALSE);
-    if (result == WAIT_ABANDONED || result == WAIT_FAILED) {
-        error_exit(GetLastError(), __func__);
-    }
+    assert(cond->initialized);
+    WakeConditionVariable(&cond->var);
 }
 
 void qemu_cond_broadcast(QemuCond *cond)
 {
-    BOOLEAN result;
-    /*
-     * As in pthread_cond_signal, access to cond->waiters and
-     * cond->target is locked via the external mutex.
-     */
-    if (cond->waiters == 0) {
-        return;
-    }
-
-    cond->target = 0;
-    result = ReleaseSemaphore(cond->sema, cond->waiters, NULL);
-    if (!result) {
-        error_exit(GetLastError(), __func__);
-    }
-
-    /*
-     * At this point all waiters continue. Each one takes its
-     * slice of the semaphore. Now it's our turn to wait: Since
-     * the external mutex is held, no thread can leave cond_wait,
-     * yet. For this reason, we can be sure that no thread gets
-     * a chance to eat *more* than one slice. OTOH, it means
-     * that the last waiter must send us a wake-up.
-     */
-    WaitForSingleObject(cond->continue_event, INFINITE);
+    assert(cond->initialized);
+    WakeAllConditionVariable(&cond->var);
 }
 
-void qemu_cond_wait(QemuCond *cond, QemuMutex *mutex)
+void qemu_cond_wait_impl(QemuCond *cond, QemuMutex *mutex, const char *file, const int line)
 {
-    /*
-     * This access is protected under the mutex.
-     */
-    cond->waiters++;
-
-    /*
-     * Unlock external mutex and wait for signal.
-     * NOTE: we've held mutex locked long enough to increment
-     * waiters count above, so there's no problem with
-     * leaving mutex unlocked before we wait on semaphore.
-     */
-    qemu_mutex_unlock(mutex);
-    WaitForSingleObject(cond->sema, INFINITE);
-
-    /* Now waiters must rendez-vous with the signaling thread and
-     * let it continue.  For cond_broadcast this has heavy contention
-     * and triggers thundering herd.  So goes life.
-     *
-     * Decrease waiters count.  The mutex is not taken, so we have
-     * to do this atomically.
-     *
-     * All waiters contend for the mutex at the end of this function
-     * until the signaling thread relinquishes it.  To ensure
-     * each waiter consumes exactly one slice of the semaphore,
-     * the signaling thread stops until it is told by the last
-     * waiter that it can go on.
-     */
-    if (InterlockedDecrement(&cond->waiters) == cond->target) {
-        SetEvent(cond->continue_event);
-    }
-
-    qemu_mutex_lock(mutex);
+    assert(cond->initialized);
+    qemu_mutex_pre_unlock(mutex, file, line);
+    SleepConditionVariableSRW(&cond->var, &mutex->lock, INFINITE, 0);
+    qemu_mutex_post_lock(mutex, file, line);
 }
 
 void qemu_sem_init(QemuSemaphore *sem, int init)
 {
     /* Manual reset.  */
     sem->sema = CreateSemaphore(NULL, init, LONG_MAX, NULL);
+    sem->initialized = true;
 }
 
 void qemu_sem_destroy(QemuSemaphore *sem)
 {
+    assert(sem->initialized);
+    sem->initialized = false;
     CloseHandle(sem->sema);
 }
 
 void qemu_sem_post(QemuSemaphore *sem)
 {
+    assert(sem->initialized);
     ReleaseSemaphore(sem->sema, 1, NULL);
 }
 
 int qemu_sem_timedwait(QemuSemaphore *sem, int ms)
 {
-    int rc = WaitForSingleObject(sem->sema, ms);
+    int rc;
+
+    assert(sem->initialized);
+    rc = WaitForSingleObject(sem->sema, ms);
     if (rc == WAIT_OBJECT_0) {
         return 0;
     }
@@ -232,35 +186,109 @@ int qemu_sem_timedwait(QemuSemaphore *sem, int ms)
 
 void qemu_sem_wait(QemuSemaphore *sem)
 {
+    assert(sem->initialized);
     if (WaitForSingleObject(sem->sema, INFINITE) != WAIT_OBJECT_0) {
         error_exit(GetLastError(), __func__);
     }
 }
 
+/* Wrap a Win32 manual-reset event with a fast userspace path.  The idea
+ * is to reset the Win32 event lazily, as part of a test-reset-test-wait
+ * sequence.  Such a sequence is, indeed, how QemuEvents are used by
+ * RCU and other subsystems!
+ *
+ * Valid transitions:
+ * - free->set, when setting the event
+ * - busy->set, when setting the event, followed by SetEvent
+ * - set->free, when resetting the event
+ * - free->busy, when waiting
+ *
+ * set->busy does not happen (it can be observed from the outside but
+ * it really is set->free->busy).
+ *
+ * busy->free provably cannot happen; to enforce it, the set->free transition
+ * is done with an OR, which becomes a no-op if the event has concurrently
+ * transitioned to free or busy (and is faster than cmpxchg).
+ */
+
+#define EV_SET         0
+#define EV_FREE        1
+#define EV_BUSY       -1
+
 void qemu_event_init(QemuEvent *ev, bool init)
 {
     /* Manual reset.  */
-    ev->event = CreateEvent(NULL, TRUE, init, NULL);
+    ev->event = CreateEvent(NULL, TRUE, TRUE, NULL);
+    ev->value = (init ? EV_SET : EV_FREE);
+    ev->initialized = true;
 }
 
 void qemu_event_destroy(QemuEvent *ev)
 {
+    assert(ev->initialized);
+    ev->initialized = false;
     CloseHandle(ev->event);
 }
 
 void qemu_event_set(QemuEvent *ev)
 {
-    SetEvent(ev->event);
+    assert(ev->initialized);
+    /* qemu_event_set has release semantics, but because it *loads*
+     * ev->value we need a full memory barrier here.
+     */
+    smp_mb();
+    if (atomic_read(&ev->value) != EV_SET) {
+        if (atomic_xchg(&ev->value, EV_SET) == EV_BUSY) {
+            /* There were waiters, wake them up.  */
+            SetEvent(ev->event);
+        }
+    }
 }
 
 void qemu_event_reset(QemuEvent *ev)
 {
-    ResetEvent(ev->event);
+    unsigned value;
+
+    assert(ev->initialized);
+    value = atomic_read(&ev->value);
+    smp_mb_acquire();
+    if (value == EV_SET) {
+        /* If there was a concurrent reset (or even reset+wait),
+         * do nothing.  Otherwise change EV_SET->EV_FREE.
+         */
+        atomic_or(&ev->value, EV_FREE);
+    }
 }
 
 void qemu_event_wait(QemuEvent *ev)
 {
-    WaitForSingleObject(ev->event, INFINITE);
+    unsigned value;
+
+    assert(ev->initialized);
+    value = atomic_read(&ev->value);
+    smp_mb_acquire();
+    if (value != EV_SET) {
+        if (value == EV_FREE) {
+            /* qemu_event_set is not yet going to call SetEvent, but we are
+             * going to do another check for EV_SET below when setting EV_BUSY.
+             * At that point it is safe to call WaitForSingleObject.
+             */
+            ResetEvent(ev->event);
+
+            /* Tell qemu_event_set that there are waiters.  No need to retry
+             * because there cannot be a concurent busy->free transition.
+             * After the CAS, the event will be either set or busy.
+             */
+            if (atomic_cmpxchg(&ev->value, EV_FREE, EV_BUSY) == EV_SET) {
+                value = EV_SET;
+            } else {
+                value = EV_BUSY;
+            }
+        }
+        if (value == EV_BUSY) {
+            WaitForSingleObject(ev->event, INFINITE);
+        }
+    }
 }
 
 struct QemuThreadData {
@@ -268,6 +296,7 @@ struct QemuThreadData {
     void             *(*start_routine)(void *);
     void             *arg;
     short             mode;
+    NotifierList      exit;
 
     /* Only used for joinable threads. */
     bool              exited;
@@ -275,7 +304,33 @@ struct QemuThreadData {
     CRITICAL_SECTION  cs;
 };
 
+static bool atexit_registered;
+static NotifierList main_thread_exit;
+
 static __thread QemuThreadData *qemu_thread_data;
+
+static void run_main_thread_exit(void)
+{
+    notifier_list_notify(&main_thread_exit, NULL);
+}
+
+void qemu_thread_atexit_add(Notifier *notifier)
+{
+    if (!qemu_thread_data) {
+        if (!atexit_registered) {
+            atexit_registered = true;
+            atexit(run_main_thread_exit);
+        }
+        notifier_list_add(&main_thread_exit, notifier);
+    } else {
+        notifier_list_add(&qemu_thread_data->exit, notifier);
+    }
+}
+
+void qemu_thread_atexit_remove(Notifier *notifier)
+{
+    notifier_remove(notifier);
+}
 
 static unsigned __stdcall win32_start_routine(void *arg)
 {
@@ -283,10 +338,6 @@ static unsigned __stdcall win32_start_routine(void *arg)
     void *(*start_routine)(void *) = data->start_routine;
     void *thread_arg = data->arg;
 
-    if (data->mode == QEMU_THREAD_DETACHED) {
-        g_free(data);
-        data = NULL;
-    }
     qemu_thread_data = data;
     qemu_thread_exit(start_routine(thread_arg));
     abort();
@@ -296,12 +347,14 @@ void qemu_thread_exit(void *arg)
 {
     QemuThreadData *data = qemu_thread_data;
 
-    if (data) {
-        assert(data->mode != QEMU_THREAD_DETACHED);
+    notifier_list_notify(&data->exit, NULL);
+    if (data->mode == QEMU_THREAD_JOINABLE) {
         data->ret = arg;
         EnterCriticalSection(&data->cs);
         data->exited = true;
         LeaveCriticalSection(&data->cs);
+    } else {
+        g_free(data);
     }
     _endthreadex(0);
 }
@@ -313,9 +366,10 @@ void *qemu_thread_join(QemuThread *thread)
     HANDLE handle;
 
     data = thread->data;
-    if (!data) {
+    if (data->mode == QEMU_THREAD_DETACHED) {
         return NULL;
     }
+
     /*
      * Because multiple copies of the QemuThread can exist via
      * qemu_thread_get_self, we need to store a value that cannot
@@ -329,7 +383,6 @@ void *qemu_thread_join(QemuThread *thread)
         CloseHandle(handle);
     }
     ret = data->ret;
-    assert(data->mode != QEMU_THREAD_DETACHED);
     DeleteCriticalSection(&data->cs);
     g_free(data);
     return ret;
@@ -347,6 +400,7 @@ void qemu_thread_create(QemuThread *thread, const char *name,
     data->arg = arg;
     data->mode = mode;
     data->exited = false;
+    notifier_list_init(&data->exit);
 
     if (data->mode != QEMU_THREAD_DETACHED) {
         InitializeCriticalSection(&data->cs);
@@ -358,7 +412,7 @@ void qemu_thread_create(QemuThread *thread, const char *name,
         error_exit(GetLastError(), __func__);
     }
     CloseHandle(hThread);
-    thread->data = (mode == QEMU_THREAD_DETACHED) ? NULL : data;
+    thread->data = data;
 }
 
 void qemu_thread_get_self(QemuThread *thread)
@@ -373,15 +427,14 @@ HANDLE qemu_thread_get_handle(QemuThread *thread)
     HANDLE handle;
 
     data = thread->data;
-    if (!data) {
+    if (data->mode == QEMU_THREAD_DETACHED) {
         return NULL;
     }
 
-    assert(data->mode != QEMU_THREAD_DETACHED);
     EnterCriticalSection(&data->cs);
     if (!data->exited) {
-        handle = OpenThread(SYNCHRONIZE | THREAD_SUSPEND_RESUME, FALSE,
-                            thread->tid);
+        handle = OpenThread(SYNCHRONIZE | THREAD_SUSPEND_RESUME |
+                            THREAD_SET_CONTEXT, FALSE, thread->tid);
     } else {
         handle = NULL;
     }

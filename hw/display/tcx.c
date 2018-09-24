@@ -22,11 +22,14 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "qemu-common.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
 #include "hw/loader.h"
 #include "hw/sysbus.h"
+#include "qemu/error-report.h"
 
 #define TCX_ROM_FILE "QEMU,tcx.bin"
 #define FCODE_MAX_ROM_SIZE 0x10000
@@ -89,41 +92,33 @@ typedef struct TCXState {
     uint16_t cursy;
 } TCXState;
 
-static void tcx_set_dirty(TCXState *s)
+static void tcx_set_dirty(TCXState *s, ram_addr_t addr, int len)
 {
-    memory_region_set_dirty(&s->vram_mem, 0, MAXX * MAXY);
+    memory_region_set_dirty(&s->vram_mem, addr, len);
+
+    if (s->depth == 24) {
+        memory_region_set_dirty(&s->vram_mem, s->vram24_offset + addr * 4,
+                                len * 4);
+        memory_region_set_dirty(&s->vram_mem, s->cplane_offset + addr * 4,
+                                len * 4);
+    }
 }
 
-static inline int tcx24_check_dirty(TCXState *s, ram_addr_t page,
-                                    ram_addr_t page24, ram_addr_t cpage)
+static int tcx_check_dirty(TCXState *s, DirtyBitmapSnapshot *snap,
+                           ram_addr_t addr, int len)
 {
     int ret;
 
-    ret = memory_region_get_dirty(&s->vram_mem, page, TARGET_PAGE_SIZE,
-                                  DIRTY_MEMORY_VGA);
-    ret |= memory_region_get_dirty(&s->vram_mem, page24, TARGET_PAGE_SIZE * 4,
-                                   DIRTY_MEMORY_VGA);
-    ret |= memory_region_get_dirty(&s->vram_mem, cpage, TARGET_PAGE_SIZE * 4,
-                                   DIRTY_MEMORY_VGA);
-    return ret;
-}
+    ret = memory_region_snapshot_get_dirty(&s->vram_mem, snap, addr, len);
 
-static inline void tcx24_reset_dirty(TCXState *ts, ram_addr_t page_min,
-                               ram_addr_t page_max, ram_addr_t page24,
-                              ram_addr_t cpage)
-{
-    memory_region_reset_dirty(&ts->vram_mem,
-                              page_min,
-                              (page_max - page_min) + TARGET_PAGE_SIZE,
-                              DIRTY_MEMORY_VGA);
-    memory_region_reset_dirty(&ts->vram_mem,
-                              page24 + page_min * 4,
-                              (page_max - page_min) * 4 + TARGET_PAGE_SIZE,
-                              DIRTY_MEMORY_VGA);
-    memory_region_reset_dirty(&ts->vram_mem,
-                              cpage + page_min * 4,
-                              (page_max - page_min) * 4 + TARGET_PAGE_SIZE,
-                              DIRTY_MEMORY_VGA);
+    if (s->depth == 24) {
+        ret |= memory_region_snapshot_get_dirty(&s->vram_mem, snap,
+                                       s->vram24_offset + addr * 4, len * 4);
+        ret |= memory_region_snapshot_get_dirty(&s->vram_mem, snap,
+                                       s->cplane_offset + addr * 4, len * 4);
+    }
+
+    return ret;
 }
 
 static void update_palette_entries(TCXState *s, int start, int end)
@@ -132,27 +127,13 @@ static void update_palette_entries(TCXState *s, int start, int end)
     int i;
 
     for (i = start; i < end; i++) {
-        switch (surface_bits_per_pixel(surface)) {
-        default:
-        case 8:
-            s->palette[i] = rgb_to_pixel8(s->r[i], s->g[i], s->b[i]);
-            break;
-        case 15:
-            s->palette[i] = rgb_to_pixel15(s->r[i], s->g[i], s->b[i]);
-            break;
-        case 16:
-            s->palette[i] = rgb_to_pixel16(s->r[i], s->g[i], s->b[i]);
-            break;
-        case 32:
-            if (is_surface_bgr(surface)) {
-                s->palette[i] = rgb_to_pixel32bgr(s->r[i], s->g[i], s->b[i]);
-            } else {
-                s->palette[i] = rgb_to_pixel32(s->r[i], s->g[i], s->b[i]);
-            }
-            break;
+        if (is_surface_bgr(surface)) {
+            s->palette[i] = rgb_to_pixel32bgr(s->r[i], s->g[i], s->b[i]);
+        } else {
+            s->palette[i] = rgb_to_pixel32(s->r[i], s->g[i], s->b[i]);
         }
     }
-    tcx_set_dirty(s);
+    tcx_set_dirty(s, 0, memory_region_size(&s->vram_mem));
 }
 
 static void tcx_draw_line32(TCXState *s1, uint8_t *d,
@@ -165,31 +146,6 @@ static void tcx_draw_line32(TCXState *s1, uint8_t *d,
     for (x = 0; x < width; x++) {
         val = *s++;
         *p++ = s1->palette[val];
-    }
-}
-
-static void tcx_draw_line16(TCXState *s1, uint8_t *d,
-                            const uint8_t *s, int width)
-{
-    int x;
-    uint8_t val;
-    uint16_t *p = (uint16_t *)d;
-
-    for (x = 0; x < width; x++) {
-        val = *s++;
-        *p++ = s1->palette[val];
-    }
-}
-
-static void tcx_draw_line8(TCXState *s1, uint8_t *d,
-                           const uint8_t *s, int width)
-{
-    int x;
-    uint8_t val;
-
-    for(x = 0; x < width; x++) {
-        val = *s++;
-        *d++ = s1->palette[val];
     }
 }
 
@@ -214,57 +170,6 @@ static void tcx_draw_cursor32(TCXState *s1, uint8_t *d,
             }
         }
         p++;
-        mask <<= 1;
-        bits <<= 1;
-    }
-}
-
-static void tcx_draw_cursor16(TCXState *s1, uint8_t *d,
-                              int y, int width)
-{
-    int x, len;
-    uint32_t mask, bits;
-    uint16_t *p = (uint16_t *)d;
-
-    y = y - s1->cursy;
-    mask = s1->cursmask[y];
-    bits = s1->cursbits[y];
-    len = MIN(width - s1->cursx, 32);
-    p = &p[s1->cursx];
-    for (x = 0; x < len; x++) {
-        if (mask & 0x80000000) {
-            if (bits & 0x80000000) {
-                *p = s1->palette[259];
-            } else {
-                *p = s1->palette[258];
-            }
-        }
-        p++;
-        mask <<= 1;
-        bits <<= 1;
-    }
-}
-
-static void tcx_draw_cursor8(TCXState *s1, uint8_t *d,
-                              int y, int width)
-{
-    int x, len;
-    uint32_t mask, bits;
-
-    y = y - s1->cursy;
-    mask = s1->cursmask[y];
-    bits = s1->cursbits[y];
-    len = MIN(width - s1->cursx, 32);
-    d = &d[s1->cursx];
-    for (x = 0; x < len; x++) {
-        if (mask & 0x80000000) {
-            if (bits & 0x80000000) {
-                *d = s1->palette[259];
-            } else {
-                *d = s1->palette[258];
-            }
-        }
-        d++;
         mask <<= 1;
         bits <<= 1;
     }
@@ -315,85 +220,35 @@ static void tcx_update_display(void *opaque)
 {
     TCXState *ts = opaque;
     DisplaySurface *surface = qemu_console_surface(ts->con);
-    ram_addr_t page, page_min, page_max;
+    ram_addr_t page;
+    DirtyBitmapSnapshot *snap = NULL;
     int y, y_start, dd, ds;
     uint8_t *d, *s;
-    void (*f)(TCXState *s1, uint8_t *dst, const uint8_t *src, int width);
-    void (*fc)(TCXState *s1, uint8_t *dst, int y, int width);
 
-    if (surface_bits_per_pixel(surface) == 0) {
+    if (surface_bits_per_pixel(surface) != 32) {
         return;
     }
 
     page = 0;
     y_start = -1;
-    page_min = -1;
-    page_max = 0;
     d = surface_data(surface);
     s = ts->vram;
     dd = surface_stride(surface);
     ds = 1024;
 
-    switch (surface_bits_per_pixel(surface)) {
-    case 32:
-        f = tcx_draw_line32;
-        fc = tcx_draw_cursor32;
-        break;
-    case 15:
-    case 16:
-        f = tcx_draw_line16;
-        fc = tcx_draw_cursor16;
-        break;
-    default:
-    case 8:
-        f = tcx_draw_line8;
-        fc = tcx_draw_cursor8;
-        break;
-    case 0:
-        return;
-    }
+    snap = memory_region_snapshot_and_clear_dirty(&ts->vram_mem, 0x0,
+                                             memory_region_size(&ts->vram_mem),
+                                             DIRTY_MEMORY_VGA);
 
-    for (y = 0; y < ts->height; page += TARGET_PAGE_SIZE) {
-        if (memory_region_get_dirty(&ts->vram_mem, page, TARGET_PAGE_SIZE,
-                                    DIRTY_MEMORY_VGA)) {
+    for (y = 0; y < ts->height; y++, page += ds) {
+        if (tcx_check_dirty(ts, snap, page, ds)) {
             if (y_start < 0)
                 y_start = y;
-            if (page < page_min)
-                page_min = page;
-            if (page > page_max)
-                page_max = page;
 
-            f(ts, d, s, ts->width);
+            tcx_draw_line32(ts, d, s, ts->width);
             if (y >= ts->cursy && y < ts->cursy + 32 && ts->cursx < ts->width) {
-                fc(ts, d, y, ts->width);
+                tcx_draw_cursor32(ts, d, y, ts->width);
             }
-            d += dd;
-            s += ds;
-            y++;
-
-            f(ts, d, s, ts->width);
-            if (y >= ts->cursy && y < ts->cursy + 32 && ts->cursx < ts->width) {
-                fc(ts, d, y, ts->width);
-            }
-            d += dd;
-            s += ds;
-            y++;
-
-            f(ts, d, s, ts->width);
-            if (y >= ts->cursy && y < ts->cursy + 32 && ts->cursx < ts->width) {
-                fc(ts, d, y, ts->width);
-            }
-            d += dd;
-            s += ds;
-            y++;
-
-            f(ts, d, s, ts->width);
-            if (y >= ts->cursy && y < ts->cursy + 32 && ts->cursx < ts->width) {
-                fc(ts, d, y, ts->width);
-            }
-            d += dd;
-            s += ds;
-            y++;
         } else {
             if (y_start >= 0) {
                 /* flush to display */
@@ -401,30 +256,24 @@ static void tcx_update_display(void *opaque)
                                ts->width, y - y_start);
                 y_start = -1;
             }
-            d += dd * 4;
-            s += ds * 4;
-            y += 4;
         }
+        s += ds;
+        d += dd;
     }
     if (y_start >= 0) {
         /* flush to display */
         dpy_gfx_update(ts->con, 0, y_start,
                        ts->width, y - y_start);
     }
-    /* reset modified pages */
-    if (page_max >= page_min) {
-        memory_region_reset_dirty(&ts->vram_mem,
-                                  page_min,
-                                  (page_max - page_min) + TARGET_PAGE_SIZE,
-                                  DIRTY_MEMORY_VGA);
-    }
+    g_free(snap);
 }
 
 static void tcx24_update_display(void *opaque)
 {
     TCXState *ts = opaque;
     DisplaySurface *surface = qemu_console_surface(ts->con);
-    ram_addr_t page, page_min, page_max, cpage, page24;
+    ram_addr_t page;
+    DirtyBitmapSnapshot *snap = NULL;
     int y, y_start, dd, ds;
     uint8_t *d, *s;
     uint32_t *cptr, *s24;
@@ -434,11 +283,7 @@ static void tcx24_update_display(void *opaque)
     }
 
     page = 0;
-    page24 = ts->vram24_offset;
-    cpage = ts->cplane_offset;
     y_start = -1;
-    page_min = -1;
-    page_max = 0;
     d = surface_data(surface);
     s = ts->vram;
     s24 = ts->vram24;
@@ -446,51 +291,19 @@ static void tcx24_update_display(void *opaque)
     dd = surface_stride(surface);
     ds = 1024;
 
-    for (y = 0; y < ts->height; page += TARGET_PAGE_SIZE,
-            page24 += TARGET_PAGE_SIZE, cpage += TARGET_PAGE_SIZE) {
-        if (tcx24_check_dirty(ts, page, page24, cpage)) {
+    snap = memory_region_snapshot_and_clear_dirty(&ts->vram_mem, 0x0,
+                                             memory_region_size(&ts->vram_mem),
+                                             DIRTY_MEMORY_VGA);
+
+    for (y = 0; y < ts->height; y++, page += ds) {
+        if (tcx_check_dirty(ts, snap, page, ds)) {
             if (y_start < 0)
                 y_start = y;
-            if (page < page_min)
-                page_min = page;
-            if (page > page_max)
-                page_max = page;
+
             tcx24_draw_line32(ts, d, s, ts->width, cptr, s24);
             if (y >= ts->cursy && y < ts->cursy+32 && ts->cursx < ts->width) {
                 tcx_draw_cursor32(ts, d, y, ts->width);
             }
-            d += dd;
-            s += ds;
-            cptr += ds;
-            s24 += ds;
-            y++;
-            tcx24_draw_line32(ts, d, s, ts->width, cptr, s24);
-            if (y >= ts->cursy && y < ts->cursy+32 && ts->cursx < ts->width) {
-                tcx_draw_cursor32(ts, d, y, ts->width);
-            }
-            d += dd;
-            s += ds;
-            cptr += ds;
-            s24 += ds;
-            y++;
-            tcx24_draw_line32(ts, d, s, ts->width, cptr, s24);
-            if (y >= ts->cursy && y < ts->cursy+32 && ts->cursx < ts->width) {
-                tcx_draw_cursor32(ts, d, y, ts->width);
-            }
-            d += dd;
-            s += ds;
-            cptr += ds;
-            s24 += ds;
-            y++;
-            tcx24_draw_line32(ts, d, s, ts->width, cptr, s24);
-            if (y >= ts->cursy && y < ts->cursy+32 && ts->cursx < ts->width) {
-                tcx_draw_cursor32(ts, d, y, ts->width);
-            }
-            d += dd;
-            s += ds;
-            cptr += ds;
-            s24 += ds;
-            y++;
         } else {
             if (y_start >= 0) {
                 /* flush to display */
@@ -498,29 +311,25 @@ static void tcx24_update_display(void *opaque)
                                ts->width, y - y_start);
                 y_start = -1;
             }
-            d += dd * 4;
-            s += ds * 4;
-            cptr += ds * 4;
-            s24 += ds * 4;
-            y += 4;
         }
+        d += dd;
+        s += ds;
+        cptr += ds;
+        s24 += ds;
     }
     if (y_start >= 0) {
         /* flush to display */
         dpy_gfx_update(ts->con, 0, y_start,
                        ts->width, y - y_start);
     }
-    /* reset modified pages */
-    if (page_max >= page_min) {
-        tcx24_reset_dirty(ts, page_min, page_max, page24, cpage);
-    }
+    g_free(snap);
 }
 
 static void tcx_invalidate_display(void *opaque)
 {
     TCXState *s = opaque;
 
-    tcx_set_dirty(s);
+    tcx_set_dirty(s, 0, memory_region_size(&s->vram_mem));
     qemu_console_resize(s->con, s->width, s->height);
 }
 
@@ -528,7 +337,7 @@ static void tcx24_invalidate_display(void *opaque)
 {
     TCXState *s = opaque;
 
-    tcx_set_dirty(s);
+    tcx_set_dirty(s, 0, memory_region_size(&s->vram_mem));
     qemu_console_resize(s->con, s->width, s->height);
 }
 
@@ -537,7 +346,7 @@ static int vmstate_tcx_post_load(void *opaque, int version_id)
     TCXState *s = opaque;
 
     update_palette_entries(s, 0, 256);
-    tcx_set_dirty(s);
+    tcx_set_dirty(s, 0, memory_region_size(&s->vram_mem));
     return 0;
 }
 
@@ -693,7 +502,7 @@ static void tcx_stip_writel(void *opaque, hwaddr addr,
                 val <<= 1;
             }
         }
-        memory_region_set_dirty(&s->vram_mem, addr, 32);
+        tcx_set_dirty(s, addr, 32);
     }
 }
 
@@ -726,7 +535,7 @@ static void tcx_rstip_writel(void *opaque, hwaddr addr,
                 val <<= 1;
             }
         }
-        memory_region_set_dirty(&s->vram_mem, addr, 32);
+        tcx_set_dirty(s, addr, 32);
     }
 }
 
@@ -784,7 +593,7 @@ static void tcx_blit_writel(void *opaque, hwaddr addr,
                 memcpy(&s->vram24[addr], &s->vram24[adsr], len * 4);
             }
         }
-        memory_region_set_dirty(&s->vram_mem, addr, len);
+        tcx_set_dirty(s, addr, len);
     }
 }
 
@@ -818,7 +627,7 @@ static void tcx_rblit_writel(void *opaque, hwaddr addr,
                 memcpy(&s->cplane[addr], &s->cplane[adsr], len * 4);
             }
         }
-        memory_region_set_dirty(&s->vram_mem, addr, len);
+        tcx_set_dirty(s, addr, len);
     }
 }
 
@@ -855,7 +664,7 @@ static void tcx_invalidate_cursor_position(TCXState *s)
     start = ymin * 1024;
     end   = ymax * 1024;
 
-    memory_region_set_dirty(&s->vram_mem, start, end-start);
+    tcx_set_dirty(s, start, end - start);
 }
 
 static uint64_t tcx_thc_readl(void *opaque, hwaddr addr,
@@ -941,57 +750,55 @@ static void tcx_initfn(Object *obj)
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
     TCXState *s = TCX(obj);
 
-    memory_region_init_ram(&s->rom, NULL, "tcx.prom", FCODE_MAX_ROM_SIZE,
-                           &error_abort);
+    memory_region_init_ram_nomigrate(&s->rom, obj, "tcx.prom", FCODE_MAX_ROM_SIZE,
+                           &error_fatal);
     memory_region_set_readonly(&s->rom, true);
     sysbus_init_mmio(sbd, &s->rom);
 
     /* 2/STIP : Stippler */
-    memory_region_init_io(&s->stip, OBJECT(s), &tcx_stip_ops, s, "tcx.stip",
+    memory_region_init_io(&s->stip, obj, &tcx_stip_ops, s, "tcx.stip",
                           TCX_STIP_NREGS);
     sysbus_init_mmio(sbd, &s->stip);
 
     /* 3/BLIT : Blitter */
-    memory_region_init_io(&s->blit, OBJECT(s), &tcx_blit_ops, s, "tcx.blit",
+    memory_region_init_io(&s->blit, obj, &tcx_blit_ops, s, "tcx.blit",
                           TCX_BLIT_NREGS);
     sysbus_init_mmio(sbd, &s->blit);
 
     /* 5/RSTIP : Raw Stippler */
-    memory_region_init_io(&s->rstip, OBJECT(s), &tcx_rstip_ops, s, "tcx.rstip",
+    memory_region_init_io(&s->rstip, obj, &tcx_rstip_ops, s, "tcx.rstip",
                           TCX_RSTIP_NREGS);
     sysbus_init_mmio(sbd, &s->rstip);
 
     /* 6/RBLIT : Raw Blitter */
-    memory_region_init_io(&s->rblit, OBJECT(s), &tcx_rblit_ops, s, "tcx.rblit",
+    memory_region_init_io(&s->rblit, obj, &tcx_rblit_ops, s, "tcx.rblit",
                           TCX_RBLIT_NREGS);
     sysbus_init_mmio(sbd, &s->rblit);
 
     /* 7/TEC : ??? */
-    memory_region_init_io(&s->tec, OBJECT(s), &tcx_dummy_ops, s,
-                          "tcx.tec", TCX_TEC_NREGS);
+    memory_region_init_io(&s->tec, obj, &tcx_dummy_ops, s, "tcx.tec",
+                          TCX_TEC_NREGS);
     sysbus_init_mmio(sbd, &s->tec);
 
     /* 8/CMAP : DAC */
-    memory_region_init_io(&s->dac, OBJECT(s), &tcx_dac_ops, s,
-                          "tcx.dac", TCX_DAC_NREGS);
+    memory_region_init_io(&s->dac, obj, &tcx_dac_ops, s, "tcx.dac",
+                          TCX_DAC_NREGS);
     sysbus_init_mmio(sbd, &s->dac);
 
     /* 9/THC : Cursor */
-    memory_region_init_io(&s->thc, OBJECT(s), &tcx_thc_ops, s, "tcx.thc",
+    memory_region_init_io(&s->thc, obj, &tcx_thc_ops, s, "tcx.thc",
                           TCX_THC_NREGS);
     sysbus_init_mmio(sbd, &s->thc);
 
     /* 11/DHC : ??? */
-    memory_region_init_io(&s->dhc, OBJECT(s), &tcx_dummy_ops, s, "tcx.dhc",
+    memory_region_init_io(&s->dhc, obj, &tcx_dummy_ops, s, "tcx.dhc",
                           TCX_DHC_NREGS);
     sysbus_init_mmio(sbd, &s->dhc);
 
     /* 12/ALT : ??? */
-    memory_region_init_io(&s->alt, OBJECT(s), &tcx_dummy_ops, s, "tcx.alt",
+    memory_region_init_io(&s->alt, obj, &tcx_dummy_ops, s, "tcx.alt",
                           TCX_ALT_NREGS);
     sysbus_init_mmio(sbd, &s->alt);
-
-    return;
 }
 
 static void tcx_realizefn(DeviceState *dev, Error **errp)
@@ -1003,17 +810,18 @@ static void tcx_realizefn(DeviceState *dev, Error **errp)
     uint8_t *vram_base;
     char *fcode_filename;
 
-    memory_region_init_ram(&s->vram_mem, OBJECT(s), "tcx.vram",
-                           s->vram_size * (1 + 4 + 4), &error_abort);
+    memory_region_init_ram_nomigrate(&s->vram_mem, OBJECT(s), "tcx.vram",
+                           s->vram_size * (1 + 4 + 4), &error_fatal);
     vmstate_register_ram_global(&s->vram_mem);
+    memory_region_set_log(&s->vram_mem, true, DIRTY_MEMORY_VGA);
     vram_base = memory_region_get_ram_ptr(&s->vram_mem);
 
     /* 10/ROM : FCode ROM */
     vmstate_register_ram_global(&s->rom);
     fcode_filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, TCX_ROM_FILE);
     if (fcode_filename) {
-        ret = load_image_targphys(fcode_filename, s->prom_addr,
-                                  FCODE_MAX_ROM_SIZE);
+        ret = load_image_mr(fcode_filename, &s->rom);
+        g_free(fcode_filename);
         if (ret < 0 || ret > FCODE_MAX_ROM_SIZE) {
             error_report("tcx: could not load prom '%s'", TCX_ROM_FILE);
         }
@@ -1070,7 +878,6 @@ static Property tcx_properties[] = {
     DEFINE_PROP_UINT16("width",    TCXState, width,     -1),
     DEFINE_PROP_UINT16("height",   TCXState, height,    -1),
     DEFINE_PROP_UINT16("depth",    TCXState, depth,     -1),
-    DEFINE_PROP_UINT64("prom_addr", TCXState, prom_addr, -1),
     DEFINE_PROP_END_OF_LIST(),
 };
 

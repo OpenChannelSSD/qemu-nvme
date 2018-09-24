@@ -11,8 +11,10 @@
  *
  */
 
-#include <glib.h>
-#include "block/coroutine.h"
+#include "qemu/osdep.h"
+#include "qemu/coroutine.h"
+#include "qemu/coroutine_int.h"
+#include "qemu/lockable.h"
 
 /*
  * Check that qemu_in_coroutine() works
@@ -29,8 +31,8 @@ static void test_in_coroutine(void)
 
     g_assert(!qemu_in_coroutine());
 
-    coroutine = qemu_coroutine_create(verify_in_coroutine);
-    qemu_coroutine_enter(coroutine, NULL);
+    coroutine = qemu_coroutine_create(verify_in_coroutine, NULL);
+    qemu_coroutine_enter(coroutine);
 }
 
 /*
@@ -39,15 +41,56 @@ static void test_in_coroutine(void)
 
 static void coroutine_fn verify_self(void *opaque)
 {
-    g_assert(qemu_coroutine_self() == opaque);
+    Coroutine **p_co = opaque;
+    g_assert(qemu_coroutine_self() == *p_co);
 }
 
 static void test_self(void)
 {
     Coroutine *coroutine;
 
-    coroutine = qemu_coroutine_create(verify_self);
-    qemu_coroutine_enter(coroutine, coroutine);
+    coroutine = qemu_coroutine_create(verify_self, &coroutine);
+    qemu_coroutine_enter(coroutine);
+}
+
+/*
+ * Check that qemu_coroutine_entered() works
+ */
+
+static void coroutine_fn verify_entered_step_2(void *opaque)
+{
+    Coroutine *caller = (Coroutine *)opaque;
+
+    g_assert(qemu_coroutine_entered(caller));
+    g_assert(qemu_coroutine_entered(qemu_coroutine_self()));
+    qemu_coroutine_yield();
+
+    /* Once more to check it still works after yielding */
+    g_assert(qemu_coroutine_entered(caller));
+    g_assert(qemu_coroutine_entered(qemu_coroutine_self()));
+}
+
+static void coroutine_fn verify_entered_step_1(void *opaque)
+{
+    Coroutine *self = qemu_coroutine_self();
+    Coroutine *coroutine;
+
+    g_assert(qemu_coroutine_entered(self));
+
+    coroutine = qemu_coroutine_create(verify_entered_step_2, self);
+    g_assert(!qemu_coroutine_entered(coroutine));
+    qemu_coroutine_enter(coroutine);
+    g_assert(!qemu_coroutine_entered(coroutine));
+    qemu_coroutine_enter(coroutine);
+}
+
+static void test_entered(void)
+{
+    Coroutine *coroutine;
+
+    coroutine = qemu_coroutine_create(verify_entered_step_1, NULL);
+    g_assert(!qemu_coroutine_entered(coroutine));
+    qemu_coroutine_enter(coroutine);
 }
 
 /*
@@ -69,8 +112,8 @@ static void coroutine_fn nest(void *opaque)
     if (nd->n_enter < nd->max) {
         Coroutine *child;
 
-        child = qemu_coroutine_create(nest);
-        qemu_coroutine_enter(child, nd);
+        child = qemu_coroutine_create(nest, nd);
+        qemu_coroutine_enter(child);
     }
 
     nd->n_return++;
@@ -85,8 +128,8 @@ static void test_nesting(void)
         .max      = 128,
     };
 
-    root = qemu_coroutine_create(nest);
-    qemu_coroutine_enter(root, &nd);
+    root = qemu_coroutine_create(nest, &nd);
+    qemu_coroutine_enter(root);
 
     /* Must enter and return from max nesting level */
     g_assert_cmpint(nd.n_enter, ==, nd.max);
@@ -114,12 +157,111 @@ static void test_yield(void)
     bool done = false;
     int i = -1; /* one extra time to return from coroutine */
 
-    coroutine = qemu_coroutine_create(yield_5_times);
+    coroutine = qemu_coroutine_create(yield_5_times, &done);
     while (!done) {
-        qemu_coroutine_enter(coroutine, &done);
+        qemu_coroutine_enter(coroutine);
         i++;
     }
     g_assert_cmpint(i, ==, 5); /* coroutine must yield 5 times */
+}
+
+static void coroutine_fn c2_fn(void *opaque)
+{
+    qemu_coroutine_yield();
+}
+
+static void coroutine_fn c1_fn(void *opaque)
+{
+    Coroutine *c2 = opaque;
+    qemu_coroutine_enter(c2);
+}
+
+static void test_no_dangling_access(void)
+{
+    Coroutine *c1;
+    Coroutine *c2;
+    Coroutine tmp;
+
+    c2 = qemu_coroutine_create(c2_fn, NULL);
+    c1 = qemu_coroutine_create(c1_fn, c2);
+
+    qemu_coroutine_enter(c1);
+
+    /* c1 shouldn't be used any more now; make sure we segfault if it is */
+    tmp = *c1;
+    memset(c1, 0xff, sizeof(Coroutine));
+    qemu_coroutine_enter(c2);
+
+    /* Must restore the coroutine now to avoid corrupted pool */
+    *c1 = tmp;
+}
+
+static bool locked;
+static int done;
+
+static void coroutine_fn mutex_fn(void *opaque)
+{
+    CoMutex *m = opaque;
+    qemu_co_mutex_lock(m);
+    assert(!locked);
+    locked = true;
+    qemu_coroutine_yield();
+    locked = false;
+    qemu_co_mutex_unlock(m);
+    done++;
+}
+
+static void coroutine_fn lockable_fn(void *opaque)
+{
+    QemuLockable *x = opaque;
+    qemu_lockable_lock(x);
+    assert(!locked);
+    locked = true;
+    qemu_coroutine_yield();
+    locked = false;
+    qemu_lockable_unlock(x);
+    done++;
+}
+
+static void do_test_co_mutex(CoroutineEntry *entry, void *opaque)
+{
+    Coroutine *c1 = qemu_coroutine_create(entry, opaque);
+    Coroutine *c2 = qemu_coroutine_create(entry, opaque);
+
+    done = 0;
+    qemu_coroutine_enter(c1);
+    g_assert(locked);
+    qemu_coroutine_enter(c2);
+
+    /* Unlock queues c2.  It is then started automatically when c1 yields or
+     * terminates.
+     */
+    qemu_coroutine_enter(c1);
+    g_assert_cmpint(done, ==, 1);
+    g_assert(locked);
+
+    qemu_coroutine_enter(c2);
+    g_assert_cmpint(done, ==, 2);
+    g_assert(!locked);
+}
+
+static void test_co_mutex(void)
+{
+    CoMutex m;
+
+    qemu_co_mutex_init(&m);
+    do_test_co_mutex(mutex_fn, &m);
+}
+
+static void test_co_mutex_lockable(void)
+{
+    CoMutex m;
+    CoMutex *null_pointer = NULL;
+
+    qemu_co_mutex_init(&m);
+    do_test_co_mutex(lockable_fn, QEMU_MAKE_LOCKABLE(&m));
+
+    g_assert(QEMU_MAKE_LOCKABLE(null_pointer) == NULL);
 }
 
 /*
@@ -139,14 +281,14 @@ static void test_lifecycle(void)
     bool done = false;
 
     /* Create, enter, and return from coroutine */
-    coroutine = qemu_coroutine_create(set_and_exit);
-    qemu_coroutine_enter(coroutine, &done);
+    coroutine = qemu_coroutine_create(set_and_exit, &done);
+    qemu_coroutine_enter(coroutine);
     g_assert(done); /* expect done to be true (first time) */
 
     /* Repeat to check that no state affects this test */
     done = false;
-    coroutine = qemu_coroutine_create(set_and_exit);
-    qemu_coroutine_enter(coroutine, &done);
+    coroutine = qemu_coroutine_create(set_and_exit, &done);
+    qemu_coroutine_enter(coroutine);
     g_assert(done); /* expect done to be true (second time) */
 }
 
@@ -180,12 +322,12 @@ static void do_order_test(void)
 {
     Coroutine *co;
 
-    co = qemu_coroutine_create(co_order_test);
+    co = qemu_coroutine_create(co_order_test, NULL);
     record_push(1, 1);
-    qemu_coroutine_enter(co, NULL);
+    qemu_coroutine_enter(co);
     record_push(1, 2);
     g_assert(!qemu_in_coroutine());
-    qemu_coroutine_enter(co, NULL);
+    qemu_coroutine_enter(co);
     record_push(1, 3);
     g_assert(!qemu_in_coroutine());
 }
@@ -222,8 +364,8 @@ static void perf_lifecycle(void)
 
     g_test_timer_start();
     for (i = 0; i < max; i++) {
-        coroutine = qemu_coroutine_create(empty_coroutine);
-        qemu_coroutine_enter(coroutine, NULL);
+        coroutine = qemu_coroutine_create(empty_coroutine, NULL);
+        qemu_coroutine_enter(coroutine);
     }
     duration = g_test_timer_elapsed();
 
@@ -246,8 +388,8 @@ static void perf_nesting(void)
             .n_return = 0,
             .max      = maxnesting,
         };
-        root = qemu_coroutine_create(nest);
-        qemu_coroutine_enter(root, &nd);
+        root = qemu_coroutine_create(nest, &nd);
+        qemu_coroutine_enter(root);
     }
     duration = g_test_timer_elapsed();
 
@@ -276,11 +418,11 @@ static void perf_yield(void)
 
     maxcycles = 100000000;
     i = maxcycles;
-    Coroutine *coroutine = qemu_coroutine_create(yield_loop);
+    Coroutine *coroutine = qemu_coroutine_create(yield_loop, &i);
 
     g_test_timer_start();
     while (i > 0) {
-        qemu_coroutine_enter(coroutine, &i);
+        qemu_coroutine_enter(coroutine);
     }
     duration = g_test_timer_elapsed();
 
@@ -326,9 +468,9 @@ static void perf_cost(void)
 
     g_test_timer_start();
     while (i++ < maxcycles) {
-        co = qemu_coroutine_create(perf_cost_func);
-        qemu_coroutine_enter(co, &i);
-        qemu_coroutine_enter(co, NULL);
+        co = qemu_coroutine_create(perf_cost_func, &i);
+        qemu_coroutine_enter(co);
+        qemu_coroutine_enter(co);
     }
     duration = g_test_timer_elapsed();
     ops = (long)(maxcycles / (duration * 1000));
@@ -337,18 +479,30 @@ static void perf_cost(void)
                    "%luns per coroutine",
                    maxcycles,
                    duration, ops,
-                   (unsigned long)(1000000000 * duration) / maxcycles);
+                   (unsigned long)(1000000000.0 * duration / maxcycles));
 }
 
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+
+    /* This test assumes there is a freelist and marks freed coroutine memory
+     * with a sentinel value.  If there is no freelist this would legitimately
+     * crash, so skip it.
+     */
+    if (CONFIG_COROUTINE_POOL) {
+        g_test_add_func("/basic/no-dangling-access", test_no_dangling_access);
+    }
+
     g_test_add_func("/basic/lifecycle", test_lifecycle);
     g_test_add_func("/basic/yield", test_yield);
     g_test_add_func("/basic/nesting", test_nesting);
     g_test_add_func("/basic/self", test_self);
+    g_test_add_func("/basic/entered", test_entered);
     g_test_add_func("/basic/in_coroutine", test_in_coroutine);
     g_test_add_func("/basic/order", test_order);
+    g_test_add_func("/locking/co-mutex", test_co_mutex);
+    g_test_add_func("/locking/co-mutex/lockable", test_co_mutex_lockable);
     if (g_test_perf()) {
         g_test_add_func("/perf/lifecycle", perf_lifecycle);
         g_test_add_func("/perf/nesting", perf_nesting);

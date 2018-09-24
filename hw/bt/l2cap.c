@@ -17,8 +17,11 @@
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
+#include "qemu/error-report.h"
 #include "qemu-common.h"
 #include "qemu/timer.h"
+#include "qemu/bswap.h"
 #include "hw/bt.h"
 
 #define L2CAP_CID_MAX	0x100	/* Between 0x40 and 0x10000 */
@@ -465,8 +468,8 @@ static void l2cap_channel_close(struct l2cap_instance_s *l2cap,
 
     if (likely(ch)) {
         if (ch->remote_cid != source_cid) {
-            fprintf(stderr, "%s: Ignoring a Disconnection Request with the "
-                            "invalid SCID %04x.\n", __FUNCTION__, source_cid);
+            error_report("%s: Ignoring a Disconnection Request with the "
+                            "invalid SCID %04x.", __func__, source_cid);
             return;
         }
 
@@ -524,9 +527,9 @@ static int l2cap_channel_config(struct l2cap_instance_s *l2cap,
             }
 
             /* MTU */
-            val = le16_to_cpup((void *) opt->val);
+            val = lduw_le_p(opt->val);
             if (val < ch->min_mtu) {
-                cpu_to_le16w((void *) opt->val, ch->min_mtu);
+                stw_le_p(opt->val, ch->min_mtu);
                 result = L2CAP_CONF_UNACCEPT;
                 break;
             }
@@ -541,7 +544,7 @@ static int l2cap_channel_config(struct l2cap_instance_s *l2cap,
             }
 
             /* Flush Timeout */
-            val = le16_to_cpup((void *) opt->val);
+            val = lduw_le_p(opt->val);
             if (val < 0x0001) {
                 opt->val[0] = 0xff;
                 opt->val[1] = 0xff;
@@ -788,8 +791,8 @@ static void l2cap_command(struct l2cap_instance_s *l2cap, int code, int id,
 #if 0
     /* TODO: do the IDs really have to be in sequence?  */
     if (!id || (id != l2cap->last_id && id != l2cap->next_id)) {
-        fprintf(stderr, "%s: out of sequence command packet ignored.\n",
-                        __FUNCTION__);
+        error_report("%s: out of sequence command packet ignored.",
+                        __func__);
         return;
     }
 #else
@@ -811,9 +814,9 @@ static void l2cap_command(struct l2cap_instance_s *l2cap, int code, int id,
         }
 
         /* We never issue commands other than Command Reject currently.  */
-        fprintf(stderr, "%s: stray Command Reject (%02x, %04x) "
-                        "packet, ignoring.\n", __FUNCTION__, id,
-                        le16_to_cpu(((l2cap_cmd_rej *) params)->reason));
+        error_report("%s: stray Command Reject (%02x, %04x) "
+                     "packet, ignoring.", __func__, id,
+                     le16_to_cpu(((l2cap_cmd_rej *) params)->reason));
         break;
 
     case L2CAP_CONN_REQ:
@@ -834,8 +837,8 @@ static void l2cap_command(struct l2cap_instance_s *l2cap, int code, int id,
         }
 
         /* We never issue Connection Requests currently. TODO  */
-        fprintf(stderr, "%s: unexpected Connection Response (%02x) "
-                        "packet, ignoring.\n", __FUNCTION__, id);
+        error_report("%s: unexpected Connection Response (%02x) "
+                     "packet, ignoring.", __func__, id);
         break;
 
     case L2CAP_CONF_REQ:
@@ -863,8 +866,8 @@ static void l2cap_command(struct l2cap_instance_s *l2cap, int code, int id,
                         le16_to_cpu(((l2cap_conf_rsp *) params)->scid),
                         ((l2cap_conf_rsp *) params)->data,
                         len - L2CAP_CONF_RSP_SIZE(0)))
-            fprintf(stderr, "%s: unexpected Configure Response (%02x) "
-                            "packet, ignoring.\n", __FUNCTION__, id);
+            error_report("%s: unexpected Configure Response (%02x) "
+                         "packet, ignoring.", __func__, id);
         break;
 
     case L2CAP_DISCONN_REQ:
@@ -885,8 +888,8 @@ static void l2cap_command(struct l2cap_instance_s *l2cap, int code, int id,
         }
 
         /* We never issue Disconnection Requests currently. TODO  */
-        fprintf(stderr, "%s: unexpected Disconnection Response (%02x) "
-                        "packet, ignoring.\n", __FUNCTION__, id);
+        error_report("%s: unexpected Disconnection Response (%02x) "
+                     "packet, ignoring.", __func__, id);
         break;
 
     case L2CAP_ECHO_REQ:
@@ -895,8 +898,8 @@ static void l2cap_command(struct l2cap_instance_s *l2cap, int code, int id,
 
     case L2CAP_ECHO_RSP:
         /* We never issue Echo Requests currently. TODO  */
-        fprintf(stderr, "%s: unexpected Echo Response (%02x) "
-                        "packet, ignoring.\n", __FUNCTION__, id);
+        error_report("%s: unexpected Echo Response (%02x) "
+                     "packet, ignoring.", __func__, id);
         break;
 
     case L2CAP_INFO_REQ:
@@ -915,8 +918,8 @@ static void l2cap_command(struct l2cap_instance_s *l2cap, int code, int id,
         }
 
         /* We never issue Information Requests currently. TODO  */
-        fprintf(stderr, "%s: unexpected Information Response (%02x) "
-                        "packet, ignoring.\n", __FUNCTION__, id);
+        error_report("%s: unexpected Information Response (%02x) "
+                     "packet, ignoring.", __func__, id);
         break;
 
     default:
@@ -985,7 +988,7 @@ static void l2cap_bframe_in(struct l2cap_chan_s *ch, uint16_t cid,
 static void l2cap_iframe_in(struct l2cap_chan_s *ch, uint16_t cid,
                 const l2cap_hdr *hdr, int len)
 {
-    uint16_t fcs = le16_to_cpup((void *) (hdr->data + len - 2));
+    uint16_t fcs = lduw_le_p(hdr->data + len - 2);
 
     if (len < 4)
         goto len_error;
@@ -1000,7 +1003,7 @@ static void l2cap_iframe_in(struct l2cap_chan_s *ch, uint16_t cid,
             /* TODO: Signal an error? */
             return;
         }
-        l2cap_sframe_in(ch, le16_to_cpup((void *) hdr->data));
+        l2cap_sframe_in(ch, lduw_le_p(hdr->data));
         return;
     }
 
@@ -1020,7 +1023,7 @@ static void l2cap_iframe_in(struct l2cap_chan_s *ch, uint16_t cid,
         if (len - 6 > ch->mps)
             goto len_error;
 
-        ch->len_total = le16_to_cpup((void *) (hdr->data + 2));
+        ch->len_total = lduw_le_p(hdr->data + 2);
         if (len >= 6 + ch->len_total)
             goto seg_error;
 
@@ -1064,8 +1067,8 @@ static void l2cap_frame_in(struct l2cap_instance_s *l2cap,
     uint16_t len = le16_to_cpu(frame->len);
 
     if (unlikely(cid >= L2CAP_CID_MAX || !l2cap->cid[cid])) {
-        fprintf(stderr, "%s: frame addressed to a non-existent L2CAP "
-                        "channel %04x received.\n", __FUNCTION__, cid);
+        error_report("%s: frame addressed to a non-existent L2CAP "
+                     "channel %04x received.", __func__, cid);
         return;
     }
 
@@ -1126,9 +1129,9 @@ static uint8_t *l2cap_bframe_out(struct bt_l2cap_conn_params_s *parm, int len)
     struct l2cap_chan_s *chan = (struct l2cap_chan_s *) parm;
 
     if (len > chan->params.remote_mtu) {
-        fprintf(stderr, "%s: B-Frame for CID %04x longer than %i octets.\n",
-                        __FUNCTION__,
-                        chan->remote_cid, chan->params.remote_mtu);
+        error_report("%s: B-Frame for CID %04x longer than %i octets.",
+                     __func__,
+                     chan->remote_cid, chan->params.remote_mtu);
         exit(-1);
     }
 
@@ -1351,8 +1354,8 @@ void bt_l2cap_psm_register(struct bt_l2cap_device_s *dev, int psm, int min_mtu,
     struct bt_l2cap_psm_s *new_psm = l2cap_psm(dev, psm);
 
     if (new_psm) {
-        fprintf(stderr, "%s: PSM %04x already registered for device `%s'.\n",
-                        __FUNCTION__, psm, dev->device.lmp_name);
+        error_report("%s: PSM %04x already registered for device `%s'.",
+                     __func__, psm, dev->device.lmp_name);
         exit(-1);
     }
 

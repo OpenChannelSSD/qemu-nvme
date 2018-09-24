@@ -23,10 +23,9 @@
  * THE SOFTWARE.
  */
 
-#include <assert.h>
-
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "hw/hw.h"
-#include "hw/i386/pc.h"
 #include "hw/ide.h"
 #include "hw/pci/pci.h"
 #include "hw/irq.h"
@@ -35,6 +34,7 @@
 #include "trace.h"
 #include "exec/address-spaces.h"
 #include "sysemu/block-backend.h"
+#include "qemu/error-report.h"
 
 #include <xenguest.h>
 
@@ -86,10 +86,30 @@ static void log_writeb(PCIXenPlatformState *s, char val)
     }
 }
 
-/* Xen Platform, Fixed IOPort */
-#define UNPLUG_ALL_IDE_DISKS 1
-#define UNPLUG_ALL_NICS 2
-#define UNPLUG_AUX_IDE_DISKS 4
+/*
+ * Unplug device flags.
+ *
+ * The logic got a little confused at some point in the past but this is
+ * what they do now.
+ *
+ * bit 0: Unplug all IDE and SCSI disks.
+ * bit 1: Unplug all NICs.
+ * bit 2: Unplug IDE disks except primary master. This is overridden if
+ *        bit 0 is also present in the mask.
+ * bit 3: Unplug all NVMe disks.
+ *
+ */
+#define _UNPLUG_IDE_SCSI_DISKS 0
+#define UNPLUG_IDE_SCSI_DISKS (1u << _UNPLUG_IDE_SCSI_DISKS)
+
+#define _UNPLUG_ALL_NICS 1
+#define UNPLUG_ALL_NICS (1u << _UNPLUG_ALL_NICS)
+
+#define _UNPLUG_AUX_IDE_DISKS 2
+#define UNPLUG_AUX_IDE_DISKS (1u << _UNPLUG_AUX_IDE_DISKS)
+
+#define _UNPLUG_NVME_DISKS 3
+#define UNPLUG_NVME_DISKS (1u << _UNPLUG_NVME_DISKS)
 
 static void unplug_nic(PCIBus *b, PCIDevice *d, void *o)
 {
@@ -101,24 +121,57 @@ static void unplug_nic(PCIBus *b, PCIDevice *d, void *o)
     }
 }
 
+/* Remove the peer of the NIC device. Normally, this would be a tap device. */
+static void del_nic_peer(NICState *nic, void *opaque)
+{
+    NetClientState *nc;
+
+    nc = qemu_get_queue(nic);
+    if (nc->peer)
+        qemu_del_net_client(nc->peer);
+}
+
 static void pci_unplug_nics(PCIBus *bus)
 {
+    qemu_foreach_nic(del_nic_peer, NULL);
     pci_for_each_device(bus, 0, unplug_nic, NULL);
 }
 
-static void unplug_disks(PCIBus *b, PCIDevice *d, void *o)
+static void unplug_disks(PCIBus *b, PCIDevice *d, void *opaque)
 {
+    uint32_t flags = *(uint32_t *)opaque;
+    bool aux = (flags & UNPLUG_AUX_IDE_DISKS) &&
+        !(flags & UNPLUG_IDE_SCSI_DISKS);
+
     /* We have to ignore passthrough devices */
-    if (pci_get_word(d->config + PCI_CLASS_DEVICE) ==
-            PCI_CLASS_STORAGE_IDE
-            && strcmp(d->name, "xen-pci-passthrough") != 0) {
-        pci_piix3_xen_ide_unplug(DEVICE(d));
+    if (!strcmp(d->name, "xen-pci-passthrough")) {
+        return;
+    }
+
+    switch (pci_get_word(d->config + PCI_CLASS_DEVICE)) {
+    case PCI_CLASS_STORAGE_IDE:
+        pci_piix3_xen_ide_unplug(DEVICE(d), aux);
+        break;
+
+    case PCI_CLASS_STORAGE_SCSI:
+        if (!aux) {
+            object_unparent(OBJECT(d));
+        }
+        break;
+
+    case PCI_CLASS_STORAGE_EXPRESS:
+        if (flags & UNPLUG_NVME_DISKS) {
+            object_unparent(OBJECT(d));
+        }
+
+    default:
+        break;
     }
 }
 
-static void pci_unplug_disks(PCIBus *bus)
+static void pci_unplug_disks(PCIBus *bus, uint32_t flags)
 {
-    pci_for_each_device(bus, 0, unplug_disks, NULL);
+    pci_for_each_device(bus, 0, unplug_disks, &flags);
 }
 
 static void platform_fixed_ioport_writew(void *opaque, uint32_t addr, uint32_t val)
@@ -128,21 +181,15 @@ static void platform_fixed_ioport_writew(void *opaque, uint32_t addr, uint32_t v
     switch (addr) {
     case 0: {
         PCIDevice *pci_dev = PCI_DEVICE(s);
-        /* Unplug devices.  Value is a bitmask of which devices to
-           unplug, with bit 0 the IDE devices, bit 1 the network
-           devices, and bit 2 the non-primary-master IDE devices. */
-        if (val & UNPLUG_ALL_IDE_DISKS) {
+        /* Unplug devices. See comment above flag definitions */
+        if (val & (UNPLUG_IDE_SCSI_DISKS | UNPLUG_AUX_IDE_DISKS |
+                   UNPLUG_NVME_DISKS)) {
             DPRINTF("unplug disks\n");
-            blk_drain_all();
-            blk_flush_all();
-            pci_unplug_disks(pci_dev->bus);
+            pci_unplug_disks(pci_get_bus(pci_dev), val);
         }
         if (val & UNPLUG_ALL_NICS) {
             DPRINTF("unplug nics\n");
-            pci_unplug_nics(pci_dev->bus);
-        }
-        if (val & UNPLUG_AUX_IDE_DISKS) {
-            DPRINTF("unplug auxiliary disks not supported\n");
+            pci_unplug_nics(pci_get_bus(pci_dev));
         }
         break;
     }
@@ -181,7 +228,7 @@ static void platform_fixed_ioport_writeb(void *opaque, uint32_t addr, uint32_t v
     case 0: /* Platform flags */ {
         hvmmem_type_t mem_type = (val & PFFLAG_ROM_LOCK) ?
             HVMMEM_ram_ro : HVMMEM_ram_rw;
-        if (xc_hvm_set_mem_type(xen_xc, xen_domid, mem_type, 0xc0, 0x40)) {
+        if (xen_set_mem_type(xen_domid, mem_type, 0xc0, 0x40)) {
             DPRINTF("unable to change ro/rw state of ROM memory area!\n");
         } else {
             s->flags = val & PFFLAG_ROM_LOCK;
@@ -308,13 +355,38 @@ static void xen_platform_ioport_writeb(void *opaque, hwaddr addr,
                                        uint64_t val, unsigned int size)
 {
     PCIXenPlatformState *s = opaque;
+    PCIDevice *pci_dev = PCI_DEVICE(s);
 
     switch (addr) {
     case 0: /* Platform flags */
         platform_fixed_ioport_writeb(opaque, 0, (uint32_t)val);
         break;
+    case 4:
+        if (val == 1) {
+            /*
+             * SUSE unplug for Xenlinux
+             * xen-kmp used this since xen-3.0.4, instead the official protocol
+             * from xen-3.3+ It did an unconditional "outl(1, (ioaddr + 4));"
+             * Pre VMDP 1.7 used 4 and 8 depending on how VMDP was configured.
+             * If VMDP was to control both disk and LAN it would use 4.
+             * If it controlled just disk or just LAN, it would use 8 below.
+             */
+            pci_unplug_disks(pci_get_bus(pci_dev), UNPLUG_IDE_SCSI_DISKS);
+            pci_unplug_nics(pci_get_bus(pci_dev));
+        }
+        break;
     case 8:
-        log_writeb(s, (uint32_t)val);
+        switch (val) {
+        case 1:
+            pci_unplug_disks(pci_get_bus(pci_dev), UNPLUG_IDE_SCSI_DISKS);
+            break;
+        case 2:
+            pci_unplug_nics(pci_get_bus(pci_dev));
+            break;
+        default:
+            log_writeb(s, (uint32_t)val);
+            break;
+        }
         break;
     default:
         break;
@@ -384,10 +456,16 @@ static const VMStateDescription vmstate_xen_platform = {
     }
 };
 
-static int xen_platform_initfn(PCIDevice *dev)
+static void xen_platform_realize(PCIDevice *dev, Error **errp)
 {
     PCIXenPlatformState *d = XEN_PLATFORM(dev);
     uint8_t *pci_conf;
+
+    /* Device will crash on reset if xen is not initialized */
+    if (!xen_enabled()) {
+        error_setg(errp, "xen-platform device requires the Xen accelerator");
+        return;
+    }
 
     pci_conf = dev->config;
 
@@ -406,8 +484,6 @@ static int xen_platform_initfn(PCIDevice *dev)
                      &d->mmio_bar);
 
     platform_fixed_ioport_init(d);
-
-    return 0;
 }
 
 static void platform_reset(DeviceState *dev)
@@ -422,7 +498,7 @@ static void xen_platform_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->init = xen_platform_initfn;
+    k->realize = xen_platform_realize;
     k->vendor_id = PCI_VENDOR_ID_XEN;
     k->device_id = PCI_DEVICE_ID_XEN_PLATFORM;
     k->class_id = PCI_CLASS_OTHERS << 8 | 0x80;
@@ -440,6 +516,10 @@ static const TypeInfo xen_platform_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(PCIXenPlatformState),
     .class_init    = xen_platform_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void xen_platform_register_types(void)

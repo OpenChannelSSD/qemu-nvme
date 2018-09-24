@@ -9,91 +9,162 @@
  * later.  See the COPYING file in the top-level directory.
  */
 
+#include "qemu/osdep.h"
 #include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "hw/block/block.h"
-#include "monitor/monitor.h"
-#include "qapi/qmp/qerror.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-block.h"
 #include "sysemu/sysemu.h"
-#include "qmp-commands.h"
-#include "trace.h"
 #include "block/nbd.h"
-#include "qemu/sockets.h"
+#include "io/channel-socket.h"
+#include "io/net-listener.h"
 
-static int server_fd = -1;
+typedef struct NBDServerData {
+    QIONetListener *listener;
+    QCryptoTLSCreds *tlscreds;
+} NBDServerData;
 
-static void nbd_accept(void *opaque)
+static NBDServerData *nbd_server;
+
+static void nbd_blockdev_client_closed(NBDClient *client, bool ignored)
 {
-    struct sockaddr_in addr;
-    socklen_t addr_len = sizeof(addr);
-
-    int fd = accept(server_fd, (struct sockaddr *)&addr, &addr_len);
-    if (fd >= 0 && !nbd_client_new(NULL, fd, nbd_client_put)) {
-        shutdown(fd, 2);
-        close(fd);
-    }
+    nbd_client_put(client);
 }
 
-void qmp_nbd_server_start(SocketAddress *addr, Error **errp)
+static void nbd_accept(QIONetListener *listener, QIOChannelSocket *cioc,
+                       gpointer opaque)
 {
-    if (server_fd != -1) {
+    qio_channel_set_name(QIO_CHANNEL(cioc), "nbd-server");
+    nbd_client_new(NULL, cioc,
+                   nbd_server->tlscreds, NULL,
+                   nbd_blockdev_client_closed);
+}
+
+
+static void nbd_server_free(NBDServerData *server)
+{
+    if (!server) {
+        return;
+    }
+
+    qio_net_listener_disconnect(server->listener);
+    object_unref(OBJECT(server->listener));
+    if (server->tlscreds) {
+        object_unref(OBJECT(server->tlscreds));
+    }
+
+    g_free(server);
+}
+
+static QCryptoTLSCreds *nbd_get_tls_creds(const char *id, Error **errp)
+{
+    Object *obj;
+    QCryptoTLSCreds *creds;
+
+    obj = object_resolve_path_component(
+        object_get_objects_root(), id);
+    if (!obj) {
+        error_setg(errp, "No TLS credentials with id '%s'",
+                   id);
+        return NULL;
+    }
+    creds = (QCryptoTLSCreds *)
+        object_dynamic_cast(obj, TYPE_QCRYPTO_TLS_CREDS);
+    if (!creds) {
+        error_setg(errp, "Object with id '%s' is not TLS credentials",
+                   id);
+        return NULL;
+    }
+
+    if (creds->endpoint != QCRYPTO_TLS_CREDS_ENDPOINT_SERVER) {
+        error_setg(errp,
+                   "Expecting TLS credentials with a server endpoint");
+        return NULL;
+    }
+    object_ref(obj);
+    return creds;
+}
+
+
+void nbd_server_start(SocketAddress *addr, const char *tls_creds,
+                      Error **errp)
+{
+    if (nbd_server) {
         error_setg(errp, "NBD server already running");
         return;
     }
 
-    server_fd = socket_listen(addr, errp);
-    if (server_fd != -1) {
-        qemu_set_fd_handler2(server_fd, NULL, nbd_accept, NULL, NULL);
+    nbd_server = g_new0(NBDServerData, 1);
+    nbd_server->listener = qio_net_listener_new();
+
+    qio_net_listener_set_name(nbd_server->listener,
+                              "nbd-listener");
+
+    if (qio_net_listener_open_sync(nbd_server->listener, addr, errp) < 0) {
+        goto error;
     }
+
+    if (tls_creds) {
+        nbd_server->tlscreds = nbd_get_tls_creds(tls_creds, errp);
+        if (!nbd_server->tlscreds) {
+            goto error;
+        }
+
+        /* TODO SOCKET_ADDRESS_TYPE_FD where fd has AF_INET or AF_INET6 */
+        if (addr->type != SOCKET_ADDRESS_TYPE_INET) {
+            error_setg(errp, "TLS is only supported with IPv4/IPv6");
+            goto error;
+        }
+    }
+
+    qio_net_listener_set_client_func(nbd_server->listener,
+                                     nbd_accept,
+                                     NULL,
+                                     NULL);
+
+    return;
+
+ error:
+    nbd_server_free(nbd_server);
+    nbd_server = NULL;
 }
 
-/* Hook into the BlockDriverState notifiers to close the export when
- * the file is closed.
- */
-typedef struct NBDCloseNotifier {
-    Notifier n;
-    NBDExport *exp;
-    QTAILQ_ENTRY(NBDCloseNotifier) next;
-} NBDCloseNotifier;
-
-static QTAILQ_HEAD(, NBDCloseNotifier) close_notifiers =
-    QTAILQ_HEAD_INITIALIZER(close_notifiers);
-
-static void nbd_close_notifier(Notifier *n, void *data)
+void qmp_nbd_server_start(SocketAddressLegacy *addr,
+                          bool has_tls_creds, const char *tls_creds,
+                          Error **errp)
 {
-    NBDCloseNotifier *cn = DO_UPCAST(NBDCloseNotifier, n, n);
+    SocketAddress *addr_flat = socket_address_flatten(addr);
 
-    notifier_remove(&cn->n);
-    QTAILQ_REMOVE(&close_notifiers, cn, next);
-
-    nbd_export_close(cn->exp);
-    nbd_export_put(cn->exp);
-    g_free(cn);
+    nbd_server_start(addr_flat, tls_creds, errp);
+    qapi_free_SocketAddress(addr_flat);
 }
 
-void qmp_nbd_server_add(const char *device, bool has_writable, bool writable,
-                        Error **errp)
+void qmp_nbd_server_add(const char *device, bool has_name, const char *name,
+                        bool has_writable, bool writable, Error **errp)
 {
-    BlockDriverState *bs;
+    BlockDriverState *bs = NULL;
+    BlockBackend *on_eject_blk;
     NBDExport *exp;
-    NBDCloseNotifier *n;
 
-    if (server_fd == -1) {
+    if (!nbd_server) {
         error_setg(errp, "NBD server not running");
         return;
     }
 
-    if (nbd_export_find(device)) {
-        error_setg(errp, "NBD server already exporting device '%s'", device);
+    if (!has_name) {
+        name = device;
+    }
+
+    if (nbd_export_find(name)) {
+        error_setg(errp, "NBD server already has export named '%s'", name);
         return;
     }
 
-    bs = bdrv_find(device);
+    on_eject_blk = blk_by_name(device);
+
+    bs = bdrv_lookup_bs(device, device, errp);
     if (!bs) {
-        error_set(errp, QERR_DEVICE_NOT_FOUND, device);
-        return;
-    }
-    if (!bdrv_is_inserted(bs)) {
-        error_set(errp, QERR_DEVICE_HAS_NO_MEDIUM, device);
         return;
     }
 
@@ -104,27 +175,71 @@ void qmp_nbd_server_add(const char *device, bool has_writable, bool writable,
         writable = false;
     }
 
-    exp = nbd_export_new(bs, 0, -1, writable ? 0 : NBD_FLAG_READ_ONLY, NULL);
+    exp = nbd_export_new(bs, 0, -1, writable ? 0 : NBD_FLAG_READ_ONLY,
+                         NULL, false, on_eject_blk, errp);
+    if (!exp) {
+        return;
+    }
 
-    nbd_export_set_name(exp, device);
+    nbd_export_set_name(exp, name);
 
-    n = g_new0(NBDCloseNotifier, 1);
-    n->n.notify = nbd_close_notifier;
-    n->exp = exp;
-    bdrv_add_close_notifier(bs, &n->n);
-    QTAILQ_INSERT_TAIL(&close_notifiers, n, next);
+    /* The list of named exports has a strong reference to this export now and
+     * our only way of accessing it is through nbd_export_find(), so we can drop
+     * the strong reference that is @exp. */
+    nbd_export_put(exp);
+}
+
+void qmp_nbd_server_remove(const char *name,
+                           bool has_mode, NbdServerRemoveMode mode,
+                           Error **errp)
+{
+    NBDExport *exp;
+
+    if (!nbd_server) {
+        error_setg(errp, "NBD server not running");
+        return;
+    }
+
+    exp = nbd_export_find(name);
+    if (exp == NULL) {
+        error_setg(errp, "Export '%s' is not found", name);
+        return;
+    }
+
+    if (!has_mode) {
+        mode = NBD_SERVER_REMOVE_MODE_SAFE;
+    }
+
+    nbd_export_remove(exp, mode, errp);
 }
 
 void qmp_nbd_server_stop(Error **errp)
 {
-    while (!QTAILQ_EMPTY(&close_notifiers)) {
-        NBDCloseNotifier *cn = QTAILQ_FIRST(&close_notifiers);
-        nbd_close_notifier(&cn->n, nbd_export_get_blockdev(cn->exp));
+    nbd_export_close_all();
+
+    nbd_server_free(nbd_server);
+    nbd_server = NULL;
+}
+
+void qmp_x_nbd_server_add_bitmap(const char *name, const char *bitmap,
+                                 bool has_bitmap_export_name,
+                                 const char *bitmap_export_name,
+                                 Error **errp)
+{
+    NBDExport *exp;
+
+    if (!nbd_server) {
+        error_setg(errp, "NBD server not running");
+        return;
     }
 
-    if (server_fd != -1) {
-        qemu_set_fd_handler2(server_fd, NULL, NULL, NULL, NULL);
-        close(server_fd);
-        server_fd = -1;
+    exp = nbd_export_find(name);
+    if (exp == NULL) {
+        error_setg(errp, "Export '%s' is not found", name);
+        return;
     }
+
+    nbd_export_bitmap(exp, bitmap,
+                      has_bitmap_export_name ? bitmap_export_name : bitmap,
+                      errp);
 }

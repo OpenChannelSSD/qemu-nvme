@@ -23,31 +23,35 @@
  * THE SOFTWARE.
  */
 
-#include <unistd.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <sys/types.h>
+#include "qemu/osdep.h"
 #include <sys/wait.h>
-/*needed for MAP_POPULATE before including qemu-options.h */
-#include <sys/mman.h>
 #include <pwd.h>
 #include <grp.h>
 #include <libgen.h>
 
 /* Needed early for CONFIG_BSD etc. */
-#include "config-host.h"
 #include "sysemu/sysemu.h"
 #include "net/slirp.h"
 #include "qemu-options.h"
+#include "qemu/error-report.h"
+#include "qemu/log.h"
+#include "qemu/cutils.h"
 
 #ifdef CONFIG_LINUX
 #include <sys/prctl.h>
 #endif
 
-static struct passwd *user_pwd;
+/*
+ * Must set all three of these at once.
+ * Legal combinations are              unset   by name   by uid
+ */
+static struct passwd *user_pwd;    /*   NULL   non-NULL   NULL   */
+static uid_t user_uid = (uid_t)-1; /*   -1      -1        >=0    */
+static gid_t user_gid = (gid_t)-1; /*   -1      -1        >=0    */
+
 static const char *chroot_dir;
 static int daemonize;
-static int fds[2];
+static int daemon_pipe;
 
 void os_setup_early_signal_handling(void)
 {
@@ -90,7 +94,7 @@ char *os_find_datadir(void)
     if (exec_dir == NULL) {
         return NULL;
     }
-    dir = dirname(exec_dir);
+    dir = g_path_get_dirname(exec_dir);
 
     max_len = strlen(dir) +
         MAX(strlen(SHARE_SUFFIX), strlen(BUILD_SUFFIX)) + 1;
@@ -104,6 +108,7 @@ char *os_find_datadir(void)
         }
     }
 
+    g_free(dir);
     g_free(exec_dir);
     return res;
 }
@@ -120,32 +125,66 @@ void os_set_proc_name(const char *s)
     /* Could rewrite argv[0] too, but that's a bit more complicated.
        This simple way is enough for `top'. */
     if (prctl(PR_SET_NAME, name)) {
-        perror("unable to change process name");
+        error_report("unable to change process name: %s", strerror(errno));
         exit(1);
     }
 #else
-    fprintf(stderr, "Change of process name not supported by your OS\n");
+    error_report("Change of process name not supported by your OS");
     exit(1);
 #endif
+}
+
+
+static bool os_parse_runas_uid_gid(const char *optarg)
+{
+    unsigned long lv;
+    const char *ep;
+    uid_t got_uid;
+    gid_t got_gid;
+    int rc;
+
+    rc = qemu_strtoul(optarg, &ep, 0, &lv);
+    got_uid = lv; /* overflow here is ID in C99 */
+    if (rc || *ep != ':' || got_uid != lv || got_uid == (uid_t)-1) {
+        return false;
+    }
+
+    rc = qemu_strtoul(ep + 1, 0, 0, &lv);
+    got_gid = lv; /* overflow here is ID in C99 */
+    if (rc || got_gid != lv || got_gid == (gid_t)-1) {
+        return false;
+    }
+
+    user_pwd = NULL;
+    user_uid = got_uid;
+    user_gid = got_gid;
+    return true;
 }
 
 /*
  * Parse OS specific command line options.
  * return 0 if option handled, -1 otherwise
  */
-void os_parse_cmd_args(int index, const char *optarg)
+int os_parse_cmd_args(int index, const char *optarg)
 {
     switch (index) {
 #ifdef CONFIG_SLIRP
     case QEMU_OPTION_smb:
+        error_report("The -smb option is deprecated. "
+                     "Please use '-netdev user,smb=...' instead.");
         if (net_slirp_smb(optarg) < 0)
             exit(1);
         break;
 #endif
     case QEMU_OPTION_runas:
         user_pwd = getpwnam(optarg);
-        if (!user_pwd) {
-            fprintf(stderr, "User \"%s\" doesn't exist\n", optarg);
+        if (user_pwd) {
+            user_uid = -1;
+            user_gid = -1;
+        } else if (!os_parse_runas_uid_gid(optarg)) {
+            error_report("User \"%s\" doesn't exist"
+                         " (and is not <uid>:<gid>)",
+                         optarg);
             exit(1);
         }
         break;
@@ -160,27 +199,45 @@ void os_parse_cmd_args(int index, const char *optarg)
         fips_set_state(true);
         break;
 #endif
+    default:
+        return -1;
     }
+
+    return 0;
 }
 
 static void change_process_uid(void)
 {
-    if (user_pwd) {
-        if (setgid(user_pwd->pw_gid) < 0) {
-            fprintf(stderr, "Failed to setgid(%d)\n", user_pwd->pw_gid);
+    assert((user_uid == (uid_t)-1) || user_pwd == NULL);
+    assert((user_uid == (uid_t)-1) ==
+           (user_gid == (gid_t)-1));
+
+    if (user_pwd || user_uid != (uid_t)-1) {
+        gid_t intended_gid = user_pwd ? user_pwd->pw_gid : user_gid;
+        uid_t intended_uid = user_pwd ? user_pwd->pw_uid : user_uid;
+        if (setgid(intended_gid) < 0) {
+            error_report("Failed to setgid(%d)", intended_gid);
             exit(1);
         }
-        if (initgroups(user_pwd->pw_name, user_pwd->pw_gid) < 0) {
-            fprintf(stderr, "Failed to initgroups(\"%s\", %d)\n",
-                    user_pwd->pw_name, user_pwd->pw_gid);
-            exit(1);
+        if (user_pwd) {
+            if (initgroups(user_pwd->pw_name, user_pwd->pw_gid) < 0) {
+                error_report("Failed to initgroups(\"%s\", %d)",
+                        user_pwd->pw_name, user_pwd->pw_gid);
+                exit(1);
+            }
+        } else {
+            if (setgroups(1, &user_gid) < 0) {
+                error_report("Failed to setgroups(1, [%d])",
+                        user_gid);
+                exit(1);
+            }
         }
-        if (setuid(user_pwd->pw_uid) < 0) {
-            fprintf(stderr, "Failed to setuid(%d)\n", user_pwd->pw_uid);
+        if (setuid(intended_uid) < 0) {
+            error_report("Failed to setuid(%d)", intended_uid);
             exit(1);
         }
         if (setuid(0) != -1) {
-            fprintf(stderr, "Dropping privileges failed\n");
+            error_report("Dropping privileges failed");
             exit(1);
         }
     }
@@ -190,11 +247,11 @@ static void change_root(void)
 {
     if (chroot_dir) {
         if (chroot(chroot_dir) < 0) {
-            fprintf(stderr, "chroot failed\n");
+            error_report("chroot failed");
             exit(1);
         }
         if (chdir("/")) {
-            perror("not able to chdir to /");
+            error_report("not able to chdir to /: %s", strerror(errno));
             exit(1);
         }
     }
@@ -205,6 +262,7 @@ void os_daemonize(void)
 {
     if (daemonize) {
         pid_t pid;
+        int fds[2];
 
         if (pipe(fds) == -1) {
             exit(1);
@@ -217,26 +275,21 @@ void os_daemonize(void)
 
             close(fds[1]);
 
-        again:
-            len = read(fds[0], &status, 1);
-            if (len == -1 && (errno == EINTR)) {
-                goto again;
-            }
-            if (len != 1) {
-                exit(1);
-            }
-            else if (status == 1) {
-                fprintf(stderr, "Could not acquire pidfile\n");
-                exit(1);
-            } else {
-                exit(0);
-            }
-            } else if (pid < 0) {
-                exit(1);
-            }
+            do {
+                len = read(fds[0], &status, 1);
+            } while (len < 0 && errno == EINTR);
+
+            /* only exit successfully if our child actually wrote
+             * a one-byte zero to our pipe, upon successful init */
+            exit(len == 1 && status == 0 ? 0 : 1);
+
+        } else if (pid < 0) {
+            exit(1);
+        }
 
         close(fds[0]);
-        qemu_set_cloexec(fds[1]);
+        daemon_pipe = fds[1];
+        qemu_set_cloexec(daemon_pipe);
 
         setsid();
 
@@ -259,19 +312,8 @@ void os_setup_post(void)
     int fd = 0;
 
     if (daemonize) {
-        uint8_t status = 0;
-        ssize_t len;
-
-    again1:
-        len = write(fds[1], &status, 1);
-        if (len == -1 && (errno == EINTR)) {
-            goto again1;
-        }
-        if (len != 1) {
-            exit(1);
-        }
         if (chdir("/")) {
-            perror("not able to chdir to /");
+            error_report("not able to chdir to /: %s", strerror(errno));
             exit(1);
         }
         TFR(fd = qemu_open("/dev/null", O_RDWR));
@@ -284,23 +326,25 @@ void os_setup_post(void)
     change_process_uid();
 
     if (daemonize) {
+        uint8_t status = 0;
+        ssize_t len;
+
         dup2(fd, 0);
         dup2(fd, 1);
-        dup2(fd, 2);
+        /* In case -D is given do not redirect stderr to /dev/null */
+        if (!qemu_logfile) {
+            dup2(fd, 2);
+        }
 
         close(fd);
-    }
-}
 
-void os_pidfile_error(void)
-{
-    if (daemonize) {
-        uint8_t status = 1;
-        if (write(fds[1], &status, 1) != 1) {
-            perror("daemonize. Writing to pipe\n");
+        do {        
+            len = write(daemon_pipe, &status, 1);
+        } while (len < 0 && errno == EINTR);
+        if (len != 1) {
+            exit(1);
         }
-    } else
-        fprintf(stderr, "Could not acquire pid file: %s\n", strerror(errno));
+    }
 }
 
 void os_set_line_buffering(void)
@@ -319,8 +363,6 @@ int qemu_create_pidfile(const char *filename)
         return -1;
     }
     if (lockf(fd, F_TLOCK, 0) == -1) {
-        fprintf(stderr, "lock file '%s' failed: %s\n",
-                filename, strerror(errno));
         close(fd);
         return -1;
     }
@@ -345,7 +387,7 @@ int os_mlock(void)
 
     ret = mlockall(MCL_CURRENT | MCL_FUTURE);
     if (ret < 0) {
-        perror("mlockall");
+        error_report("mlockall: %s", strerror(errno));
     }
 
     return ret;

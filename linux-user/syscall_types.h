@@ -14,6 +14,12 @@ STRUCT(serial_icounter_struct,
 STRUCT(sockaddr,
        TYPE_SHORT, MK_ARRAY(TYPE_CHAR, 14))
 
+STRUCT(timeval,
+       MK_ARRAY(TYPE_LONG, 2))
+
+STRUCT(timespec,
+       MK_ARRAY(TYPE_LONG, 2))
+
 STRUCT(rtentry,
        TYPE_ULONG, MK_STRUCT(STRUCT_sockaddr), MK_STRUCT(STRUCT_sockaddr), MK_STRUCT(STRUCT_sockaddr),
        TYPE_SHORT, TYPE_SHORT, TYPE_ULONG, TYPE_PTRVOID, TYPE_SHORT, TYPE_PTRVOID,
@@ -103,10 +109,11 @@ STRUCT(loop_info64,
        TYPE_ULONGLONG,           /* lo_inode */
        TYPE_ULONGLONG,           /* lo_rdevice */
        TYPE_ULONGLONG,           /* lo_offset */
-       TYPE_ULONG,               /* lo_number */
-       TYPE_ULONG,               /* lo_encrypt_type */
-       TYPE_ULONG,               /* lo_encrypt_key_size */
-       TYPE_ULONG,               /* lo_flags */
+       TYPE_ULONGLONG,           /* lo_sizelimit */
+       TYPE_INT,                 /* lo_number */
+       TYPE_INT,                 /* lo_encrypt_type */
+       TYPE_INT,                 /* lo_encrypt_key_size */
+       TYPE_INT,                 /* lo_flags */
        MK_ARRAY(TYPE_CHAR, 64),  /* lo_name */
        MK_ARRAY(TYPE_CHAR, 64),  /* lo_crypt_name */
        MK_ARRAY(TYPE_CHAR, 32),  /* lo_encrypt_key */
@@ -224,6 +231,12 @@ STRUCT(dm_target_versions,
 
 STRUCT(dm_target_msg,
        TYPE_ULONGLONG) /* sector */
+
+STRUCT(file_clone_range,
+       TYPE_LONGLONG, /* src_fd */
+       TYPE_ULONGLONG, /* src_offset */
+       TYPE_ULONGLONG, /* src_length */
+       TYPE_ULONGLONG) /* dest_offset */
 
 STRUCT(fiemap_extent,
        TYPE_ULONGLONG, /* fe_logical */

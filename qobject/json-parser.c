@@ -1,5 +1,5 @@
 /*
- * JSON Parser 
+ * JSON Parser
  *
  * Copyright IBM, Corp. 2009
  *
@@ -11,27 +11,32 @@
  *
  */
 
-#include <stdarg.h>
-
+#include "qemu/osdep.h"
+#include "qemu/cutils.h"
+#include "qemu/unicode.h"
+#include "qapi/error.h"
 #include "qemu-common.h"
-#include "qapi/qmp/qstring.h"
-#include "qapi/qmp/qint.h"
+#include "qapi/qmp/qbool.h"
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qlist.h"
-#include "qapi/qmp/qfloat.h"
-#include "qapi/qmp/qbool.h"
-#include "qapi/qmp/json-parser.h"
-#include "qapi/qmp/json-lexer.h"
-#include "qapi/qmp/qerror.h"
+#include "qapi/qmp/qnull.h"
+#include "qapi/qmp/qnum.h"
+#include "qapi/qmp/qstring.h"
+#include "json-parser-int.h"
+
+struct JSONToken {
+    JSONTokenType type;
+    int x;
+    int y;
+    char str[];
+};
 
 typedef struct JSONParserContext
 {
     Error *err;
-    struct {
-        QObject **buf;
-        size_t pos;
-        size_t count;
-    } tokens;
+    JSONToken *current;
+    GQueue *buf;
+    va_list *ap;
 } JSONParserContext;
 
 #define BUG_ON(cond) assert(!(cond))
@@ -45,327 +50,214 @@ typedef struct JSONParserContext
  * 4) deal with premature EOI
  */
 
-static QObject *parse_value(JSONParserContext *ctxt, va_list *ap);
-
-/**
- * Token manipulators
- *
- * tokens are dictionaries that contain a type, a string value, and geometry information
- * about a token identified by the lexer.  These are routines that make working with
- * these objects a bit easier.
- */
-static const char *token_get_value(QObject *obj)
-{
-    return qdict_get_str(qobject_to_qdict(obj), "token");
-}
-
-static JSONTokenType token_get_type(QObject *obj)
-{
-    return qdict_get_int(qobject_to_qdict(obj), "type");
-}
-
-static int token_is_operator(QObject *obj, char op)
-{
-    const char *val;
-
-    if (token_get_type(obj) != JSON_OPERATOR) {
-        return 0;
-    }
-
-    val = token_get_value(obj);
-
-    return (val[0] == op) && (val[1] == 0);
-}
-
-static int token_is_keyword(QObject *obj, const char *value)
-{
-    if (token_get_type(obj) != JSON_KEYWORD) {
-        return 0;
-    }
-
-    return strcmp(token_get_value(obj), value) == 0;
-}
-
-static int token_is_escape(QObject *obj, const char *value)
-{
-    if (token_get_type(obj) != JSON_ESCAPE) {
-        return 0;
-    }
-
-    return (strcmp(token_get_value(obj), value) == 0);
-}
+static QObject *parse_value(JSONParserContext *ctxt);
 
 /**
  * Error handler
  */
 static void GCC_FMT_ATTR(3, 4) parse_error(JSONParserContext *ctxt,
-                                           QObject *token, const char *msg, ...)
+                                           JSONToken *token, const char *msg, ...)
 {
     va_list ap;
     char message[1024];
+
+    if (ctxt->err) {
+        return;
+    }
     va_start(ap, msg);
     vsnprintf(message, sizeof(message), msg, ap);
     va_end(ap);
-    if (ctxt->err) {
-        error_free(ctxt->err);
-        ctxt->err = NULL;
-    }
     error_setg(&ctxt->err, "JSON parse error, %s", message);
 }
 
-/**
- * String helpers
- *
- * These helpers are used to unescape strings.
- */
-static void wchar_to_utf8(uint16_t wchar, char *buffer, size_t buffer_length)
+static int cvt4hex(const char *s)
 {
-    if (wchar <= 0x007F) {
-        BUG_ON(buffer_length < 2);
+    int cp, i;
 
-        buffer[0] = wchar & 0x7F;
-        buffer[1] = 0;
-    } else if (wchar <= 0x07FF) {
-        BUG_ON(buffer_length < 3);
-
-        buffer[0] = 0xC0 | ((wchar >> 6) & 0x1F);
-        buffer[1] = 0x80 | (wchar & 0x3F);
-        buffer[2] = 0;
-    } else {
-        BUG_ON(buffer_length < 4);
-
-        buffer[0] = 0xE0 | ((wchar >> 12) & 0x0F);
-        buffer[1] = 0x80 | ((wchar >> 6) & 0x3F);
-        buffer[2] = 0x80 | (wchar & 0x3F);
-        buffer[3] = 0;
+    cp = 0;
+    for (i = 0; i < 4; i++) {
+        if (!qemu_isxdigit(s[i])) {
+            return -1;
+        }
+        cp <<= 4;
+        if (s[i] >= '0' && s[i] <= '9') {
+            cp |= s[i] - '0';
+        } else if (s[i] >= 'a' && s[i] <= 'f') {
+            cp |= 10 + s[i] - 'a';
+        } else if (s[i] >= 'A' && s[i] <= 'F') {
+            cp |= 10 + s[i] - 'A';
+        } else {
+            return -1;
+        }
     }
-}
-
-static int hex2decimal(char ch)
-{
-    if (ch >= '0' && ch <= '9') {
-        return (ch - '0');
-    } else if (ch >= 'a' && ch <= 'f') {
-        return 10 + (ch - 'a');
-    } else if (ch >= 'A' && ch <= 'F') {
-        return 10 + (ch - 'A');
-    }
-
-    return -1;
+    return cp;
 }
 
 /**
- * parse_string(): Parse a json string and return a QObject
+ * parse_string(): Parse a JSON string
  *
- *  string
- *      ""
- *      " chars "
- *  chars
- *      char
- *      char chars
- *  char
- *      any-Unicode-character-
- *          except-"-or-\-or-
- *          control-character
- *      \"
- *      \\
- *      \/
- *      \b
- *      \f
- *      \n
- *      \r
- *      \t
- *      \u four-hex-digits 
+ * From RFC 8259 "The JavaScript Object Notation (JSON) Data
+ * Interchange Format":
+ *
+ *    char = unescaped /
+ *        escape (
+ *            %x22 /          ; "    quotation mark  U+0022
+ *            %x5C /          ; \    reverse solidus U+005C
+ *            %x2F /          ; /    solidus         U+002F
+ *            %x62 /          ; b    backspace       U+0008
+ *            %x66 /          ; f    form feed       U+000C
+ *            %x6E /          ; n    line feed       U+000A
+ *            %x72 /          ; r    carriage return U+000D
+ *            %x74 /          ; t    tab             U+0009
+ *            %x75 4HEXDIG )  ; uXXXX                U+XXXX
+ *    escape = %x5C              ; \
+ *    quotation-mark = %x22      ; "
+ *    unescaped = %x20-21 / %x23-5B / %x5D-10FFFF
+ *
+ * Extensions over RFC 8259:
+ * - Extra escape sequence in strings:
+ *   0x27 (apostrophe) is recognized after escape, too
+ * - Single-quoted strings:
+ *   Like double-quoted strings, except they're delimited by %x27
+ *   (apostrophe) instead of %x22 (quotation mark), and can't contain
+ *   unescaped apostrophe, but can contain unescaped quotation mark.
+ *
+ * Note:
+ * - Encoding is modified UTF-8.
+ * - Invalid Unicode characters are rejected.
+ * - Control characters \x00..\x1F are rejected by the lexer.
  */
-static QString *qstring_from_escaped_str(JSONParserContext *ctxt, QObject *token)
+static QString *parse_string(JSONParserContext *ctxt, JSONToken *token)
 {
-    const char *ptr = token_get_value(token);
+    const char *ptr = token->str;
     QString *str;
-    int double_quote = 1;
+    char quote;
+    const char *beg;
+    int cp, trailing;
+    char *end;
+    ssize_t len;
+    char utf8_buf[5];
 
-    if (*ptr == '"') {
-        double_quote = 1;
-    } else {
-        double_quote = 0;
-    }
-    ptr++;
-
+    assert(*ptr == '"' || *ptr == '\'');
+    quote = *ptr++;
     str = qstring_new();
-    while (*ptr && 
-           ((double_quote && *ptr != '"') || (!double_quote && *ptr != '\''))) {
-        if (*ptr == '\\') {
-            ptr++;
 
-            switch (*ptr) {
+    while (*ptr != quote) {
+        assert(*ptr);
+        switch (*ptr) {
+        case '\\':
+            beg = ptr++;
+            switch (*ptr++) {
             case '"':
-                qstring_append(str, "\"");
-                ptr++;
+                qstring_append_chr(str, '"');
                 break;
             case '\'':
-                qstring_append(str, "'");
-                ptr++;
+                qstring_append_chr(str, '\'');
                 break;
             case '\\':
-                qstring_append(str, "\\");
-                ptr++;
+                qstring_append_chr(str, '\\');
                 break;
             case '/':
-                qstring_append(str, "/");
-                ptr++;
+                qstring_append_chr(str, '/');
                 break;
             case 'b':
-                qstring_append(str, "\b");
-                ptr++;
+                qstring_append_chr(str, '\b');
                 break;
             case 'f':
-                qstring_append(str, "\f");
-                ptr++;
+                qstring_append_chr(str, '\f');
                 break;
             case 'n':
-                qstring_append(str, "\n");
-                ptr++;
+                qstring_append_chr(str, '\n');
                 break;
             case 'r':
-                qstring_append(str, "\r");
-                ptr++;
+                qstring_append_chr(str, '\r');
                 break;
             case 't':
-                qstring_append(str, "\t");
-                ptr++;
+                qstring_append_chr(str, '\t');
                 break;
-            case 'u': {
-                uint16_t unicode_char = 0;
-                char utf8_char[4];
-                int i = 0;
+            case 'u':
+                cp = cvt4hex(ptr);
+                ptr += 4;
 
-                ptr++;
-
-                for (i = 0; i < 4; i++) {
-                    if (qemu_isxdigit(*ptr)) {
-                        unicode_char |= hex2decimal(*ptr) << ((3 - i) * 4);
+                /* handle surrogate pairs */
+                if (cp >= 0xD800 && cp <= 0xDBFF
+                    && ptr[0] == '\\' && ptr[1] == 'u') {
+                    /* leading surrogate followed by \u */
+                    cp = 0x10000 + ((cp & 0x3FF) << 10);
+                    trailing = cvt4hex(ptr + 2);
+                    if (trailing >= 0xDC00 && trailing <= 0xDFFF) {
+                        /* followed by trailing surrogate */
+                        cp |= trailing & 0x3FF;
+                        ptr += 6;
                     } else {
-                        parse_error(ctxt, token,
-                                    "invalid hex escape sequence in string");
-                        goto out;
+                        cp = -1; /* invalid */
                     }
-                    ptr++;
                 }
 
-                wchar_to_utf8(unicode_char, utf8_char, sizeof(utf8_char));
-                qstring_append(str, utf8_char);
-            }   break;
+                if (mod_utf8_encode(utf8_buf, sizeof(utf8_buf), cp) < 0) {
+                    parse_error(ctxt, token,
+                                "%.*s is not a valid Unicode character",
+                                (int)(ptr - beg), beg);
+                    goto out;
+                }
+                qstring_append(str, utf8_buf);
+                break;
             default:
                 parse_error(ctxt, token, "invalid escape sequence in string");
                 goto out;
             }
-        } else {
-            char dummy[2];
-
-            dummy[0] = *ptr++;
-            dummy[1] = 0;
-
-            qstring_append(str, dummy);
+            break;
+        case '%':
+            if (ctxt->ap && ptr[1] != '%') {
+                parse_error(ctxt, token, "can't interpolate into string");
+                goto out;
+            }
+            ptr++;
+            /* fall through */
+        default:
+            cp = mod_utf8_codepoint(ptr, 6, &end);
+            if (cp < 0) {
+                parse_error(ctxt, token, "invalid UTF-8 sequence in string");
+                goto out;
+            }
+            ptr = end;
+            len = mod_utf8_encode(utf8_buf, sizeof(utf8_buf), cp);
+            assert(len >= 0);
+            qstring_append(str, utf8_buf);
         }
     }
 
     return str;
 
 out:
-    QDECREF(str);
+    qobject_unref(str);
     return NULL;
 }
 
-static QObject *parser_context_pop_token(JSONParserContext *ctxt)
-{
-    QObject *token;
-    g_assert(ctxt->tokens.pos < ctxt->tokens.count);
-    token = ctxt->tokens.buf[ctxt->tokens.pos];
-    ctxt->tokens.pos++;
-    return token;
-}
-
-/* Note: parser_context_{peek|pop}_token do not increment the
- * token object's refcount. In both cases the references will continue
- * to be tracked and cleaned up in parser_context_free(), so do not
- * attempt to free the token object.
+/* Note: the token object returned by parser_context_peek_token or
+ * parser_context_pop_token is deleted as soon as parser_context_pop_token
+ * is called again.
  */
-static QObject *parser_context_peek_token(JSONParserContext *ctxt)
+static JSONToken *parser_context_pop_token(JSONParserContext *ctxt)
 {
-    QObject *token;
-    g_assert(ctxt->tokens.pos < ctxt->tokens.count);
-    token = ctxt->tokens.buf[ctxt->tokens.pos];
-    return token;
+    g_free(ctxt->current);
+    ctxt->current = g_queue_pop_head(ctxt->buf);
+    return ctxt->current;
 }
 
-static JSONParserContext parser_context_save(JSONParserContext *ctxt)
+static JSONToken *parser_context_peek_token(JSONParserContext *ctxt)
 {
-    JSONParserContext saved_ctxt = {0};
-    saved_ctxt.tokens.pos = ctxt->tokens.pos;
-    saved_ctxt.tokens.count = ctxt->tokens.count;
-    saved_ctxt.tokens.buf = ctxt->tokens.buf;
-    return saved_ctxt;
-}
-
-static void parser_context_restore(JSONParserContext *ctxt,
-                                   JSONParserContext saved_ctxt)
-{
-    ctxt->tokens.pos = saved_ctxt.tokens.pos;
-    ctxt->tokens.count = saved_ctxt.tokens.count;
-    ctxt->tokens.buf = saved_ctxt.tokens.buf;
-}
-
-static void tokens_append_from_iter(QObject *obj, void *opaque)
-{
-    JSONParserContext *ctxt = opaque;
-    g_assert(ctxt->tokens.pos < ctxt->tokens.count);
-    ctxt->tokens.buf[ctxt->tokens.pos++] = obj;
-    qobject_incref(obj);
-}
-
-static JSONParserContext *parser_context_new(QList *tokens)
-{
-    JSONParserContext *ctxt;
-    size_t count;
-
-    if (!tokens) {
-        return NULL;
-    }
-
-    count = qlist_size(tokens);
-    if (count == 0) {
-        return NULL;
-    }
-
-    ctxt = g_malloc0(sizeof(JSONParserContext));
-    ctxt->tokens.pos = 0;
-    ctxt->tokens.count = count;
-    ctxt->tokens.buf = g_malloc(count * sizeof(QObject *));
-    qlist_iter(tokens, tokens_append_from_iter, ctxt);
-    ctxt->tokens.pos = 0;
-
-    return ctxt;
-}
-
-/* to support error propagation, ctxt->err must be freed separately */
-static void parser_context_free(JSONParserContext *ctxt)
-{
-    int i;
-    if (ctxt) {
-        for (i = 0; i < ctxt->tokens.count; i++) {
-            qobject_decref(ctxt->tokens.buf[i]);
-        }
-        g_free(ctxt->tokens.buf);
-        g_free(ctxt);
-    }
+    return g_queue_peek_head(ctxt->buf);
 }
 
 /**
  * Parsing rules
  */
-static int parse_pair(JSONParserContext *ctxt, QDict *dict, va_list *ap)
+static int parse_pair(JSONParserContext *ctxt, QDict *dict)
 {
-    QObject *key = NULL, *token = NULL, *value, *peek;
-    JSONParserContext saved_ctxt = parser_context_save(ctxt);
+    QObject *value;
+    QString *key = NULL;
+    JSONToken *peek, *token;
 
     peek = parser_context_peek_token(ctxt);
     if (peek == NULL) {
@@ -373,8 +265,8 @@ static int parse_pair(JSONParserContext *ctxt, QDict *dict, va_list *ap)
         goto out;
     }
 
-    key = parse_value(ctxt, ap);
-    if (!key || qobject_type(key) != QTYPE_QSTRING) {
+    key = qobject_to(QString, parse_value(ctxt));
+    if (!key) {
         parse_error(ctxt, peek, "key is not a string in object");
         goto out;
     }
@@ -385,44 +277,36 @@ static int parse_pair(JSONParserContext *ctxt, QDict *dict, va_list *ap)
         goto out;
     }
 
-    if (!token_is_operator(token, ':')) {
+    if (token->type != JSON_COLON) {
         parse_error(ctxt, token, "missing : in object pair");
         goto out;
     }
 
-    value = parse_value(ctxt, ap);
+    value = parse_value(ctxt);
     if (value == NULL) {
         parse_error(ctxt, token, "Missing value in dict");
         goto out;
     }
 
-    qdict_put_obj(dict, qstring_get_str(qobject_to_qstring(key)), value);
+    qdict_put_obj(dict, qstring_get_str(key), value);
 
-    qobject_decref(key);
+    qobject_unref(key);
 
     return 0;
 
 out:
-    parser_context_restore(ctxt, saved_ctxt);
-    qobject_decref(key);
+    qobject_unref(key);
 
     return -1;
 }
 
-static QObject *parse_object(JSONParserContext *ctxt, va_list *ap)
+static QObject *parse_object(JSONParserContext *ctxt)
 {
     QDict *dict = NULL;
-    QObject *token, *peek;
-    JSONParserContext saved_ctxt = parser_context_save(ctxt);
+    JSONToken *token, *peek;
 
     token = parser_context_pop_token(ctxt);
-    if (token == NULL) {
-        goto out;
-    }
-
-    if (!token_is_operator(token, '{')) {
-        goto out;
-    }
+    assert(token && token->type == JSON_LCURLY);
 
     dict = qdict_new();
 
@@ -432,8 +316,8 @@ static QObject *parse_object(JSONParserContext *ctxt, va_list *ap)
         goto out;
     }
 
-    if (!token_is_operator(peek, '}')) {
-        if (parse_pair(ctxt, dict, ap) == -1) {
+    if (peek->type != JSON_RCURLY) {
+        if (parse_pair(ctxt, dict) == -1) {
             goto out;
         }
 
@@ -443,13 +327,13 @@ static QObject *parse_object(JSONParserContext *ctxt, va_list *ap)
             goto out;
         }
 
-        while (!token_is_operator(token, '}')) {
-            if (!token_is_operator(token, ',')) {
+        while (token->type != JSON_RCURLY) {
+            if (token->type != JSON_COMMA) {
                 parse_error(ctxt, token, "expected separator in dict");
                 goto out;
             }
 
-            if (parse_pair(ctxt, dict, ap) == -1) {
+            if (parse_pair(ctxt, dict) == -1) {
                 goto out;
             }
 
@@ -466,25 +350,17 @@ static QObject *parse_object(JSONParserContext *ctxt, va_list *ap)
     return QOBJECT(dict);
 
 out:
-    parser_context_restore(ctxt, saved_ctxt);
-    QDECREF(dict);
+    qobject_unref(dict);
     return NULL;
 }
 
-static QObject *parse_array(JSONParserContext *ctxt, va_list *ap)
+static QObject *parse_array(JSONParserContext *ctxt)
 {
     QList *list = NULL;
-    QObject *token, *peek;
-    JSONParserContext saved_ctxt = parser_context_save(ctxt);
+    JSONToken *token, *peek;
 
     token = parser_context_pop_token(ctxt);
-    if (token == NULL) {
-        goto out;
-    }
-
-    if (!token_is_operator(token, '[')) {
-        goto out;
-    }
+    assert(token && token->type == JSON_LSQUARE);
 
     list = qlist_new();
 
@@ -494,10 +370,10 @@ static QObject *parse_array(JSONParserContext *ctxt, va_list *ap)
         goto out;
     }
 
-    if (!token_is_operator(peek, ']')) {
+    if (peek->type != JSON_RSQUARE) {
         QObject *obj;
 
-        obj = parse_value(ctxt, ap);
+        obj = parse_value(ctxt);
         if (obj == NULL) {
             parse_error(ctxt, token, "expecting value");
             goto out;
@@ -511,13 +387,13 @@ static QObject *parse_array(JSONParserContext *ctxt, va_list *ap)
             goto out;
         }
 
-        while (!token_is_operator(token, ']')) {
-            if (!token_is_operator(token, ',')) {
+        while (token->type != JSON_RSQUARE) {
+            if (token->type != JSON_COMMA) {
                 parse_error(ctxt, token, "expected separator in list");
                 goto out;
             }
 
-            obj = parse_value(ctxt, ap);
+            obj = parse_value(ctxt);
             if (obj == NULL) {
                 parse_error(ctxt, token, "expecting value");
                 goto out;
@@ -538,176 +414,171 @@ static QObject *parse_array(JSONParserContext *ctxt, va_list *ap)
     return QOBJECT(list);
 
 out:
-    parser_context_restore(ctxt, saved_ctxt);
-    QDECREF(list);
+    qobject_unref(list);
     return NULL;
 }
 
 static QObject *parse_keyword(JSONParserContext *ctxt)
 {
-    QObject *token, *ret;
-    JSONParserContext saved_ctxt = parser_context_save(ctxt);
+    JSONToken *token;
 
     token = parser_context_pop_token(ctxt);
-    if (token == NULL) {
-        goto out;
+    assert(token && token->type == JSON_KEYWORD);
+
+    if (!strcmp(token->str, "true")) {
+        return QOBJECT(qbool_from_bool(true));
+    } else if (!strcmp(token->str, "false")) {
+        return QOBJECT(qbool_from_bool(false));
+    } else if (!strcmp(token->str, "null")) {
+        return QOBJECT(qnull());
     }
-
-    if (token_get_type(token) != JSON_KEYWORD) {
-        goto out;
-    }
-
-    if (token_is_keyword(token, "true")) {
-        ret = QOBJECT(qbool_from_int(true));
-    } else if (token_is_keyword(token, "false")) {
-        ret = QOBJECT(qbool_from_int(false));
-    } else {
-        parse_error(ctxt, token, "invalid keyword `%s'", token_get_value(token));
-        goto out;
-    }
-
-    return ret;
-
-out: 
-    parser_context_restore(ctxt, saved_ctxt);
-
+    parse_error(ctxt, token, "invalid keyword '%s'", token->str);
     return NULL;
 }
 
-static QObject *parse_escape(JSONParserContext *ctxt, va_list *ap)
+static QObject *parse_interpolation(JSONParserContext *ctxt)
 {
-    QObject *token = NULL, *obj;
-    JSONParserContext saved_ctxt = parser_context_save(ctxt);
-
-    if (ap == NULL) {
-        goto out;
-    }
+    JSONToken *token;
 
     token = parser_context_pop_token(ctxt);
-    if (token == NULL) {
-        goto out;
+    assert(token && token->type == JSON_INTERP);
+
+    if (!strcmp(token->str, "%p")) {
+        return va_arg(*ctxt->ap, QObject *);
+    } else if (!strcmp(token->str, "%i")) {
+        return QOBJECT(qbool_from_bool(va_arg(*ctxt->ap, int)));
+    } else if (!strcmp(token->str, "%d")) {
+        return QOBJECT(qnum_from_int(va_arg(*ctxt->ap, int)));
+    } else if (!strcmp(token->str, "%ld")) {
+        return QOBJECT(qnum_from_int(va_arg(*ctxt->ap, long)));
+    } else if (!strcmp(token->str, "%lld")) {
+        return QOBJECT(qnum_from_int(va_arg(*ctxt->ap, long long)));
+    } else if (!strcmp(token->str, "%" PRId64)) {
+        return QOBJECT(qnum_from_int(va_arg(*ctxt->ap, int64_t)));
+    } else if (!strcmp(token->str, "%u")) {
+        return QOBJECT(qnum_from_uint(va_arg(*ctxt->ap, unsigned int)));
+    } else if (!strcmp(token->str, "%lu")) {
+        return QOBJECT(qnum_from_uint(va_arg(*ctxt->ap, unsigned long)));
+    } else if (!strcmp(token->str, "%llu")) {
+        return QOBJECT(qnum_from_uint(va_arg(*ctxt->ap, unsigned long long)));
+    } else if (!strcmp(token->str, "%" PRIu64)) {
+        return QOBJECT(qnum_from_uint(va_arg(*ctxt->ap, uint64_t)));
+    } else if (!strcmp(token->str, "%s")) {
+        return QOBJECT(qstring_from_str(va_arg(*ctxt->ap, const char *)));
+    } else if (!strcmp(token->str, "%f")) {
+        return QOBJECT(qnum_from_double(va_arg(*ctxt->ap, double)));
     }
-
-    if (token_is_escape(token, "%p")) {
-        obj = va_arg(*ap, QObject *);
-    } else if (token_is_escape(token, "%i")) {
-        obj = QOBJECT(qbool_from_int(va_arg(*ap, int)));
-    } else if (token_is_escape(token, "%d")) {
-        obj = QOBJECT(qint_from_int(va_arg(*ap, int)));
-    } else if (token_is_escape(token, "%ld")) {
-        obj = QOBJECT(qint_from_int(va_arg(*ap, long)));
-    } else if (token_is_escape(token, "%lld") ||
-               token_is_escape(token, "%I64d")) {
-        obj = QOBJECT(qint_from_int(va_arg(*ap, long long)));
-    } else if (token_is_escape(token, "%s")) {
-        obj = QOBJECT(qstring_from_str(va_arg(*ap, const char *)));
-    } else if (token_is_escape(token, "%f")) {
-        obj = QOBJECT(qfloat_from_double(va_arg(*ap, double)));
-    } else {
-        goto out;
-    }
-
-    return obj;
-
-out:
-    parser_context_restore(ctxt, saved_ctxt);
-
+    parse_error(ctxt, token, "invalid interpolation '%s'", token->str);
     return NULL;
 }
 
 static QObject *parse_literal(JSONParserContext *ctxt)
 {
-    QObject *token, *obj;
-    JSONParserContext saved_ctxt = parser_context_save(ctxt);
+    JSONToken *token;
 
     token = parser_context_pop_token(ctxt);
-    if (token == NULL) {
-        goto out;
-    }
+    assert(token);
 
-    switch (token_get_type(token)) {
+    switch (token->type) {
     case JSON_STRING:
-        obj = QOBJECT(qstring_from_escaped_str(ctxt, token));
-        break;
+        return QOBJECT(parse_string(ctxt, token));
     case JSON_INTEGER: {
-        /* A possibility exists that this is a whole-valued float where the
-         * fractional part was left out due to being 0 (.0). It's not a big
-         * deal to treat these as ints in the parser, so long as users of the
-         * resulting QObject know to expect a QInt in place of a QFloat in
-         * cases like these.
+        /*
+         * Represent JSON_INTEGER as QNUM_I64 if possible, else as
+         * QNUM_U64, else as QNUM_DOUBLE.  Note that qemu_strtoi64()
+         * and qemu_strtou64() fail with ERANGE when it's not
+         * possible.
          *
-         * However, in some cases these values will overflow/underflow a
-         * QInt/int64 container, thus we should assume these are to be handled
-         * as QFloats/doubles rather than silently changing their values.
-         *
-         * strtoll() indicates these instances by setting errno to ERANGE
+         * qnum_get_int() will then work for any signed 64-bit
+         * JSON_INTEGER, qnum_get_uint() for any unsigned 64-bit
+         * integer, and qnum_get_double() both for any JSON_INTEGER
+         * and any JSON_FLOAT (with precision loss for integers beyond
+         * 53 bits)
          */
+        int ret;
         int64_t value;
+        uint64_t uvalue;
 
-        errno = 0; /* strtoll doesn't set errno on success */
-        value = strtoll(token_get_value(token), NULL, 10);
-        if (errno != ERANGE) {
-            obj = QOBJECT(qint_from_int(value));
-            break;
+        ret = qemu_strtoi64(token->str, NULL, 10, &value);
+        if (!ret) {
+            return QOBJECT(qnum_from_int(value));
+        }
+        assert(ret == -ERANGE);
+
+        if (token->str[0] != '-') {
+            ret = qemu_strtou64(token->str, NULL, 10, &uvalue);
+            if (!ret) {
+                return QOBJECT(qnum_from_uint(uvalue));
+            }
+            assert(ret == -ERANGE);
         }
         /* fall through to JSON_FLOAT */
     }
     case JSON_FLOAT:
-        /* FIXME dependent on locale */
-        obj = QOBJECT(qfloat_from_double(strtod(token_get_value(token), NULL)));
-        break;
+        /* FIXME dependent on locale; a pervasive issue in QEMU */
+        /* FIXME our lexer matches RFC 8259 in forbidding Inf or NaN,
+         * but those might be useful extensions beyond JSON */
+        return QOBJECT(qnum_from_double(strtod(token->str, NULL)));
     default:
-        goto out;
+        abort();
     }
-
-    return obj;
-
-out:
-    parser_context_restore(ctxt, saved_ctxt);
-
-    return NULL;
 }
 
-static QObject *parse_value(JSONParserContext *ctxt, va_list *ap)
+static QObject *parse_value(JSONParserContext *ctxt)
 {
-    QObject *obj;
+    JSONToken *token;
 
-    obj = parse_object(ctxt, ap);
-    if (obj == NULL) {
-        obj = parse_array(ctxt, ap);
-    }
-    if (obj == NULL) {
-        obj = parse_escape(ctxt, ap);
-    }
-    if (obj == NULL) {
-        obj = parse_keyword(ctxt);
-    } 
-    if (obj == NULL) {
-        obj = parse_literal(ctxt);
-    }
-
-    return obj;
-}
-
-QObject *json_parser_parse(QList *tokens, va_list *ap)
-{
-    return json_parser_parse_err(tokens, ap, NULL);
-}
-
-QObject *json_parser_parse_err(QList *tokens, va_list *ap, Error **errp)
-{
-    JSONParserContext *ctxt = parser_context_new(tokens);
-    QObject *result;
-
-    if (!ctxt) {
+    token = parser_context_peek_token(ctxt);
+    if (token == NULL) {
+        parse_error(ctxt, NULL, "premature EOI");
         return NULL;
     }
 
-    result = parse_value(ctxt, ap);
+    switch (token->type) {
+    case JSON_LCURLY:
+        return parse_object(ctxt);
+    case JSON_LSQUARE:
+        return parse_array(ctxt);
+    case JSON_INTERP:
+        return parse_interpolation(ctxt);
+    case JSON_INTEGER:
+    case JSON_FLOAT:
+    case JSON_STRING:
+        return parse_literal(ctxt);
+    case JSON_KEYWORD:
+        return parse_keyword(ctxt);
+    default:
+        parse_error(ctxt, token, "expecting value");
+        return NULL;
+    }
+}
 
-    error_propagate(errp, ctxt->err);
+JSONToken *json_token(JSONTokenType type, int x, int y, GString *tokstr)
+{
+    JSONToken *token = g_malloc(sizeof(JSONToken) + tokstr->len + 1);
 
-    parser_context_free(ctxt);
+    token->type = type;
+    memcpy(token->str, tokstr->str, tokstr->len);
+    token->str[tokstr->len] = 0;
+    token->x = x;
+    token->y = y;
+    return token;
+}
+
+QObject *json_parser_parse(GQueue *tokens, va_list *ap, Error **errp)
+{
+    JSONParserContext ctxt = { .buf = tokens, .ap = ap };
+    QObject *result;
+
+    result = parse_value(&ctxt);
+    assert(ctxt.err || g_queue_is_empty(ctxt.buf));
+
+    error_propagate(errp, ctxt.err);
+
+    while (!g_queue_is_empty(ctxt.buf)) {
+        parser_context_pop_token(&ctxt);
+    }
+    g_free(ctxt.current);
 
     return result;
 }

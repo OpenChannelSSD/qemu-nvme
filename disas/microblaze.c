@@ -33,12 +33,9 @@ along with this program; if not, see <http://www.gnu.org/licenses/>. */
  */
 
 
-#include <stdio.h>
+#include "qemu/osdep.h"
 #define STATIC_TABLE
 #define DEFINE_TABLE
-
-#define TRUE   1
-#define FALSE  0
 
 #ifndef MICROBLAZE_OPC
 #define MICROBLAZE_OPC
@@ -162,7 +159,7 @@ enum microblaze_instr_type {
 #define MIN_PVR_REGNUM 0
 #define MAX_PVR_REGNUM 15
 
-#define REG_PC  32 /* PC */
+/* 32 is REG_PC */
 #define REG_MSR 33 /* machine status reg */
 #define REG_EAR 35 /* Exception reg */
 #define REG_ESR 37 /* Exception reg */
@@ -275,7 +272,7 @@ enum microblaze_instr_type {
 
 #define MAX_OPCODES 280
 
-struct op_code_struct {
+static const struct op_code_struct {
   const char *name;
   short inst_type; /* registers and immediate values involved */
   short inst_offset_type; /* immediate vals offset from PC? (= 1 for branches) */
@@ -567,10 +564,9 @@ struct op_code_struct {
 };
 
 /* prefix for register names */
-char register_prefix[] = "r";
-char special_register_prefix[] = "spr";
-char fsl_register_prefix[] = "rfsl";
-char pvr_register_prefix[] = "rpvr";
+static const char register_prefix[] = "r";
+static const char fsl_register_prefix[] = "rfsl";
+static const char pvr_register_prefix[] = "rpvr";
 
 
 /* #defines for valid immediate range */
@@ -583,7 +579,6 @@ char pvr_register_prefix[] = "rpvr";
 #endif /* MICROBLAZE_OPC */
 
 #include "disas/bfd.h"
-#include <strings.h>
 
 #define get_field_rd(instr) get_field(instr, RD_MASK, RD_LOW)
 #define get_field_r1(instr) get_field(instr, RA_MASK, RA_LOW)
@@ -601,29 +596,6 @@ static char * get_field_imm15 (long instr);
 #if 0
 static char * get_field_unsigned_imm (long instr);
 #endif
-char * get_field_special (long instr, struct op_code_struct * op);
-unsigned long read_insn_microblaze (bfd_vma memaddr, 
-		      struct disassemble_info *info,
-		      struct op_code_struct **opr);
-enum microblaze_instr get_insn_microblaze (long inst,
-  		     bfd_boolean *isunsignedimm,
-  		     enum microblaze_instr_type *insn_type,
-  		     short *delay_slots);
-short get_delay_slots_microblaze (long inst);
-enum microblaze_instr microblaze_decode_insn (long insn,
-		        int *rd, 
-			int *ra, 
-			int *rb, 
-			int *imm);
-unsigned long
-microblaze_get_target_address (long inst,
-			       bfd_boolean immfound,
-			       int immval,
-			       long pcval,
-			       long r1val,
-			       long r2val,
-			       bfd_boolean *targetvalid,
-			       bfd_boolean *unconditionalbranch);
 
 static char *
 get_field (long instr, long mask, unsigned short low)
@@ -688,8 +660,8 @@ get_field_unsigned_imm (long instr)
   }
 */
 
-char *
-get_field_special (long instr, struct op_code_struct * op)
+static char *
+get_field_special(long instr, const struct op_code_struct *op)
 {
    char tmpstr[25];
    char spr[6];
@@ -738,7 +710,9 @@ get_field_special (long instr, struct op_code_struct * op)
    default :
      {
        if ( ((((instr & IMM_MASK) >> IMM_LOW) ^ op->immval_mask) & 0xE000) == REG_PVR_MASK) {
-	 sprintf(tmpstr, "%spvr%d", register_prefix, (unsigned short)(((instr & IMM_MASK) >> IMM_LOW) ^ op->immval_mask) ^ REG_PVR_MASK);
+	  sprintf(tmpstr, "%s%u", pvr_register_prefix,
+                 (unsigned short)(((instr & IMM_MASK) >> IMM_LOW) ^
+                                  op->immval_mask) ^ REG_PVR_MASK);
 	 return(strdup(tmpstr));
        } else {
 	 strcpy(spr, "pc");
@@ -751,14 +725,14 @@ get_field_special (long instr, struct op_code_struct * op)
    return(strdup(tmpstr));
 }
 
-unsigned long
+static unsigned long
 read_insn_microblaze (bfd_vma memaddr, 
 		      struct disassemble_info *info,
-		      struct op_code_struct **opr)
+		      const struct op_code_struct **opr)
 {
   unsigned char       ibytes[4];
   int                 status;
-  struct op_code_struct * op;
+  const struct op_code_struct *op;
   unsigned long inst;
 
   status = info->read_memory_func (memaddr, ibytes, 4, info);
@@ -770,9 +744,11 @@ read_insn_microblaze (bfd_vma memaddr,
     }
 
   if (info->endian == BFD_ENDIAN_BIG)
-    inst = (ibytes[0] << 24) | (ibytes[1] << 16) | (ibytes[2] << 8) | ibytes[3];
+    inst = ((unsigned)ibytes[0] << 24) | (ibytes[1] << 16)
+      | (ibytes[2] << 8) | ibytes[3];
   else if (info->endian == BFD_ENDIAN_LITTLE)
-    inst = (ibytes[3] << 24) | (ibytes[2] << 16) | (ibytes[1] << 8) | ibytes[0];
+    inst = ((unsigned)ibytes[3] << 24) | (ibytes[2] << 16)
+      | (ibytes[1] << 8) | ibytes[0];
   else
     abort ();
 
@@ -792,7 +768,7 @@ print_insn_microblaze (bfd_vma memaddr, struct disassemble_info * info)
   fprintf_function    fprintf_func = info->fprintf_func;
   void *              stream = info->stream;
   unsigned long       inst, prev_inst;
-  struct op_code_struct * op, *pop;
+  const struct op_code_struct *op, *pop;
   int                 immval = 0;
   bfd_boolean         immfound = FALSE;
   static bfd_vma prev_insn_addr = -1; /*init the prev insn addr */
@@ -966,135 +942,4 @@ print_insn_microblaze (bfd_vma memaddr, struct disassemble_info * info)
   
   /* Say how many bytes we consumed? */
   return 4;
-}
-
-enum microblaze_instr
-get_insn_microblaze (long inst,
-  		     bfd_boolean *isunsignedimm,
-  		     enum microblaze_instr_type *insn_type,
-  		     short *delay_slots)
-{
-  struct op_code_struct * op;
-  *isunsignedimm = FALSE;
-
-  /* Just a linear search of the table.  */
-  for (op = opcodes; op->name != 0; op ++)
-    if (op->bit_sequence == (inst & op->opcode_mask))
-      break;
-
-  if (op->name == 0)
-    return invalid_inst;
-  else {
-    *isunsignedimm = (op->inst_type == INST_TYPE_RD_R1_UNSIGNED_IMM);
-    *insn_type = op->instr_type;
-    *delay_slots = op->delay_slots;
-    return op->instr;
-  }
-}
-
-short
-get_delay_slots_microblaze (long inst)
-{
-  bfd_boolean isunsignedimm;
-  enum microblaze_instr_type insn_type;
-  enum microblaze_instr op;
-  short delay_slots;
-
-  op = get_insn_microblaze( inst, &isunsignedimm, &insn_type, &delay_slots);
-  if (op == invalid_inst)
-    return 0;
-  else 
-    return delay_slots;
-}
-
-enum microblaze_instr
-microblaze_decode_insn (long insn,
-		        int *rd, 
-			int *ra, 
-			int *rb, 
-			int *imm)
-{
-  enum microblaze_instr op;
-  bfd_boolean t1;
-  enum microblaze_instr_type t2;
-  short t3;
-
-  op = get_insn_microblaze(insn, &t1, &t2, &t3);
-  *rd = (insn & RD_MASK) >> RD_LOW;
-  *ra = (insn & RA_MASK) >> RA_LOW;
-  *rb = (insn & RB_MASK) >> RB_LOW;
-  t3 = (insn & IMM_MASK) >> IMM_LOW;
-  *imm = (int) t3;
-  return (op);
-}
-
-unsigned long
-microblaze_get_target_address (long inst,
-			       bfd_boolean immfound,
-			       int immval,
-			       long pcval,
-			       long r1val,
-			       long r2val,
-			       bfd_boolean *targetvalid,
-			       bfd_boolean *unconditionalbranch)
-{
-  struct op_code_struct * op;
-  long targetaddr = 0;
-
-  *unconditionalbranch = FALSE;
-  /* Just a linear search of the table.  */
-  for (op = opcodes; op->name != 0; op ++)
-    if (op->bit_sequence == (inst & op->opcode_mask))
-      break;
-
-  if (op->name == 0) {
-    *targetvalid = FALSE;
-  } else if (op->instr_type == branch_inst) {
-    switch (op->inst_type) {
-    case INST_TYPE_R2:
-      *unconditionalbranch = TRUE;
-      /* fallthru */
-    case INST_TYPE_RD_R2:
-    case INST_TYPE_R1_R2:
-      targetaddr = r2val;
-      *targetvalid = TRUE;
-      if (op->inst_offset_type == INST_PC_OFFSET)
-	targetaddr += pcval;
-      break;
-    case INST_TYPE_IMM:
-      *unconditionalbranch = TRUE;
-      /* fallthru */
-    case INST_TYPE_RD_IMM:
-    case INST_TYPE_R1_IMM:
-      if (immfound) {
-	targetaddr = (immval << 16) & 0xffff0000;
-	targetaddr |= (get_int_field_imm(inst) & 0x0000ffff);
-      } else {
-	targetaddr = get_int_field_imm(inst);
-	if (targetaddr & 0x8000)
-	  targetaddr |= 0xFFFF0000;
-      }
-      if (op->inst_offset_type == INST_PC_OFFSET)
-	targetaddr += pcval;
-      *targetvalid = TRUE;
-      break;
-    default:
-      *targetvalid = FALSE;
-      break;
-    }
-  } else if (op->instr_type == return_inst) {
-      if (immfound) {
-	targetaddr = (immval << 16) & 0xffff0000;
-	targetaddr |= (get_int_field_imm(inst) & 0x0000ffff);
-      } else {
-	targetaddr = get_int_field_imm(inst);
-	if (targetaddr & 0x8000)
-	  targetaddr |= 0xFFFF0000;
-      }
-      targetaddr += r1val;
-      *targetvalid = TRUE;
-  } else {
-    *targetvalid = FALSE;
-  }
-  return targetaddr;
 }

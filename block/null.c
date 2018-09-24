@@ -10,10 +10,20 @@
  * See the COPYING file in the top-level directory.
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
+#include "qapi/qmp/qdict.h"
+#include "qapi/qmp/qstring.h"
+#include "qemu/option.h"
 #include "block/block_int.h"
+
+#define NULL_OPT_LATENCY "latency-ns"
+#define NULL_OPT_ZEROES  "read-zeroes"
 
 typedef struct {
     int64_t length;
+    int64_t latency_ns;
+    bool read_zeroes;
 } BDRVNullState;
 
 static QemuOptsList runtime_opts = {
@@ -21,35 +31,70 @@ static QemuOptsList runtime_opts = {
     .head = QTAILQ_HEAD_INITIALIZER(runtime_opts.head),
     .desc = {
         {
-            .name = "filename",
-            .type = QEMU_OPT_STRING,
-            .help = "",
-        },
-        {
             .name = BLOCK_OPT_SIZE,
             .type = QEMU_OPT_SIZE,
             .help = "size of the null block",
         },
+        {
+            .name = NULL_OPT_LATENCY,
+            .type = QEMU_OPT_NUMBER,
+            .help = "nanoseconds (approximated) to wait "
+                    "before completing request",
+        },
+        {
+            .name = NULL_OPT_ZEROES,
+            .type = QEMU_OPT_BOOL,
+            .help = "return zeroes when read",
+        },
         { /* end of list */ }
     },
 };
+
+static void null_co_parse_filename(const char *filename, QDict *options,
+                                   Error **errp)
+{
+    /* This functions only exists so that a null-co:// filename is accepted
+     * with the null-co driver. */
+    if (strcmp(filename, "null-co://")) {
+        error_setg(errp, "The only allowed filename for this driver is "
+                         "'null-co://'");
+        return;
+    }
+}
+
+static void null_aio_parse_filename(const char *filename, QDict *options,
+                                    Error **errp)
+{
+    /* This functions only exists so that a null-aio:// filename is accepted
+     * with the null-aio driver. */
+    if (strcmp(filename, "null-aio://")) {
+        error_setg(errp, "The only allowed filename for this driver is "
+                         "'null-aio://'");
+        return;
+    }
+}
 
 static int null_file_open(BlockDriverState *bs, QDict *options, int flags,
                           Error **errp)
 {
     QemuOpts *opts;
     BDRVNullState *s = bs->opaque;
+    int ret = 0;
 
     opts = qemu_opts_create(&runtime_opts, NULL, 0, &error_abort);
     qemu_opts_absorb_qdict(opts, options, &error_abort);
     s->length =
         qemu_opt_get_size(opts, BLOCK_OPT_SIZE, 1 << 30);
+    s->latency_ns =
+        qemu_opt_get_number(opts, NULL_OPT_LATENCY, 0);
+    if (s->latency_ns < 0) {
+        error_setg(errp, "latency-ns is invalid");
+        ret = -EINVAL;
+    }
+    s->read_zeroes = qemu_opt_get_bool(opts, NULL_OPT_ZEROES, false);
     qemu_opts_del(opts);
-    return 0;
-}
-
-static void null_close(BlockDriverState *bs)
-{
+    bs->supported_write_flags = BDRV_REQ_FUA;
+    return ret;
 }
 
 static int64_t null_getlength(BlockDriverState *bs)
@@ -58,28 +103,44 @@ static int64_t null_getlength(BlockDriverState *bs)
     return s->length;
 }
 
-static coroutine_fn int null_co_readv(BlockDriverState *bs,
-                                      int64_t sector_num, int nb_sectors,
-                                      QEMUIOVector *qiov)
+static coroutine_fn int null_co_common(BlockDriverState *bs)
 {
+    BDRVNullState *s = bs->opaque;
+
+    if (s->latency_ns) {
+        qemu_co_sleep_ns(QEMU_CLOCK_REALTIME, s->latency_ns);
+    }
     return 0;
 }
 
-static coroutine_fn int null_co_writev(BlockDriverState *bs,
-                                       int64_t sector_num, int nb_sectors,
-                                       QEMUIOVector *qiov)
+static coroutine_fn int null_co_preadv(BlockDriverState *bs,
+                                       uint64_t offset, uint64_t bytes,
+                                       QEMUIOVector *qiov, int flags)
 {
-    return 0;
+    BDRVNullState *s = bs->opaque;
+
+    if (s->read_zeroes) {
+        qemu_iovec_memset(qiov, 0, 0, bytes);
+    }
+
+    return null_co_common(bs);
+}
+
+static coroutine_fn int null_co_pwritev(BlockDriverState *bs,
+                                        uint64_t offset, uint64_t bytes,
+                                        QEMUIOVector *qiov, int flags)
+{
+    return null_co_common(bs);
 }
 
 static coroutine_fn int null_co_flush(BlockDriverState *bs)
 {
-    return 0;
+    return null_co_common(bs);
 }
 
 typedef struct {
     BlockAIOCB common;
-    QEMUBH *bh;
+    QEMUTimer timer;
 } NullAIOCB;
 
 static const AIOCBInfo null_aiocb_info = {
@@ -90,7 +151,14 @@ static void null_bh_cb(void *opaque)
 {
     NullAIOCB *acb = opaque;
     acb->common.cb(acb->common.opaque, 0);
-    qemu_bh_delete(acb->bh);
+    qemu_aio_unref(acb);
+}
+
+static void null_timer_cb(void *opaque)
+{
+    NullAIOCB *acb = opaque;
+    acb->common.cb(acb->common.opaque, 0);
+    timer_deinit(&acb->timer);
     qemu_aio_unref(acb);
 }
 
@@ -99,27 +167,42 @@ static inline BlockAIOCB *null_aio_common(BlockDriverState *bs,
                                           void *opaque)
 {
     NullAIOCB *acb;
+    BDRVNullState *s = bs->opaque;
 
     acb = qemu_aio_get(&null_aiocb_info, bs, cb, opaque);
-    acb->bh = aio_bh_new(bdrv_get_aio_context(bs), null_bh_cb, acb);
-    qemu_bh_schedule(acb->bh);
+    /* Only emulate latency after vcpu is running. */
+    if (s->latency_ns) {
+        aio_timer_init(bdrv_get_aio_context(bs), &acb->timer,
+                       QEMU_CLOCK_REALTIME, SCALE_NS,
+                       null_timer_cb, acb);
+        timer_mod_ns(&acb->timer,
+                     qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + s->latency_ns);
+    } else {
+        aio_bh_schedule_oneshot(bdrv_get_aio_context(bs), null_bh_cb, acb);
+    }
     return &acb->common;
 }
 
-static BlockAIOCB *null_aio_readv(BlockDriverState *bs,
-                                  int64_t sector_num, QEMUIOVector *qiov,
-                                  int nb_sectors,
-                                  BlockCompletionFunc *cb,
-                                  void *opaque)
+static BlockAIOCB *null_aio_preadv(BlockDriverState *bs,
+                                   uint64_t offset, uint64_t bytes,
+                                   QEMUIOVector *qiov, int flags,
+                                   BlockCompletionFunc *cb,
+                                   void *opaque)
 {
+    BDRVNullState *s = bs->opaque;
+
+    if (s->read_zeroes) {
+        qemu_iovec_memset(qiov, 0, 0, bytes);
+    }
+
     return null_aio_common(bs, cb, opaque);
 }
 
-static BlockAIOCB *null_aio_writev(BlockDriverState *bs,
-                                   int64_t sector_num, QEMUIOVector *qiov,
-                                   int nb_sectors,
-                                   BlockCompletionFunc *cb,
-                                   void *opaque)
+static BlockAIOCB *null_aio_pwritev(BlockDriverState *bs,
+                                    uint64_t offset, uint64_t bytes,
+                                    QEMUIOVector *qiov, int flags,
+                                    BlockCompletionFunc *cb,
+                                    void *opaque)
 {
     return null_aio_common(bs, cb, opaque);
 }
@@ -131,18 +214,61 @@ static BlockAIOCB *null_aio_flush(BlockDriverState *bs,
     return null_aio_common(bs, cb, opaque);
 }
 
+static int null_reopen_prepare(BDRVReopenState *reopen_state,
+                               BlockReopenQueue *queue, Error **errp)
+{
+    return 0;
+}
+
+static int coroutine_fn null_co_block_status(BlockDriverState *bs,
+                                             bool want_zero, int64_t offset,
+                                             int64_t bytes, int64_t *pnum,
+                                             int64_t *map,
+                                             BlockDriverState **file)
+{
+    BDRVNullState *s = bs->opaque;
+    int ret = BDRV_BLOCK_OFFSET_VALID;
+
+    *pnum = bytes;
+    *map = offset;
+    *file = bs;
+
+    if (s->read_zeroes) {
+        ret |= BDRV_BLOCK_ZERO;
+    }
+    return ret;
+}
+
+static void null_refresh_filename(BlockDriverState *bs, QDict *opts)
+{
+    qdict_del(opts, "filename");
+
+    if (!qdict_size(opts)) {
+        snprintf(bs->exact_filename, sizeof(bs->exact_filename), "%s://",
+                 bs->drv->format_name);
+    }
+
+    qdict_put_str(opts, "driver", bs->drv->format_name);
+    bs->full_open_options = qobject_ref(opts);
+}
+
 static BlockDriver bdrv_null_co = {
     .format_name            = "null-co",
     .protocol_name          = "null-co",
     .instance_size          = sizeof(BDRVNullState),
 
     .bdrv_file_open         = null_file_open,
-    .bdrv_close             = null_close,
+    .bdrv_parse_filename    = null_co_parse_filename,
     .bdrv_getlength         = null_getlength,
 
-    .bdrv_co_readv          = null_co_readv,
-    .bdrv_co_writev         = null_co_writev,
+    .bdrv_co_preadv         = null_co_preadv,
+    .bdrv_co_pwritev        = null_co_pwritev,
     .bdrv_co_flush_to_disk  = null_co_flush,
+    .bdrv_reopen_prepare    = null_reopen_prepare,
+
+    .bdrv_co_block_status   = null_co_block_status,
+
+    .bdrv_refresh_filename  = null_refresh_filename,
 };
 
 static BlockDriver bdrv_null_aio = {
@@ -151,12 +277,17 @@ static BlockDriver bdrv_null_aio = {
     .instance_size          = sizeof(BDRVNullState),
 
     .bdrv_file_open         = null_file_open,
-    .bdrv_close             = null_close,
+    .bdrv_parse_filename    = null_aio_parse_filename,
     .bdrv_getlength         = null_getlength,
 
-    .bdrv_aio_readv         = null_aio_readv,
-    .bdrv_aio_writev        = null_aio_writev,
+    .bdrv_aio_preadv        = null_aio_preadv,
+    .bdrv_aio_pwritev       = null_aio_pwritev,
     .bdrv_aio_flush         = null_aio_flush,
+    .bdrv_reopen_prepare    = null_reopen_prepare,
+
+    .bdrv_co_block_status   = null_co_block_status,
+
+    .bdrv_refresh_filename  = null_refresh_filename,
 };
 
 static void bdrv_null_init(void)

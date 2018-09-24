@@ -17,6 +17,7 @@
  * You should have received a copy of the GNU General Public License along
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "qemu/timer.h"
 #include "hw/arm/omap.h"
@@ -28,7 +29,8 @@ struct omap_synctimer_s {
 
 /* 32-kHz Sync Timer of the OMAP2 */
 static uint32_t omap_synctimer_read(struct omap_synctimer_s *s) {
-    return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 0x8000, get_ticks_per_sec());
+    return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 0x8000,
+                    NANOSECONDS_PER_SECOND);
 }
 
 void omap_synctimer_reset(struct omap_synctimer_s *s)
@@ -66,25 +68,32 @@ static uint32_t omap_synctimer_readh(void *opaque, hwaddr addr)
     }
 }
 
-static void omap_synctimer_write(void *opaque, hwaddr addr,
-                uint32_t value)
+static uint64_t omap_synctimer_readfn(void *opaque, hwaddr addr,
+                                      unsigned size)
+{
+    switch (size) {
+    case 1:
+        return omap_badwidth_read32(opaque, addr);
+    case 2:
+        return omap_synctimer_readh(opaque, addr);
+    case 4:
+        return omap_synctimer_readw(opaque, addr);
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void omap_synctimer_writefn(void *opaque, hwaddr addr,
+                                   uint64_t value, unsigned size)
 {
     OMAP_BAD_REG(addr);
 }
 
 static const MemoryRegionOps omap_synctimer_ops = {
-    .old_mmio = {
-        .read = {
-            omap_badwidth_read32,
-            omap_synctimer_readh,
-            omap_synctimer_readw,
-        },
-        .write = {
-            omap_badwidth_write32,
-            omap_synctimer_write,
-            omap_synctimer_write,
-        },
-    },
+    .read = omap_synctimer_readfn,
+    .write = omap_synctimer_writefn,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 

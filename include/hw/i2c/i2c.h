@@ -25,29 +25,49 @@ typedef struct I2CSlave I2CSlave;
 #define I2C_SLAVE_GET_CLASS(obj) \
      OBJECT_GET_CLASS(I2CSlaveClass, (obj), TYPE_I2C_SLAVE)
 
-typedef struct I2CSlaveClass
-{
+typedef struct I2CSlaveClass {
     DeviceClass parent_class;
 
-    /* Callbacks provided by the device.  */
-    int (*init)(I2CSlave *dev);
-
-    /* Master to slave.  */
+    /* Master to slave. Returns non-zero for a NAK, 0 for success. */
     int (*send)(I2CSlave *s, uint8_t data);
 
-    /* Slave to master.  */
+    /*
+     * Slave to master.  This cannot fail, the device should always
+     * return something here.  Negative values probably result in 0xff
+     * and a possible log from the driver, and shouldn't be used.
+     */
     int (*recv)(I2CSlave *s);
 
-    /* Notify the slave of a bus state change.  */
-    void (*event)(I2CSlave *s, enum i2c_event event);
+    /*
+     * Notify the slave of a bus state change.  For start event,
+     * returns non-zero to NAK an operation.  For other events the
+     * return code is not used and should be zero.
+     */
+    int (*event)(I2CSlave *s, enum i2c_event event);
 } I2CSlaveClass;
 
-struct I2CSlave
-{
+struct I2CSlave {
     DeviceState qdev;
 
     /* Remaining fields for internal use by the I2C code.  */
     uint8_t address;
+};
+
+#define TYPE_I2C_BUS "i2c-bus"
+#define I2C_BUS(obj) OBJECT_CHECK(I2CBus, (obj), TYPE_I2C_BUS)
+
+typedef struct I2CNode I2CNode;
+
+struct I2CNode {
+    I2CSlave *elt;
+    QLIST_ENTRY(I2CNode) next;
+};
+
+struct I2CBus {
+    BusState qbus;
+    QLIST_HEAD(, I2CNode) current_devs;
+    uint8_t saved_address;
+    bool broadcast;
 };
 
 I2CBus *i2c_init_bus(DeviceState *parent, const char *name);
@@ -56,19 +76,11 @@ int i2c_bus_busy(I2CBus *bus);
 int i2c_start_transfer(I2CBus *bus, uint8_t address, int recv);
 void i2c_end_transfer(I2CBus *bus);
 void i2c_nack(I2CBus *bus);
+int i2c_send_recv(I2CBus *bus, uint8_t *data, bool send);
 int i2c_send(I2CBus *bus, uint8_t data);
 int i2c_recv(I2CBus *bus);
 
 DeviceState *i2c_create_slave(I2CBus *bus, const char *name, uint8_t addr);
-
-/* wm8750.c */
-void wm8750_data_req_set(DeviceState *dev,
-                void (*data_req)(void *, int, int), void *opaque);
-void wm8750_dac_dat(void *opaque, uint32_t sample);
-uint32_t wm8750_adc_dat(void *opaque);
-void *wm8750_dac_buffer(void *opaque, int samples);
-void wm8750_dac_commit(void *opaque);
-void wm8750_set_bclk_in(void *opaque, int new_hz);
 
 /* lm832x.c */
 void lm832x_key_event(DeviceState *dev, int key, int state);

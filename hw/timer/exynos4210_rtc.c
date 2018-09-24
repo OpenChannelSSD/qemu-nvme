@@ -25,9 +25,12 @@
  *  CLKOUTEN Bit[9] not used
  */
 
+#include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "hw/sysbus.h"
 #include "qemu/timer.h"
 #include "qemu-common.h"
+#include "qemu/bcd.h"
 #include "hw/ptimer.h"
 
 #include "hw/hw.h"
@@ -368,9 +371,9 @@ static uint64_t exynos4210_rtc_read(void *opaque, hwaddr offset,
         break;
 
     default:
-        fprintf(stderr,
-                "[exynos4210.rtc: bad read offset " TARGET_FMT_plx "]\n",
-                offset);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "exynos4210.rtc: bad read offset " TARGET_FMT_plx,
+                      offset);
         break;
     }
     return value;
@@ -431,9 +434,9 @@ static void exynos4210_rtc_write(void *opaque, hwaddr offset,
         if (value > TICNT_THRESHOLD) {
             s->reg_ticcnt = value;
         } else {
-            fprintf(stderr,
-                    "[exynos4210.rtc: bad TICNT value %u ]\n",
-                    (uint32_t)value);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "exynos4210.rtc: bad TICNT value %u",
+                          (uint32_t)value);
         }
         break;
 
@@ -498,9 +501,9 @@ static void exynos4210_rtc_write(void *opaque, hwaddr offset,
         break;
 
     default:
-        fprintf(stderr,
-                "[exynos4210.rtc: bad write offset " TARGET_FMT_plx "]\n",
-                offset);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "exynos4210.rtc: bad write offset " TARGET_FMT_plx,
+                      offset);
         break;
 
     }
@@ -546,36 +549,33 @@ static const MemoryRegionOps exynos4210_rtc_ops = {
 /*
  * RTC timer initialization
  */
-static int exynos4210_rtc_init(SysBusDevice *dev)
+static void exynos4210_rtc_init(Object *obj)
 {
-    Exynos4210RTCState *s = EXYNOS4210_RTC(dev);
+    Exynos4210RTCState *s = EXYNOS4210_RTC(obj);
+    SysBusDevice *dev = SYS_BUS_DEVICE(obj);
     QEMUBH *bh;
 
     bh = qemu_bh_new(exynos4210_rtc_tick, s);
-    s->ptimer = ptimer_init(bh);
+    s->ptimer = ptimer_init(bh, PTIMER_POLICY_DEFAULT);
     ptimer_set_freq(s->ptimer, RTC_BASE_FREQ);
     exynos4210_rtc_update_freq(s, 0);
 
     bh = qemu_bh_new(exynos4210_rtc_1Hz_tick, s);
-    s->ptimer_1Hz = ptimer_init(bh);
+    s->ptimer_1Hz = ptimer_init(bh, PTIMER_POLICY_DEFAULT);
     ptimer_set_freq(s->ptimer_1Hz, RTC_BASE_FREQ);
 
     sysbus_init_irq(dev, &s->alm_irq);
     sysbus_init_irq(dev, &s->tick_irq);
 
-    memory_region_init_io(&s->iomem, OBJECT(s), &exynos4210_rtc_ops, s,
+    memory_region_init_io(&s->iomem, obj, &exynos4210_rtc_ops, s,
                           "exynos4210-rtc", EXYNOS4210_RTC_REG_MEM_SIZE);
     sysbus_init_mmio(dev, &s->iomem);
-
-    return 0;
 }
 
 static void exynos4210_rtc_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
-    k->init = exynos4210_rtc_init;
     dc->reset = exynos4210_rtc_reset;
     dc->vmsd = &vmstate_exynos4210_rtc_state;
 }
@@ -584,6 +584,7 @@ static const TypeInfo exynos4210_rtc_info = {
     .name          = TYPE_EXYNOS4210_RTC,
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(Exynos4210RTCState),
+    .instance_init = exynos4210_rtc_init,
     .class_init    = exynos4210_rtc_class_init,
 };
 

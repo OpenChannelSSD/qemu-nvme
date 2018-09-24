@@ -18,20 +18,20 @@
  * http://www.loongsondeveloper.com/doc/Loongson2EUserGuide.pdf
  */
 
+#include "qemu/osdep.h"
+#include "qemu/units.h"
+#include "qapi/error.h"
 #include "hw/hw.h"
 #include "hw/i386/pc.h"
-#include "hw/char/serial.h"
-#include "hw/block/fdc.h"
+#include "hw/dma/i8257.h"
+#include "hw/isa/superio.h"
 #include "net/net.h"
 #include "hw/boards.h"
 #include "hw/i2c/smbus.h"
-#include "sysemu/block-backend.h"
 #include "hw/block/flash.h"
 #include "hw/mips/mips.h"
 #include "hw/mips/cpudevs.h"
 #include "hw/pci/pci.h"
-#include "sysemu/char.h"
-#include "sysemu/sysemu.h"
 #include "audio/audio.h"
 #include "qemu/log.h"
 #include "hw/loader.h"
@@ -41,7 +41,6 @@
 #include "hw/isa/vt82c686.h"
 #include "hw/timer/mc146818rtc.h"
 #include "hw/timer/i8254.h"
-#include "sysemu/blockdev.h"
 #include "exec/address-spaces.h"
 #include "sysemu/qtest.h"
 #include "qemu/error-report.h"
@@ -73,8 +72,6 @@
 #define FULONG2E_VIA_SLOT        5
 #define FULONG2E_ATI_SLOT        6
 #define FULONG2E_RTL8139_SLOT    7
-
-static ISADevice *pit;
 
 static struct _loaderparams {
     int ram_size;
@@ -109,16 +106,19 @@ static int64_t load_kernel (CPUMIPSState *env)
 {
     int64_t kernel_entry, kernel_low, kernel_high;
     int index = 0;
-    long initrd_size;
+    long kernel_size, initrd_size;
     ram_addr_t initrd_offset;
     uint32_t *prom_buf;
     long prom_size;
 
-    if (load_elf(loaderparams.kernel_filename, cpu_mips_kseg0_to_phys, NULL,
-                 (uint64_t *)&kernel_entry, (uint64_t *)&kernel_low,
-                 (uint64_t *)&kernel_high, 0, ELF_MACHINE, 1) < 0) {
-        fprintf(stderr, "qemu: could not load kernel '%s'\n",
-                loaderparams.kernel_filename);
+    kernel_size = load_elf(loaderparams.kernel_filename, cpu_mips_kseg0_to_phys,
+                           NULL, (uint64_t *)&kernel_entry,
+                           (uint64_t *)&kernel_low, (uint64_t *)&kernel_high,
+                           0, EM_MIPS, 1, 0);
+    if (kernel_size < 0) {
+        error_report("could not load kernel '%s': %s",
+                     loaderparams.kernel_filename,
+                     load_elf_strerror(kernel_size));
         exit(1);
     }
 
@@ -130,17 +130,16 @@ static int64_t load_kernel (CPUMIPSState *env)
         if (initrd_size > 0) {
             initrd_offset = (kernel_high + ~INITRD_PAGE_MASK) & INITRD_PAGE_MASK;
             if (initrd_offset + initrd_size > ram_size) {
-                fprintf(stderr,
-                        "qemu: memory too small for initial ram disk '%s'\n",
-                        loaderparams.initrd_filename);
+                error_report("memory too small for initial ram disk '%s'",
+                             loaderparams.initrd_filename);
                 exit(1);
             }
             initrd_size = load_image_targphys(loaderparams.initrd_filename,
                                      initrd_offset, ram_size - initrd_offset);
         }
         if (initrd_size == (target_ulong) -1) {
-            fprintf(stderr, "qemu: could not load initial ram disk '%s'\n",
-                    loaderparams.initrd_filename);
+            error_report("could not load initial ram disk '%s'",
+                         loaderparams.initrd_filename);
             exit(1);
         }
     }
@@ -161,13 +160,14 @@ static int64_t load_kernel (CPUMIPSState *env)
     /* Setup minimum environment variables */
     prom_set(prom_buf, index++, "busclock=33000000");
     prom_set(prom_buf, index++, "cpuclock=100000000");
-    prom_set(prom_buf, index++, "memsize=%i", loaderparams.ram_size/1024/1024);
+    prom_set(prom_buf, index++, "memsize=%"PRIi64, loaderparams.ram_size / MiB);
     prom_set(prom_buf, index++, "modetty0=38400n8r");
     prom_set(prom_buf, index++, NULL);
 
     rom_add_blob_fixed("prom", prom_buf, prom_size,
                        cpu_mips_kseg0_to_phys(NULL, ENVP_ADDR));
 
+    g_free(prom_buf);
     return kernel_entry;
 }
 
@@ -225,11 +225,40 @@ static const uint8_t eeprom_spd[0x80] = {
     0x20,0x30,0x20
 };
 
-/* Audio support */
-static void audio_init (PCIBus *pci_bus)
+static void vt82c686b_southbridge_init(PCIBus *pci_bus, int slot, qemu_irq intc,
+                                       I2CBus **i2c_bus, ISABus **p_isa_bus)
 {
-    vt82c686b_ac97_init(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 5));
-    vt82c686b_mc97_init(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 6));
+    qemu_irq *i8259;
+    ISABus *isa_bus;
+    DriveInfo *hd[MAX_IDE_BUS * MAX_IDE_DEVS];
+
+    isa_bus = vt82c686b_isa_init(pci_bus, PCI_DEVFN(slot, 0));
+    if (!isa_bus) {
+        fprintf(stderr, "vt82c686b_init error\n");
+        exit(1);
+    }
+    *p_isa_bus = isa_bus;
+    /* Interrupt controller */
+    /* The 8259 -> IP5  */
+    i8259 = i8259_init(isa_bus, intc);
+    isa_bus_irqs(isa_bus, i8259);
+    /* init other devices */
+    i8254_pit_init(isa_bus, 0x40, 0, NULL);
+    i8257_dma_init(isa_bus, 0);
+    /* Super I/O */
+    isa_create_simple(isa_bus, TYPE_VT82C686B_SUPERIO);
+
+    ide_drive_get(hd, ARRAY_SIZE(hd));
+    vt82c686b_ide_init(pci_bus, hd, PCI_DEVFN(slot, 1));
+
+    pci_create_simple(pci_bus, PCI_DEVFN(slot, 2), "vt82c686b-usb-uhci");
+    pci_create_simple(pci_bus, PCI_DEVFN(slot, 3), "vt82c686b-usb-uhci");
+
+    *i2c_bus = vt82c686b_pm_init(pci_bus, PCI_DEVFN(slot, 4), 0xeee1, NULL);
+
+    /* Audio support */
+    vt82c686b_ac97_init(pci_bus, PCI_DEVFN(slot, 5));
+    vt82c686b_mc97_init(pci_bus, PCI_DEVFN(slot, 6));
 }
 
 /* Network support */
@@ -250,19 +279,9 @@ static void network_init (PCIBus *pci_bus)
     }
 }
 
-static void cpu_request_exit(void *opaque, int irq, int level)
-{
-    CPUState *cpu = current_cpu;
-
-    if (cpu && level) {
-        cpu_exit(cpu);
-    }
-}
-
 static void mips_fulong2e_init(MachineState *machine)
 {
     ram_addr_t ram_size = machine->ram_size;
-    const char *cpu_model = machine->cpu_model;
     const char *kernel_filename = machine->kernel_filename;
     const char *kernel_cmdline = machine->kernel_cmdline;
     const char *initrd_filename = machine->initrd_filename;
@@ -272,41 +291,28 @@ static void mips_fulong2e_init(MachineState *machine)
     MemoryRegion *bios = g_new(MemoryRegion, 1);
     long bios_size;
     int64_t kernel_entry;
-    qemu_irq *i8259;
-    qemu_irq *cpu_exit_irq;
     PCIBus *pci_bus;
     ISABus *isa_bus;
     I2CBus *smbus;
-    int i;
-    DriveInfo *hd[MAX_IDE_BUS * MAX_IDE_DEVS];
     MIPSCPU *cpu;
     CPUMIPSState *env;
 
     /* init CPUs */
-    if (cpu_model == NULL) {
-        cpu_model = "Loongson-2E";
-    }
-    cpu = cpu_mips_init(cpu_model);
-    if (cpu == NULL) {
-        fprintf(stderr, "Unable to find CPU definition\n");
-        exit(1);
-    }
+    cpu = MIPS_CPU(cpu_create(machine->cpu_type));
     env = &cpu->env;
 
     qemu_register_reset(main_cpu_reset, cpu);
 
     /* fulong 2e has 256M ram. */
-    ram_size = 256 * 1024 * 1024;
+    ram_size = 256 * MiB;
 
     /* fulong 2e has a 1M flash.Winbond W39L040AP70Z */
-    bios_size = 1024 * 1024;
+    bios_size = 1 * MiB;
 
     /* allocate RAM */
-    memory_region_init_ram(ram, NULL, "fulong2e.ram", ram_size, &error_abort);
-    vmstate_register_ram_global(ram);
+    memory_region_allocate_system_memory(ram, NULL, "fulong2e.ram", ram_size);
     memory_region_init_ram(bios, NULL, "fulong2e.bios", bios_size,
-                           &error_abort);
-    vmstate_register_ram_global(bios);
+                           &error_fatal);
     memory_region_set_readonly(bios, true);
 
     memory_region_add_subregion(address_space_mem, 0, ram);
@@ -343,72 +349,31 @@ static void mips_fulong2e_init(MachineState *machine)
     }
 
     /* Init internal devices */
-    cpu_mips_irq_init_cpu(env);
-    cpu_mips_clock_init(env);
+    cpu_mips_irq_init_cpu(cpu);
+    cpu_mips_clock_init(cpu);
 
     /* North bridge, Bonito --> IP2 */
     pci_bus = bonito_init((qemu_irq *)&(env->irq[2]));
 
-    /* South bridge */
-    ide_drive_get(hd, ARRAY_SIZE(hd));
+    /* South bridge -> IP5 */
+    vt82c686b_southbridge_init(pci_bus, FULONG2E_VIA_SLOT, env->irq[5],
+                               &smbus, &isa_bus);
 
-    isa_bus = vt82c686b_init(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 0));
-    if (!isa_bus) {
-        fprintf(stderr, "vt82c686b_init error\n");
-        exit(1);
-    }
-
-    /* Interrupt controller */
-    /* The 8259 -> IP5  */
-    i8259 = i8259_init(isa_bus, env->irq[5]);
-    isa_bus_irqs(isa_bus, i8259);
-
-    vt82c686b_ide_init(pci_bus, hd, PCI_DEVFN(FULONG2E_VIA_SLOT, 1));
-    pci_create_simple(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 2),
-                      "vt82c686b-usb-uhci");
-    pci_create_simple(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 3),
-                      "vt82c686b-usb-uhci");
-
-    smbus = vt82c686b_pm_init(pci_bus, PCI_DEVFN(FULONG2E_VIA_SLOT, 4),
-                              0xeee1, NULL);
     /* TODO: Populate SPD eeprom data.  */
     smbus_eeprom_init(smbus, 1, eeprom_spd, sizeof(eeprom_spd));
 
-    /* init other devices */
-    pit = pit_init(isa_bus, 0x40, 0, NULL);
-    cpu_exit_irq = qemu_allocate_irqs(cpu_request_exit, NULL, 1);
-    DMA_init(0, cpu_exit_irq);
+    mc146818_rtc_init(isa_bus, 2000, NULL);
 
-    /* Super I/O */
-    isa_create_simple(isa_bus, "i8042");
-
-    rtc_init(isa_bus, 2000, NULL);
-
-    for(i = 0; i < MAX_SERIAL_PORTS; i++) {
-        if (serial_hds[i]) {
-            serial_isa_init(isa_bus, i, serial_hds[i]);
-        }
-    }
-
-    if (parallel_hds[0]) {
-        parallel_init(isa_bus, 0, parallel_hds[0]);
-    }
-
-    /* Sound card */
-    audio_init(pci_bus);
-    /* Network card */
+    /* Network card: RTL8139D */
     network_init(pci_bus);
 }
 
-static QEMUMachine mips_fulong2e_machine = {
-    .name = "fulong2e",
-    .desc = "Fulong 2e mini pc",
-    .init = mips_fulong2e_init,
-};
-
-static void mips_fulong2e_machine_init(void)
+static void mips_fulong2e_machine_init(MachineClass *mc)
 {
-    qemu_register_machine(&mips_fulong2e_machine);
+    mc->desc = "Fulong 2e mini pc";
+    mc->init = mips_fulong2e_init;
+    mc->block_default_type = IF_IDE;
+    mc->default_cpu_type = MIPS_CPU_TYPE_NAME("Loongson-2E");
 }
 
-machine_init(mips_fulong2e_machine_init);
+DEFINE_MACHINE("fulong2e", mips_fulong2e_machine_init)

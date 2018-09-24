@@ -19,6 +19,8 @@
  * with this program; if not, write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
+#include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "hw/hw.h"
 #include "hw/arm/omap.h"
 
@@ -226,7 +228,8 @@ static void omap_mcspi_write(void *opaque, hwaddr addr,
     int ch = 0;
 
     if (size != 4) {
-        return omap_badwidth_write32(opaque, addr, value);
+        omap_badwidth_write32(opaque, addr, value);
+        return;
     }
 
     switch (addr) {
@@ -292,11 +295,15 @@ static void omap_mcspi_write(void *opaque, hwaddr addr,
     case 0x2c:	/* MCSPI_CHCONF */
         if ((value ^ s->ch[ch].config) & (3 << 14))	/* DMAR | DMAW */
             omap_mcspi_dmarequest_update(s->ch + ch);
-        if (((value >> 12) & 3) == 3)			/* TRM */
-            fprintf(stderr, "%s: invalid TRM value (3)\n", __FUNCTION__);
-        if (((value >> 7) & 0x1f) < 3)			/* WL */
-            fprintf(stderr, "%s: invalid WL value (%" PRIx64 ")\n",
-                            __FUNCTION__, (value >> 7) & 0x1f);
+        if (((value >> 12) & 3) == 3) { /* TRM */
+            qemu_log_mask(LOG_GUEST_ERROR, "%s: invalid TRM value (3)\n",
+                          __func__);
+        }
+        if (((value >> 7) & 0x1f) < 3) { /* WL */
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "%s: invalid WL value (%" PRIx64 ")\n",
+                          __func__, (value >> 7) & 0x1f);
+        }
         s->ch[ch].config = value & 0x7fffff;
         break;
 
@@ -341,8 +348,7 @@ static const MemoryRegionOps omap_mcspi_ops = {
 struct omap_mcspi_s *omap_mcspi_init(struct omap_target_agent_s *ta, int chnum,
                 qemu_irq irq, qemu_irq *drq, omap_clk fclk, omap_clk iclk)
 {
-    struct omap_mcspi_s *s = (struct omap_mcspi_s *)
-            g_malloc0(sizeof(struct omap_mcspi_s));
+    struct omap_mcspi_s *s = g_new0(struct omap_mcspi_s, 1);
     struct omap_mcspi_ch_s *ch = s->ch;
 
     s->irq = irq;
@@ -366,7 +372,7 @@ void omap_mcspi_attach(struct omap_mcspi_s *s,
                 int chipselect)
 {
     if (chipselect < 0 || chipselect >= s->chnum)
-        hw_error("%s: Bad chipselect %i\n", __FUNCTION__, chipselect);
+        hw_error("%s: Bad chipselect %i\n", __func__, chipselect);
 
     s->ch[chipselect].txrx = txrx;
     s->ch[chipselect].opaque = opaque;

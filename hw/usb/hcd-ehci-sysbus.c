@@ -15,6 +15,7 @@
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "hw/usb/hcd-ehci.h"
 
 static const VMStateDescription vmstate_ehci_sysbus = {
@@ -40,6 +41,15 @@ static void usb_ehci_sysbus_realize(DeviceState *dev, Error **errp)
 
     usb_ehci_realize(s, dev, errp);
     sysbus_init_irq(d, &s->irq);
+}
+
+static void usb_ehci_sysbus_reset(DeviceState *dev)
+{
+    SysBusDevice *d = SYS_BUS_DEVICE(dev);
+    EHCISysBusState *i = SYS_BUS_EHCI(d);
+    EHCIState *s = &i->ehci;
+
+    ehci_reset(s);
 }
 
 static void ehci_sysbus_init(Object *obj)
@@ -70,6 +80,7 @@ static void ehci_sysbus_class_init(ObjectClass *klass, void *data)
     dc->realize = usb_ehci_sysbus_realize;
     dc->vmsd = &vmstate_ehci_sysbus;
     dc->props = ehci_sysbus_properties;
+    dc->reset = usb_ehci_sysbus_reset;
     set_bit(DEVICE_CATEGORY_USB, dc->categories);
 }
 
@@ -129,6 +140,30 @@ static const TypeInfo ehci_tegra2_type_info = {
     .name          = TYPE_TEGRA2_EHCI,
     .parent        = TYPE_SYS_BUS_EHCI,
     .class_init    = ehci_tegra2_class_init,
+};
+
+static void ehci_ppc4xx_init(Object *o)
+{
+    EHCISysBusState *s = SYS_BUS_EHCI(o);
+
+    s->ehci.companion_enable = true;
+}
+
+static void ehci_ppc4xx_class_init(ObjectClass *oc, void *data)
+{
+    SysBusEHCIClass *sec = SYS_BUS_EHCI_CLASS(oc);
+    DeviceClass *dc = DEVICE_CLASS(oc);
+
+    sec->capsbase = 0x0;
+    sec->opregbase = 0x10;
+    set_bit(DEVICE_CATEGORY_USB, dc->categories);
+}
+
+static const TypeInfo ehci_ppc4xx_type_info = {
+    .name          = TYPE_PPC4xx_EHCI,
+    .parent        = TYPE_SYS_BUS_EHCI,
+    .class_init    = ehci_ppc4xx_class_init,
+    .instance_init = ehci_ppc4xx_init,
 };
 
 /*
@@ -213,6 +248,7 @@ static void ehci_sysbus_register_types(void)
     type_register_static(&ehci_xlnx_type_info);
     type_register_static(&ehci_exynos4210_type_info);
     type_register_static(&ehci_tegra2_type_info);
+    type_register_static(&ehci_ppc4xx_type_info);
     type_register_static(&ehci_fusbh200_type_info);
 }
 

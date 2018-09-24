@@ -22,8 +22,8 @@
  * THE SOFTWARE.
  */
 
-#if !defined(PPC_405_H)
-#define PPC_405_H
+#ifndef PPC405_H
+#define PPC405_H
 
 #include "hw/ppc/ppc4xx.h"
 
@@ -59,6 +59,9 @@ struct ppc4xx_bd_info_t {
 ram_addr_t ppc405_set_bootinfo (CPUPPCState *env, ppc4xx_bd_info_t *bd,
                                 uint32_t flags);
 
+void ppc4xx_plb_init(CPUPPCState *env);
+void ppc405_ebc_init(CPUPPCState *env);
+
 CPUPPCState *ppc405cr_init(MemoryRegion *address_space_mem,
                         MemoryRegion ram_memories[4],
                         hwaddr ram_bases[4],
@@ -71,11 +74,5 @@ CPUPPCState *ppc405ep_init(MemoryRegion *address_space_mem,
                         hwaddr ram_sizes[2],
                         uint32_t sysclk, qemu_irq **picp,
                         int do_init);
-/* IBM STBxxx microcontrollers */
-CPUPPCState *ppc_stb025_init (MemoryRegion ram_memories[2],
-                           hwaddr ram_bases[2],
-                           hwaddr ram_sizes[2],
-                           uint32_t sysclk, qemu_irq **picp,
-                           ram_addr_t *offsetp);
 
-#endif /* !defined(PPC_405_H) */
+#endif /* PPC405_H */

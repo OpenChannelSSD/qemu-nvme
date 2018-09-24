@@ -24,28 +24,11 @@
  * THE SOFTWARE.
  *
  */
-#if !defined(__XICS_H__)
-#define __XICS_H__
 
-#include "hw/sysbus.h"
+#ifndef XICS_H
+#define XICS_H
 
-#define TYPE_XICS_COMMON "xics-common"
-#define XICS_COMMON(obj) OBJECT_CHECK(XICSState, (obj), TYPE_XICS_COMMON)
-
-#define TYPE_XICS "xics"
-#define XICS(obj) OBJECT_CHECK(XICSState, (obj), TYPE_XICS)
-
-#define TYPE_KVM_XICS "xics-kvm"
-#define KVM_XICS(obj) OBJECT_CHECK(KVMXICSState, (obj), TYPE_KVM_XICS)
-
-#define XICS_COMMON_CLASS(klass) \
-     OBJECT_CLASS_CHECK(XICSStateClass, (klass), TYPE_XICS_COMMON)
-#define XICS_CLASS(klass) \
-     OBJECT_CLASS_CHECK(XICSStateClass, (klass), TYPE_XICS)
-#define XICS_COMMON_GET_CLASS(obj) \
-     OBJECT_GET_CLASS(XICSStateClass, (obj), TYPE_XICS_COMMON)
-#define XICS_GET_CLASS(obj) \
-     OBJECT_GET_CLASS(XICSStateClass, (obj), TYPE_XICS)
+#include "hw/qdev.h"
 
 #define XICS_IPI        0x2
 #define XICS_BUID       0x1
@@ -56,37 +39,22 @@
  * (the kernel implementation supports more but we don't exploit
  *  that yet)
  */
-typedef struct XICSStateClass XICSStateClass;
-typedef struct XICSState XICSState;
 typedef struct ICPStateClass ICPStateClass;
 typedef struct ICPState ICPState;
+typedef struct PnvICPState PnvICPState;
 typedef struct ICSStateClass ICSStateClass;
 typedef struct ICSState ICSState;
 typedef struct ICSIRQState ICSIRQState;
-
-struct XICSStateClass {
-    DeviceClass parent_class;
-
-    void (*cpu_setup)(XICSState *icp, PowerPCCPU *cpu);
-    void (*set_nr_irqs)(XICSState *icp, uint32_t nr_irqs, Error **errp);
-    void (*set_nr_servers)(XICSState *icp, uint32_t nr_servers, Error **errp);
-};
-
-struct XICSState {
-    /*< private >*/
-    SysBusDevice parent_obj;
-    /*< public >*/
-    uint32_t nr_servers;
-    uint32_t nr_irqs;
-    ICPState *ss;
-    ICSState *ics;
-};
+typedef struct XICSFabric XICSFabric;
 
 #define TYPE_ICP "icp"
 #define ICP(obj) OBJECT_CHECK(ICPState, (obj), TYPE_ICP)
 
 #define TYPE_KVM_ICP "icp-kvm"
 #define KVM_ICP(obj) OBJECT_CHECK(ICPState, (obj), TYPE_KVM_ICP)
+
+#define TYPE_PNV_ICP "pnv-icp"
+#define PNV_ICP(obj) OBJECT_CHECK(PnvICPState, (obj), TYPE_PNV_ICP)
 
 #define ICP_CLASS(klass) \
      OBJECT_CLASS_CHECK(ICPStateClass, (klass), TYPE_ICP)
@@ -96,8 +64,12 @@ struct XICSState {
 struct ICPStateClass {
     DeviceClass parent_class;
 
-    void (*pre_save)(ICPState *s);
-    int (*post_load)(ICPState *s, int version_id);
+    DeviceRealize parent_realize;
+    DeviceReset parent_reset;
+
+    void (*pre_save)(ICPState *icp);
+    int (*post_load)(ICPState *icp, int version_id);
+    void (*synchronize_state)(ICPState *icp);
 };
 
 struct ICPState {
@@ -105,28 +77,52 @@ struct ICPState {
     DeviceState parent_obj;
     /*< public >*/
     CPUState *cs;
+    ICSState *xirr_owner;
     uint32_t xirr;
     uint8_t pending_priority;
     uint8_t mfrr;
     qemu_irq output;
+
+    XICSFabric *xics;
 };
 
-#define TYPE_ICS "ics"
-#define ICS(obj) OBJECT_CHECK(ICSState, (obj), TYPE_ICS)
+#define ICP_PROP_XICS "xics"
+#define ICP_PROP_CPU "cpu"
 
-#define TYPE_KVM_ICS "icskvm"
-#define KVM_ICS(obj) OBJECT_CHECK(ICSState, (obj), TYPE_KVM_ICS)
+struct PnvICPState {
+    ICPState parent_obj;
 
-#define ICS_CLASS(klass) \
-     OBJECT_CLASS_CHECK(ICSStateClass, (klass), TYPE_ICS)
-#define ICS_GET_CLASS(obj) \
-     OBJECT_GET_CLASS(ICSStateClass, (obj), TYPE_ICS)
+    MemoryRegion mmio;
+    uint32_t links[3];
+};
+
+#define TYPE_ICS_BASE "ics-base"
+#define ICS_BASE(obj) OBJECT_CHECK(ICSState, (obj), TYPE_ICS_BASE)
+
+/* Retain ics for sPAPR for migration from existing sPAPR guests */
+#define TYPE_ICS_SIMPLE "ics"
+#define ICS_SIMPLE(obj) OBJECT_CHECK(ICSState, (obj), TYPE_ICS_SIMPLE)
+
+#define TYPE_ICS_KVM "icskvm"
+#define ICS_KVM(obj) OBJECT_CHECK(ICSState, (obj), TYPE_ICS_KVM)
+
+#define ICS_BASE_CLASS(klass) \
+     OBJECT_CLASS_CHECK(ICSStateClass, (klass), TYPE_ICS_BASE)
+#define ICS_BASE_GET_CLASS(obj) \
+     OBJECT_GET_CLASS(ICSStateClass, (obj), TYPE_ICS_BASE)
 
 struct ICSStateClass {
     DeviceClass parent_class;
 
+    DeviceRealize parent_realize;
+    DeviceReset parent_reset;
+
     void (*pre_save)(ICSState *s);
     int (*post_load)(ICSState *s, int version_id);
+    void (*reject)(ICSState *s, uint32_t irq);
+    void (*resend)(ICSState *s);
+    void (*eoi)(ICSState *s, uint32_t irq);
+    void (*synchronize_state)(ICSState *s);
 };
 
 struct ICSState {
@@ -137,8 +133,16 @@ struct ICSState {
     uint32_t offset;
     qemu_irq *qirqs;
     ICSIRQState *irqs;
-    XICSState *icp;
+    XICSFabric *xics;
 };
+
+#define ICS_PROP_XICS "xics"
+
+static inline bool ics_valid_irq(ICSState *ics, uint32_t nr)
+{
+    return (ics->offset != 0) && (nr >= ics->offset)
+        && (nr < (ics->offset + ics->nr_irqs));
+}
 
 struct ICSIRQState {
     uint32_t server;
@@ -148,6 +152,8 @@ struct ICSIRQState {
 #define XICS_STATUS_SENT               0x2
 #define XICS_STATUS_REJECTED           0x4
 #define XICS_STATUS_MASKED_PENDING     0x8
+#define XICS_STATUS_PRESENTED          0x10
+#define XICS_STATUS_QUEUED             0x20
     uint8_t status;
 /* (flags & XICS_FLAGS_IRQ_MASK) == 0 means the interrupt is not allocated */
 #define XICS_FLAGS_IRQ_LSI             0x1
@@ -156,14 +162,54 @@ struct ICSIRQState {
     uint8_t flags;
 };
 
-#define XICS_IRQS               1024
+struct XICSFabric {
+    Object parent;
+};
 
-qemu_irq xics_get_qirq(XICSState *icp, int irq);
-void xics_set_irq_type(XICSState *icp, int irq, bool lsi);
-int xics_alloc(XICSState *icp, int src, int irq_hint, bool lsi);
-int xics_alloc_block(XICSState *icp, int src, int num, bool lsi, bool align);
-void xics_free(XICSState *icp, int irq, int num);
+#define TYPE_XICS_FABRIC "xics-fabric"
+#define XICS_FABRIC(obj)                                     \
+    OBJECT_CHECK(XICSFabric, (obj), TYPE_XICS_FABRIC)
+#define XICS_FABRIC_CLASS(klass)                                     \
+    OBJECT_CLASS_CHECK(XICSFabricClass, (klass), TYPE_XICS_FABRIC)
+#define XICS_FABRIC_GET_CLASS(obj)                                   \
+    OBJECT_GET_CLASS(XICSFabricClass, (obj), TYPE_XICS_FABRIC)
 
-void xics_cpu_setup(XICSState *icp, PowerPCCPU *cpu);
+typedef struct XICSFabricClass {
+    InterfaceClass parent;
+    ICSState *(*ics_get)(XICSFabric *xi, int irq);
+    void (*ics_resend)(XICSFabric *xi);
+    ICPState *(*icp_get)(XICSFabric *xi, int server);
+} XICSFabricClass;
 
-#endif /* __XICS_H__ */
+#define XICS_IRQS_SPAPR               1024
+
+void spapr_dt_xics(int nr_servers, void *fdt, uint32_t phandle);
+
+ICPState *xics_icp_get(XICSFabric *xi, int server);
+
+/* Internal XICS interfaces */
+void icp_set_cppr(ICPState *icp, uint8_t cppr);
+void icp_set_mfrr(ICPState *icp, uint8_t mfrr);
+uint32_t icp_accept(ICPState *ss);
+uint32_t icp_ipoll(ICPState *ss, uint32_t *mfrr);
+void icp_eoi(ICPState *icp, uint32_t xirr);
+
+void ics_simple_write_xive(ICSState *ics, int nr, int server,
+                           uint8_t priority, uint8_t saved_priority);
+
+void ics_set_irq_type(ICSState *ics, int srcno, bool lsi);
+void icp_pic_print_info(ICPState *icp, Monitor *mon);
+void ics_pic_print_info(ICSState *ics, Monitor *mon);
+
+void ics_resend(ICSState *ics);
+void icp_resend(ICPState *ss);
+
+typedef struct sPAPRMachineState sPAPRMachineState;
+
+int xics_kvm_init(sPAPRMachineState *spapr, Error **errp);
+void xics_spapr_init(sPAPRMachineState *spapr);
+
+Object *icp_create(Object *cpu, const char *type, XICSFabric *xi,
+                   Error **errp);
+
+#endif /* XICS_H */

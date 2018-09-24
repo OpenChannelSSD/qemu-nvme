@@ -10,11 +10,13 @@
  * the COPYING file in the top-level directory.
  */
 
-#include "sysemu/char.h"
+#include "qemu/osdep.h"
+#include "chardev/char-fe.h"
 #include "qemu/error-report.h"
 #include "trace.h"
 #include "hw/virtio/virtio-serial.h"
-#include "qapi-event.h"
+#include "qapi/error.h"
+#include "qapi/qapi-events-char.h"
 
 #define TYPE_VIRTIO_CONSOLE_SERIAL_PORT "virtserialport"
 #define VIRTIO_CONSOLE(obj) \
@@ -23,7 +25,7 @@
 typedef struct VirtConsole {
     VirtIOSerialPort parent_obj;
 
-    CharDriverState *chr;
+    CharBackend chr;
     guint watch;
 } VirtConsole;
 
@@ -48,12 +50,12 @@ static ssize_t flush_buf(VirtIOSerialPort *port,
     VirtConsole *vcon = VIRTIO_CONSOLE(port);
     ssize_t ret;
 
-    if (!vcon->chr) {
+    if (!qemu_chr_fe_backend_connected(&vcon->chr)) {
         /* If there's no backend, we can just say we consumed all data. */
         return len;
     }
 
-    ret = qemu_chr_fe_write(vcon->chr, buf, len);
+    ret = qemu_chr_fe_write(&vcon->chr, buf, len);
     trace_virtio_console_flush_buf(port->id, len, ret);
 
     if (ret < len) {
@@ -67,10 +69,31 @@ static ssize_t flush_buf(VirtIOSerialPort *port,
          */
         if (ret < 0)
             ret = 0;
+
+        /* XXX we should be queuing data to send later for the
+         * console devices too rather than silently dropping
+         * console data on EAGAIN. The Linux virtio-console
+         * hvc driver though does sends with spinlocks held,
+         * so if we enable throttling that'll stall the entire
+         * guest kernel, not merely the process writing to the
+         * console.
+         *
+         * While we could queue data for later write without
+         * enabling throttling, this would result in the guest
+         * being able to trigger arbitrary memory usage in QEMU
+         * buffering data for later writes.
+         *
+         * So fixing this problem likely requires fixing the
+         * Linux virtio-console hvc driver to not hold spinlocks
+         * while writing, and instead merely block the process
+         * that's writing. QEMU would then need some way to detect
+         * if the guest had the fixed driver too, before we can
+         * use throttling on host side.
+         */
         if (!k->is_console) {
             virtio_serial_throttle_port(port, true);
             if (!vcon->watch) {
-                vcon->watch = qemu_chr_fe_add_watch(vcon->chr,
+                vcon->watch = qemu_chr_fe_add_watch(&vcon->chr,
                                                     G_IO_OUT|G_IO_HUP,
                                                     chr_write_unblocked, vcon);
             }
@@ -84,15 +107,23 @@ static void set_guest_connected(VirtIOSerialPort *port, int guest_connected)
 {
     VirtConsole *vcon = VIRTIO_CONSOLE(port);
     DeviceState *dev = DEVICE(port);
+    VirtIOSerialPortClass *k = VIRTIO_SERIAL_PORT_GET_CLASS(port);
 
-    if (vcon->chr) {
-        qemu_chr_fe_set_open(vcon->chr, guest_connected);
+    if (!k->is_console) {
+        qemu_chr_fe_set_open(&vcon->chr, guest_connected);
     }
 
     if (dev->id) {
         qapi_event_send_vserport_change(dev->id, guest_connected,
                                         &error_abort);
     }
+}
+
+static void guest_writable(VirtIOSerialPort *port)
+{
+    VirtConsole *vcon = VIRTIO_CONSOLE(port);
+
+    qemu_chr_fe_accept_input(&vcon->chr);
 }
 
 /* Readiness of the guest to accept data on a port */
@@ -133,6 +164,50 @@ static void chr_event(void *opaque, int event)
     }
 }
 
+static int chr_be_change(void *opaque)
+{
+    VirtConsole *vcon = opaque;
+    VirtIOSerialPort *port = VIRTIO_SERIAL_PORT(vcon);
+    VirtIOSerialPortClass *k = VIRTIO_SERIAL_PORT_GET_CLASS(port);
+
+    if (k->is_console) {
+        qemu_chr_fe_set_handlers(&vcon->chr, chr_can_read, chr_read,
+                                 NULL, chr_be_change, vcon, NULL, true);
+    } else {
+        qemu_chr_fe_set_handlers(&vcon->chr, chr_can_read, chr_read,
+                                 chr_event, chr_be_change, vcon, NULL, false);
+    }
+
+    if (vcon->watch) {
+        g_source_remove(vcon->watch);
+        vcon->watch = qemu_chr_fe_add_watch(&vcon->chr,
+                                            G_IO_OUT | G_IO_HUP,
+                                            chr_write_unblocked, vcon);
+    }
+
+    return 0;
+}
+
+static void virtconsole_enable_backend(VirtIOSerialPort *port, bool enable)
+{
+    VirtConsole *vcon = VIRTIO_CONSOLE(port);
+
+    if (!qemu_chr_fe_backend_connected(&vcon->chr)) {
+        return;
+    }
+
+    if (enable) {
+        VirtIOSerialPortClass *k = VIRTIO_SERIAL_PORT_GET_CLASS(port);
+
+        qemu_chr_fe_set_handlers(&vcon->chr, chr_can_read, chr_read,
+                                 k->is_console ? NULL : chr_event,
+                                 chr_be_change, vcon, NULL, false);
+    } else {
+        qemu_chr_fe_set_handlers(&vcon->chr, NULL, NULL, NULL,
+                                 NULL, NULL, NULL, false);
+    }
+}
+
 static void virtconsole_realize(DeviceState *dev, Error **errp)
 {
     VirtIOSerialPort *port = VIRTIO_SERIAL_PORT(dev);
@@ -145,10 +220,26 @@ static void virtconsole_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    if (vcon->chr) {
-        vcon->chr->explicit_fe_open = 1;
-        qemu_chr_add_handlers(vcon->chr, chr_can_read, chr_read, chr_event,
-                              vcon);
+    if (qemu_chr_fe_backend_connected(&vcon->chr)) {
+        /*
+         * For consoles we don't block guest data transfer just
+         * because nothing is connected - we'll just let it go
+         * whetherever the chardev wants - /dev/null probably.
+         *
+         * For serial ports we need 100% reliable data transfer
+         * so we use the opened/closed signals from chardev to
+         * trigger open/close of the device
+         */
+        if (k->is_console) {
+            qemu_chr_fe_set_handlers(&vcon->chr, chr_can_read, chr_read,
+                                     NULL, chr_be_change,
+                                     vcon, NULL, true);
+            virtio_serial_open(port);
+        } else {
+            qemu_chr_fe_set_handlers(&vcon->chr, chr_can_read, chr_read,
+                                     chr_event, chr_be_change,
+                                     vcon, NULL, false);
+        }
     }
 }
 
@@ -188,6 +279,8 @@ static void virtserialport_class_init(ObjectClass *klass, void *data)
     k->unrealize = virtconsole_unrealize;
     k->have_data = flush_buf;
     k->set_guest_connected = set_guest_connected;
+    k->enable_backend = virtconsole_enable_backend;
+    k->guest_writable = guest_writable;
     dc->props = virtserialport_properties;
 }
 

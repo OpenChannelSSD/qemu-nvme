@@ -26,9 +26,11 @@
  *
  */
 
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
 #include "hw/ptimer.h"
 #include "qemu/main-loop.h"
+#include "qemu/log.h"
 
 #include "hw/timer/digic-timer.h"
 
@@ -71,7 +73,7 @@ static uint64_t digic_timer_read(void *opaque, hwaddr offset, unsigned size)
     default:
         qemu_log_mask(LOG_UNIMP,
                       "digic-timer: read access to unknown register 0x"
-                      TARGET_FMT_plx, offset);
+                      TARGET_FMT_plx "\n", offset);
     }
 
     return ret;
@@ -107,7 +109,7 @@ static void digic_timer_write(void *opaque, hwaddr offset,
     default:
         qemu_log_mask(LOG_UNIMP,
                       "digic-timer: read access to unknown register 0x"
-                      TARGET_FMT_plx, offset);
+                      TARGET_FMT_plx "\n", offset);
     }
 }
 
@@ -125,7 +127,7 @@ static void digic_timer_init(Object *obj)
 {
     DigicTimerState *s = DIGIC_TIMER(obj);
 
-    s->ptimer = ptimer_init(NULL);
+    s->ptimer = ptimer_init(NULL, PTIMER_POLICY_DEFAULT);
 
     /*
      * FIXME: there is no documentation on Digic timer

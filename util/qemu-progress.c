@@ -22,9 +22,8 @@
  * THE SOFTWARE.
  */
 
-#include "qemu-common.h"
 #include "qemu/osdep.h"
-#include <stdio.h>
+#include "qemu-common.h"
 
 struct progress_state {
     float current;
@@ -89,6 +88,9 @@ static void progress_dummy_init(void)
     action.sa_handler = sigusr_print;
     action.sa_flags = 0;
     sigaction(SIGUSR1, &action, NULL);
+#ifdef SIGINFO
+    sigaction(SIGINFO, &action, NULL);
+#endif
 
     /*
      * SIGUSR1 is SIG_IPI and gets blocked in qemu_init_main_loop(). In the
@@ -152,7 +154,8 @@ void qemu_progress_print(float delta, int max)
     state.current = current;
 
     if (current > (state.last_print + state.min_skip) ||
-        (current == 100) || (current == 0)) {
+        current < (state.last_print - state.min_skip) ||
+        current == 100 || current == 0) {
         state.last_print = state.current;
         state.print();
     }

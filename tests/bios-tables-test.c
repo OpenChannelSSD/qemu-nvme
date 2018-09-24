@@ -10,144 +10,38 @@
  * See the COPYING file in the top-level directory.
  */
 
-#include <string.h>
-#include <stdio.h>
-#include <glib.h>
+#include "qemu/osdep.h"
 #include <glib/gstdio.h>
 #include "qemu-common.h"
-#include "libqtest.h"
-#include "qemu/compiler.h"
-#include "hw/i386/acpi-defs.h"
-#include "hw/i386/smbios.h"
+#include "hw/smbios/smbios.h"
 #include "qemu/bitmap.h"
+#include "acpi-utils.h"
+#include "boot-sector.h"
 
 #define MACHINE_PC "pc"
 #define MACHINE_Q35 "q35"
 
 #define ACPI_REBUILD_EXPECTED_AML "TEST_ACPI_REBUILD_AML"
 
-/* DSDT and SSDTs format */
-typedef struct {
-    AcpiTableHeader header;
-    gchar *aml;            /* aml bytecode from guest */
-    gsize aml_len;
-    gchar *aml_file;
-    gchar *asl;            /* asl code generated from aml */
-    gsize asl_len;
-    gchar *asl_file;
-    bool tmp_files_retain;   /* do not delete the temp asl/aml */
-} QEMU_PACKED AcpiSdtTable;
-
 typedef struct {
     const char *machine;
+    const char *variant;
     uint32_t rsdp_addr;
     AcpiRsdpDescriptor rsdp_table;
     AcpiRsdtDescriptorRev1 rsdt_table;
-    AcpiFadtDescriptorRev1 fadt_table;
+    uint32_t dsdt_addr;
+    uint32_t facs_addr;
     AcpiFacsDescriptorRev1 facs_table;
     uint32_t *rsdt_tables_addr;
     int rsdt_tables_nr;
     GArray *tables;
     uint32_t smbios_ep_addr;
-    struct smbios_entry_point smbios_ep_table;
+    struct smbios_21_entry_point smbios_ep_table;
+    uint8_t *required_struct_types;
+    int required_struct_types_len;
 } test_data;
 
-#define LOW(x) ((x) & 0xff)
-#define HIGH(x) ((x) >> 8)
-
-#define SIGNATURE 0xdead
-#define SIGNATURE_OFFSET 0x10
-#define BOOT_SECTOR_ADDRESS 0x7c00
-
-#define ACPI_READ_FIELD(field, addr)           \
-    do {                                       \
-        switch (sizeof(field)) {               \
-        case 1:                                \
-            field = readb(addr);               \
-            break;                             \
-        case 2:                                \
-            field = readw(addr);               \
-            break;                             \
-        case 4:                                \
-            field = readl(addr);               \
-            break;                             \
-        case 8:                                \
-            field = readq(addr);               \
-            break;                             \
-        default:                               \
-            g_assert(false);                   \
-        }                                      \
-        addr += sizeof(field);                  \
-    } while (0);
-
-#define ACPI_READ_ARRAY_PTR(arr, length, addr)  \
-    do {                                        \
-        int idx;                                \
-        for (idx = 0; idx < length; ++idx) {    \
-            ACPI_READ_FIELD(arr[idx], addr);    \
-        }                                       \
-    } while (0);
-
-#define ACPI_READ_ARRAY(arr, addr)                               \
-    ACPI_READ_ARRAY_PTR(arr, sizeof(arr)/sizeof(arr[0]), addr)
-
-#define ACPI_READ_TABLE_HEADER(table, addr)                      \
-    do {                                                         \
-        ACPI_READ_FIELD((table)->signature, addr);               \
-        ACPI_READ_FIELD((table)->length, addr);                  \
-        ACPI_READ_FIELD((table)->revision, addr);                \
-        ACPI_READ_FIELD((table)->checksum, addr);                \
-        ACPI_READ_ARRAY((table)->oem_id, addr);                  \
-        ACPI_READ_ARRAY((table)->oem_table_id, addr);            \
-        ACPI_READ_FIELD((table)->oem_revision, addr);            \
-        ACPI_READ_ARRAY((table)->asl_compiler_id, addr);         \
-        ACPI_READ_FIELD((table)->asl_compiler_revision, addr);   \
-    } while (0);
-
-#define ACPI_ASSERT_CMP(actual, expected) do { \
-    uint32_t ACPI_ASSERT_CMP_le = cpu_to_le32(actual); \
-    char ACPI_ASSERT_CMP_str[5] = {}; \
-    memcpy(ACPI_ASSERT_CMP_str, &ACPI_ASSERT_CMP_le, 4); \
-    g_assert_cmpstr(ACPI_ASSERT_CMP_str, ==, expected); \
-} while (0)
-
-#define ACPI_ASSERT_CMP64(actual, expected) do { \
-    uint64_t ACPI_ASSERT_CMP_le = cpu_to_le64(actual); \
-    char ACPI_ASSERT_CMP_str[9] = {}; \
-    memcpy(ACPI_ASSERT_CMP_str, &ACPI_ASSERT_CMP_le, 8); \
-    g_assert_cmpstr(ACPI_ASSERT_CMP_str, ==, expected); \
-} while (0)
-
-/* Boot sector code: write SIGNATURE into memory,
- * then halt.
- * Q35 machine requires a minimum 0x7e000 bytes disk.
- * (bug or feature?)
- */
-static uint8_t boot_sector[0x7e000] = {
-    /* 7c00: mov $0xdead,%ax */
-    [0x00] = 0xb8,
-    [0x01] = LOW(SIGNATURE),
-    [0x02] = HIGH(SIGNATURE),
-    /* 7c03:  mov %ax,0x7c10 */
-    [0x03] = 0xa3,
-    [0x04] = LOW(BOOT_SECTOR_ADDRESS + SIGNATURE_OFFSET),
-    [0x05] = HIGH(BOOT_SECTOR_ADDRESS + SIGNATURE_OFFSET),
-    /* 7c06: cli */
-    [0x06] = 0xfa,
-    /* 7c07: hlt */
-    [0x07] = 0xf4,
-    /* 7c08: jmp 0x7c07=0x7c0a-3 */
-    [0x08] = 0xeb,
-    [0x09] = LOW(-3),
-    /* We mov 0xdead here: set value to make debugging easier */
-    [SIGNATURE_OFFSET] = LOW(0xface),
-    [SIGNATURE_OFFSET + 1] = HIGH(0xface),
-    /* End of boot sector marker */
-    [0x1FE] = 0x55,
-    [0x1FF] = 0xAA,
-};
-
-static const char *disk = "tests/acpi-test-disk.raw";
+static char disk[] = "tests/acpi-test-disk-XXXXXX";
 static const char *data_dir = "tests/acpi-test-data";
 #ifdef CONFIG_IASL
 static const char *iasl = stringify(CONFIG_IASL);
@@ -160,66 +54,31 @@ static void free_test_data(test_data *data)
     AcpiSdtTable *temp;
     int i;
 
-    if (data->rsdt_tables_addr) {
-        g_free(data->rsdt_tables_addr);
-    }
+    g_free(data->rsdt_tables_addr);
 
     for (i = 0; i < data->tables->len; ++i) {
         temp = &g_array_index(data->tables, AcpiSdtTable, i);
-        if (temp->aml) {
-            g_free(temp->aml);
+        g_free(temp->aml);
+        if (temp->aml_file &&
+            !temp->tmp_files_retain &&
+            g_strstr_len(temp->aml_file, -1, "aml-")) {
+            unlink(temp->aml_file);
         }
-        if (temp->aml_file) {
-            if (!temp->tmp_files_retain &&
-                g_strstr_len(temp->aml_file, -1, "aml-")) {
-                unlink(temp->aml_file);
-            }
-            g_free(temp->aml_file);
+        g_free(temp->aml_file);
+        g_free(temp->asl);
+        if (temp->asl_file &&
+            !temp->tmp_files_retain) {
+            unlink(temp->asl_file);
         }
-        if (temp->asl) {
-            g_free(temp->asl);
-        }
-        if (temp->asl_file) {
-            if (!temp->tmp_files_retain) {
-                unlink(temp->asl_file);
-            }
-            g_free(temp->asl_file);
-        }
+        g_free(temp->asl_file);
     }
 
-    g_array_free(data->tables, false);
-}
-
-static uint8_t acpi_checksum(const uint8_t *data, int len)
-{
-    int i;
-    uint8_t sum = 0;
-
-    for (i = 0; i < len; i++) {
-        sum += data[i];
-    }
-
-    return sum;
+    g_array_free(data->tables, true);
 }
 
 static void test_acpi_rsdp_address(test_data *data)
 {
-    uint32_t off;
-
-    /* OK, now find RSDP */
-    for (off = 0xf0000; off < 0x100000; off += 0x10) {
-        uint8_t sig[] = "RSD PTR ";
-        int i;
-
-        for (i = 0; i < sizeof sig - 1; ++i) {
-            sig[i] = readb(off + i);
-        }
-
-        if (!memcmp(sig, "RSD PTR ", sizeof sig)) {
-            break;
-        }
-    }
-
+    uint32_t off = acpi_find_rsdp_address();
     g_assert_cmphex(off, <, 0x100000);
     data->rsdp_addr = off;
 }
@@ -229,42 +88,39 @@ static void test_acpi_rsdp_table(test_data *data)
     AcpiRsdpDescriptor *rsdp_table = &data->rsdp_table;
     uint32_t addr = data->rsdp_addr;
 
-    ACPI_READ_FIELD(rsdp_table->signature, addr);
-    ACPI_ASSERT_CMP64(rsdp_table->signature, "RSD PTR ");
-
-    ACPI_READ_FIELD(rsdp_table->checksum, addr);
-    ACPI_READ_ARRAY(rsdp_table->oem_id, addr);
-    ACPI_READ_FIELD(rsdp_table->revision, addr);
-    ACPI_READ_FIELD(rsdp_table->rsdt_physical_address, addr);
-    ACPI_READ_FIELD(rsdp_table->length, addr);
+    acpi_parse_rsdp_table(addr, rsdp_table);
 
     /* rsdp checksum is not for the whole table, but for the first 20 bytes */
-    g_assert(!acpi_checksum((uint8_t *)rsdp_table, 20));
+    g_assert(!acpi_calc_checksum((uint8_t *)rsdp_table, 20));
 }
 
 static void test_acpi_rsdt_table(test_data *data)
 {
     AcpiRsdtDescriptorRev1 *rsdt_table = &data->rsdt_table;
-    uint32_t addr = data->rsdp_table.rsdt_physical_address;
+    uint32_t addr = le32_to_cpu(data->rsdp_table.rsdt_physical_address);
     uint32_t *tables;
     int tables_nr;
     uint8_t checksum;
+    uint32_t rsdt_table_length;
 
     /* read the header */
     ACPI_READ_TABLE_HEADER(rsdt_table, addr);
     ACPI_ASSERT_CMP(rsdt_table->signature, "RSDT");
 
+    rsdt_table_length = le32_to_cpu(rsdt_table->length);
+
     /* compute the table entries in rsdt */
-    tables_nr = (rsdt_table->length - sizeof(AcpiRsdtDescriptorRev1)) /
+    tables_nr = (rsdt_table_length - sizeof(AcpiRsdtDescriptorRev1)) /
                 sizeof(uint32_t);
-    g_assert_cmpint(tables_nr, >, 0);
+    g_assert(tables_nr > 0);
 
     /* get the addresses of the tables pointed by rsdt */
     tables = g_new0(uint32_t, tables_nr);
     ACPI_READ_ARRAY_PTR(tables, tables_nr, addr);
 
-    checksum = acpi_checksum((uint8_t *)rsdt_table, rsdt_table->length) +
-               acpi_checksum((uint8_t *)tables, tables_nr * sizeof(uint32_t));
+    checksum = acpi_calc_checksum((uint8_t *)rsdt_table, rsdt_table_length) +
+               acpi_calc_checksum((uint8_t *)tables,
+                                  tables_nr * sizeof(uint32_t));
     g_assert(!checksum);
 
    /* SSDT tables after FADT */
@@ -272,63 +128,59 @@ static void test_acpi_rsdt_table(test_data *data)
     data->rsdt_tables_nr = tables_nr;
 }
 
-static void test_acpi_fadt_table(test_data *data)
+static void fadt_fetch_facs_and_dsdt_ptrs(test_data *data)
 {
-    AcpiFadtDescriptorRev1 *fadt_table = &data->fadt_table;
     uint32_t addr;
+    AcpiTableHeader hdr;
 
     /* FADT table comes first */
-    addr = data->rsdt_tables_addr[0];
-    ACPI_READ_TABLE_HEADER(fadt_table, addr);
+    addr = le32_to_cpu(data->rsdt_tables_addr[0]);
+    ACPI_READ_TABLE_HEADER(&hdr, addr);
+    ACPI_ASSERT_CMP(hdr.signature, "FACP");
 
-    ACPI_READ_FIELD(fadt_table->firmware_ctrl, addr);
-    ACPI_READ_FIELD(fadt_table->dsdt, addr);
-    ACPI_READ_FIELD(fadt_table->model, addr);
-    ACPI_READ_FIELD(fadt_table->reserved1, addr);
-    ACPI_READ_FIELD(fadt_table->sci_int, addr);
-    ACPI_READ_FIELD(fadt_table->smi_cmd, addr);
-    ACPI_READ_FIELD(fadt_table->acpi_enable, addr);
-    ACPI_READ_FIELD(fadt_table->acpi_disable, addr);
-    ACPI_READ_FIELD(fadt_table->S4bios_req, addr);
-    ACPI_READ_FIELD(fadt_table->reserved2, addr);
-    ACPI_READ_FIELD(fadt_table->pm1a_evt_blk, addr);
-    ACPI_READ_FIELD(fadt_table->pm1b_evt_blk, addr);
-    ACPI_READ_FIELD(fadt_table->pm1a_cnt_blk, addr);
-    ACPI_READ_FIELD(fadt_table->pm1b_cnt_blk, addr);
-    ACPI_READ_FIELD(fadt_table->pm2_cnt_blk, addr);
-    ACPI_READ_FIELD(fadt_table->pm_tmr_blk, addr);
-    ACPI_READ_FIELD(fadt_table->gpe0_blk, addr);
-    ACPI_READ_FIELD(fadt_table->gpe1_blk, addr);
-    ACPI_READ_FIELD(fadt_table->pm1_evt_len, addr);
-    ACPI_READ_FIELD(fadt_table->pm1_cnt_len, addr);
-    ACPI_READ_FIELD(fadt_table->pm2_cnt_len, addr);
-    ACPI_READ_FIELD(fadt_table->pm_tmr_len, addr);
-    ACPI_READ_FIELD(fadt_table->gpe0_blk_len, addr);
-    ACPI_READ_FIELD(fadt_table->gpe1_blk_len, addr);
-    ACPI_READ_FIELD(fadt_table->gpe1_base, addr);
-    ACPI_READ_FIELD(fadt_table->reserved3, addr);
-    ACPI_READ_FIELD(fadt_table->plvl2_lat, addr);
-    ACPI_READ_FIELD(fadt_table->plvl3_lat, addr);
-    ACPI_READ_FIELD(fadt_table->flush_size, addr);
-    ACPI_READ_FIELD(fadt_table->flush_stride, addr);
-    ACPI_READ_FIELD(fadt_table->duty_offset, addr);
-    ACPI_READ_FIELD(fadt_table->duty_width, addr);
-    ACPI_READ_FIELD(fadt_table->day_alrm, addr);
-    ACPI_READ_FIELD(fadt_table->mon_alrm, addr);
-    ACPI_READ_FIELD(fadt_table->century, addr);
-    ACPI_READ_FIELD(fadt_table->reserved4, addr);
-    ACPI_READ_FIELD(fadt_table->reserved4a, addr);
-    ACPI_READ_FIELD(fadt_table->reserved4b, addr);
-    ACPI_READ_FIELD(fadt_table->flags, addr);
+    ACPI_READ_FIELD(data->facs_addr, addr);
+    ACPI_READ_FIELD(data->dsdt_addr, addr);
+}
 
-    ACPI_ASSERT_CMP(fadt_table->signature, "FACP");
-    g_assert(!acpi_checksum((uint8_t *)fadt_table, fadt_table->length));
+static void sanitize_fadt_ptrs(test_data *data)
+{
+    /* fixup pointers in FADT */
+    int i;
+
+    for (i = 0; i < data->tables->len; i++) {
+        AcpiSdtTable *sdt = &g_array_index(data->tables, AcpiSdtTable, i);
+
+        if (memcmp(&sdt->header.signature, "FACP", 4)) {
+            continue;
+        }
+
+        /* check original FADT checksum before sanitizing table */
+        g_assert(!(uint8_t)(
+            acpi_calc_checksum((uint8_t *)sdt, sizeof(AcpiTableHeader)) +
+            acpi_calc_checksum((uint8_t *)sdt->aml, sdt->aml_len)
+        ));
+
+        /* sdt->aml field offset := spec offset - header size */
+        memset(sdt->aml + 0, 0, 4); /* sanitize FIRMWARE_CTRL(36) ptr */
+        memset(sdt->aml + 4, 0, 4); /* sanitize DSDT(40) ptr */
+        if (sdt->header.revision >= 3) {
+            memset(sdt->aml + 96, 0, 8); /* sanitize X_FIRMWARE_CTRL(132) ptr */
+            memset(sdt->aml + 104, 0, 8); /* sanitize X_DSDT(140) ptr */
+        }
+
+        /* update checksum */
+        sdt->header.checksum = 0;
+        sdt->header.checksum -=
+            acpi_calc_checksum((uint8_t *)sdt, sizeof(AcpiTableHeader)) +
+            acpi_calc_checksum((uint8_t *)sdt->aml, sdt->aml_len);
+        break;
+    }
 }
 
 static void test_acpi_facs_table(test_data *data)
 {
     AcpiFacsDescriptorRev1 *facs_table = &data->facs_table;
-    uint32_t addr = data->fadt_table.firmware_ctrl;
+    uint32_t addr = le32_to_cpu(data->facs_addr);
 
     ACPI_READ_FIELD(facs_table->signature, addr);
     ACPI_READ_FIELD(facs_table->length, addr);
@@ -341,47 +193,55 @@ static void test_acpi_facs_table(test_data *data)
     ACPI_ASSERT_CMP(facs_table->signature, "FACS");
 }
 
-static void test_dst_table(AcpiSdtTable *sdt_table, uint32_t addr)
+/** fetch_table
+ *   load ACPI table at @addr into table descriptor @sdt_table
+ *   and check that header checksum matches actual one.
+ */
+static void fetch_table(AcpiSdtTable *sdt_table, uint32_t addr)
 {
     uint8_t checksum;
 
+    memset(sdt_table, 0, sizeof(*sdt_table));
     ACPI_READ_TABLE_HEADER(&sdt_table->header, addr);
 
-    sdt_table->aml_len = sdt_table->header.length - sizeof(AcpiTableHeader);
+    sdt_table->aml_len = le32_to_cpu(sdt_table->header.length)
+                         - sizeof(AcpiTableHeader);
     sdt_table->aml = g_malloc0(sdt_table->aml_len);
     ACPI_READ_ARRAY_PTR(sdt_table->aml, sdt_table->aml_len, addr);
 
-    checksum = acpi_checksum((uint8_t *)sdt_table, sizeof(AcpiTableHeader)) +
-               acpi_checksum((uint8_t *)sdt_table->aml, sdt_table->aml_len);
+    checksum = acpi_calc_checksum((uint8_t *)sdt_table,
+                                  sizeof(AcpiTableHeader)) +
+               acpi_calc_checksum((uint8_t *)sdt_table->aml,
+                                  sdt_table->aml_len);
     g_assert(!checksum);
 }
 
 static void test_acpi_dsdt_table(test_data *data)
 {
     AcpiSdtTable dsdt_table;
-    uint32_t addr = data->fadt_table.dsdt;
+    uint32_t addr = le32_to_cpu(data->dsdt_addr);
 
-    memset(&dsdt_table, 0, sizeof(dsdt_table));
-    data->tables = g_array_new(false, true, sizeof(AcpiSdtTable));
-
-    test_dst_table(&dsdt_table, addr);
+    fetch_table(&dsdt_table, addr);
     ACPI_ASSERT_CMP(dsdt_table.header.signature, "DSDT");
 
-    /* Place DSDT first */
+    /* Since DSDT isn't in RSDT, add DSDT to ASL test tables list manually */
     g_array_append_val(data->tables, dsdt_table);
 }
 
-static void test_acpi_tables(test_data *data)
+/* Load all tables and add to test list directly RSDT referenced tables */
+static void fetch_rsdt_referenced_tables(test_data *data)
 {
-    int tables_nr = data->rsdt_tables_nr - 1; /* fadt is first */
+    int tables_nr = data->rsdt_tables_nr;
     int i;
 
     for (i = 0; i < tables_nr; i++) {
         AcpiSdtTable ssdt_table;
+        uint32_t addr;
 
-        memset(&ssdt_table, 0 , sizeof(ssdt_table));
-        uint32_t addr = data->rsdt_tables_addr[i + 1]; /* fadt is first */
-        test_dst_table(&ssdt_table, addr);
+        addr = le32_to_cpu(data->rsdt_tables_addr[i]);
+        fetch_table(&ssdt_table, addr);
+
+        /* Add table to ASL test tables list */
         g_array_append_val(data->tables, ssdt_table);
     }
 }
@@ -396,13 +256,13 @@ static void dump_aml_files(test_data *data, bool rebuild)
     int i;
 
     for (i = 0; i < data->tables->len; ++i) {
+        const char *ext = data->variant ? data->variant : "";
         sdt = &g_array_index(data->tables, AcpiSdtTable, i);
         g_assert(sdt->aml);
 
         if (rebuild) {
-            uint32_t signature = cpu_to_le32(sdt->header.signature);
-            aml_file = g_strdup_printf("%s/%s/%.4s", data_dir, data->machine,
-                                       (gchar *)&signature);
+            aml_file = g_strdup_printf("%s/%s/%.4s%s", data_dir, data->machine,
+                                       (gchar *)&sdt->header.signature, ext);
             fd = g_open(aml_file, O_WRONLY|O_TRUNC|O_CREAT,
                         S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
         } else {
@@ -418,9 +278,7 @@ static void dump_aml_files(test_data *data, bool rebuild)
 
         close(fd);
 
-        if (aml_file) {
-            g_free(aml_file);
-        }
+        g_free(aml_file);
     }
 }
 
@@ -477,7 +335,7 @@ static bool load_asl(GArray *sdts, AcpiSdtTable *sdt)
 
 #define COMMENT_END "*/"
 #define DEF_BLOCK "DefinitionBlock ("
-#define BLOCK_NAME_END ".aml"
+#define BLOCK_NAME_END ","
 
 static GString *normalize_asl(gchar *asl_code)
 {
@@ -509,25 +367,38 @@ static GArray *load_expected_aml(test_data *data)
 {
     int i;
     AcpiSdtTable *sdt;
-    gchar *aml_file;
     GError *error = NULL;
     gboolean ret;
 
     GArray *exp_tables = g_array_new(false, true, sizeof(AcpiSdtTable));
     for (i = 0; i < data->tables->len; ++i) {
         AcpiSdtTable exp_sdt;
-        uint32_t signature;
+        gchar *aml_file = NULL;
+        const char *ext = data->variant ? data->variant : "";
 
         sdt = &g_array_index(data->tables, AcpiSdtTable, i);
 
         memset(&exp_sdt, 0, sizeof(exp_sdt));
         exp_sdt.header.signature = sdt->header.signature;
 
-        signature = cpu_to_le32(sdt->header.signature);
-        aml_file = g_strdup_printf("%s/%s/%.4s", data_dir, data->machine,
-                                   (gchar *)&signature);
-        exp_sdt.aml_file = aml_file;
-        g_assert(g_file_test(aml_file, G_FILE_TEST_EXISTS));
+try_again:
+        aml_file = g_strdup_printf("%s/%s/%.4s%s", data_dir, data->machine,
+                                   (gchar *)&sdt->header.signature, ext);
+        if (getenv("V")) {
+            fprintf(stderr, "\nLooking for expected file '%s'\n", aml_file);
+        }
+        if (g_file_test(aml_file, G_FILE_TEST_EXISTS)) {
+            exp_sdt.aml_file = aml_file;
+        } else if (*ext != '\0') {
+            /* try fallback to generic (extention less) expected file */
+            ext = "";
+            g_free(aml_file);
+            goto try_again;
+        }
+        g_assert(exp_sdt.aml_file);
+        if (getenv("V")) {
+            fprintf(stderr, "\nUsing expected file '%s'\n", aml_file);
+        }
         ret = g_file_get_contents(aml_file, &exp_sdt.aml,
                                   &exp_sdt.aml_len, &error);
         g_assert(ret);
@@ -541,6 +412,7 @@ static GArray *load_expected_aml(test_data *data)
     return exp_tables;
 }
 
+/* test the list of tables in @data->tables against reference tables */
 static void test_acpi_asl(test_data *data)
 {
     int i;
@@ -580,6 +452,22 @@ static void test_acpi_asl(test_data *data)
                         (gchar *)&signature,
                         sdt->asl_file, sdt->aml_file,
                         exp_sdt->asl_file, exp_sdt->aml_file);
+                if (getenv("V")) {
+                    const char *diff_cmd = getenv("DIFF");
+                    if (diff_cmd) {
+                        int ret G_GNUC_UNUSED;
+                        char *diff = g_strdup_printf("%s %s %s", diff_cmd,
+                            exp_sdt->asl_file, sdt->asl_file);
+                        ret = system(diff) ;
+                        g_free(diff);
+                    } else {
+                        fprintf(stderr, "acpi-test: Warning. not showing "
+                            "difference since no diff utility is specified. "
+                            "Set 'DIFF' environment variable to a preferred "
+                            "diff utility and run 'make V=1 check' again to "
+                            "see ASL difference.");
+                    }
+                }
           }
         }
         g_string_free(asl, true);
@@ -589,7 +477,46 @@ static void test_acpi_asl(test_data *data)
     free_test_data(&exp_data);
 }
 
-static void test_smbios_ep_address(test_data *data)
+static bool smbios_ep_table_ok(test_data *data)
+{
+    struct smbios_21_entry_point *ep_table = &data->smbios_ep_table;
+    uint32_t addr = data->smbios_ep_addr;
+
+    ACPI_READ_ARRAY(ep_table->anchor_string, addr);
+    if (memcmp(ep_table->anchor_string, "_SM_", 4)) {
+        return false;
+    }
+    ACPI_READ_FIELD(ep_table->checksum, addr);
+    ACPI_READ_FIELD(ep_table->length, addr);
+    ACPI_READ_FIELD(ep_table->smbios_major_version, addr);
+    ACPI_READ_FIELD(ep_table->smbios_minor_version, addr);
+    ACPI_READ_FIELD(ep_table->max_structure_size, addr);
+    ACPI_READ_FIELD(ep_table->entry_point_revision, addr);
+    ACPI_READ_ARRAY(ep_table->formatted_area, addr);
+    ACPI_READ_ARRAY(ep_table->intermediate_anchor_string, addr);
+    if (memcmp(ep_table->intermediate_anchor_string, "_DMI_", 5)) {
+        return false;
+    }
+    ACPI_READ_FIELD(ep_table->intermediate_checksum, addr);
+    ACPI_READ_FIELD(ep_table->structure_table_length, addr);
+    if (ep_table->structure_table_length == 0) {
+        return false;
+    }
+    ACPI_READ_FIELD(ep_table->structure_table_address, addr);
+    ACPI_READ_FIELD(ep_table->number_of_structures, addr);
+    if (ep_table->number_of_structures == 0) {
+        return false;
+    }
+    ACPI_READ_FIELD(ep_table->smbios_bcd_revision, addr);
+    if (acpi_calc_checksum((uint8_t *)ep_table, sizeof *ep_table) ||
+        acpi_calc_checksum((uint8_t *)ep_table + 0x10,
+                           sizeof *ep_table - 0x10)) {
+        return false;
+    }
+    return true;
+}
+
+static void test_smbios_entry_point(test_data *data)
 {
     uint32_t off;
 
@@ -603,40 +530,15 @@ static void test_smbios_ep_address(test_data *data)
         }
 
         if (!memcmp(sig, "_SM_", sizeof sig)) {
-            break;
+            /* signature match, but is this a valid entry point? */
+            data->smbios_ep_addr = off;
+            if (smbios_ep_table_ok(data)) {
+                break;
+            }
         }
     }
 
     g_assert_cmphex(off, <, 0x100000);
-    data->smbios_ep_addr = off;
-}
-
-static void test_smbios_ep_table(test_data *data)
-{
-    struct smbios_entry_point *ep_table = &data->smbios_ep_table;
-    uint32_t addr = data->smbios_ep_addr;
-
-    ACPI_READ_ARRAY(ep_table->anchor_string, addr);
-    g_assert(!memcmp(ep_table->anchor_string, "_SM_", 4));
-    ACPI_READ_FIELD(ep_table->checksum, addr);
-    ACPI_READ_FIELD(ep_table->length, addr);
-    ACPI_READ_FIELD(ep_table->smbios_major_version, addr);
-    ACPI_READ_FIELD(ep_table->smbios_minor_version, addr);
-    ACPI_READ_FIELD(ep_table->max_structure_size, addr);
-    ACPI_READ_FIELD(ep_table->entry_point_revision, addr);
-    ACPI_READ_ARRAY(ep_table->formatted_area, addr);
-    ACPI_READ_ARRAY(ep_table->intermediate_anchor_string, addr);
-    g_assert(!memcmp(ep_table->intermediate_anchor_string, "_DMI_", 5));
-    ACPI_READ_FIELD(ep_table->intermediate_checksum, addr);
-    ACPI_READ_FIELD(ep_table->structure_table_length, addr);
-    g_assert_cmpuint(ep_table->structure_table_length, >, 0);
-    ACPI_READ_FIELD(ep_table->structure_table_address, addr);
-    ACPI_READ_FIELD(ep_table->number_of_structures, addr);
-    g_assert_cmpuint(ep_table->number_of_structures, >, 0);
-    ACPI_READ_FIELD(ep_table->smbios_bcd_revision, addr);
-    g_assert(!acpi_checksum((uint8_t *)ep_table, sizeof *ep_table));
-    g_assert(!acpi_checksum((uint8_t *)ep_table + 0x10,
-                            sizeof *ep_table - 0x10));
 }
 
 static inline bool smbios_single_instance(uint8_t type)
@@ -658,14 +560,13 @@ static inline bool smbios_single_instance(uint8_t type)
 static void test_smbios_structs(test_data *data)
 {
     DECLARE_BITMAP(struct_bitmap, SMBIOS_MAX_TYPE+1) = { 0 };
-    struct smbios_entry_point *ep_table = &data->smbios_ep_table;
-    uint32_t addr = ep_table->structure_table_address;
+    struct smbios_21_entry_point *ep_table = &data->smbios_ep_table;
+    uint32_t addr = le32_to_cpu(ep_table->structure_table_address);
     int i, len, max_len = 0;
     uint8_t type, prv, crt;
-    uint8_t required_struct_types[] = {0, 1, 3, 4, 16, 17, 19, 32, 127};
 
     /* walk the smbios tables */
-    for (i = 0; i < ep_table->number_of_structures; i++) {
+    for (i = 0; i < le16_to_cpu(ep_table->number_of_structures); i++) {
 
         /* grab type and formatted area length from struct header */
         type = readb(addr);
@@ -697,57 +598,42 @@ static void test_smbios_structs(test_data *data)
     }
 
     /* total table length and max struct size must match entry point values */
-    g_assert_cmpuint(ep_table->structure_table_length, ==,
-                     addr - ep_table->structure_table_address);
-    g_assert_cmpuint(ep_table->max_structure_size, ==, max_len);
+    g_assert_cmpuint(le16_to_cpu(ep_table->structure_table_length), ==,
+                     addr - le32_to_cpu(ep_table->structure_table_address));
+    g_assert_cmpuint(le16_to_cpu(ep_table->max_structure_size), ==, max_len);
 
     /* required struct types must all be present */
-    for (i = 0; i < ARRAY_SIZE(required_struct_types); i++) {
-        g_assert(test_bit(required_struct_types[i], struct_bitmap));
+    for (i = 0; i < data->required_struct_types_len; i++) {
+        g_assert(test_bit(data->required_struct_types[i], struct_bitmap));
     }
 }
 
 static void test_acpi_one(const char *params, test_data *data)
 {
     char *args;
-    uint8_t signature_low;
-    uint8_t signature_high;
-    uint16_t signature;
-    int i;
 
-    args = g_strdup_printf("-net none -display none %s "
-                           "-drive id=hd0,if=none,file=%s "
+    /* Disable kernel irqchip to be able to override apic irq0. */
+    args = g_strdup_printf("-machine %s,accel=%s,kernel-irqchip=off "
+                           "-net none -display none %s "
+                           "-drive id=hd0,if=none,file=%s,format=raw "
                            "-device ide-hd,drive=hd0 ",
+                           data->machine, "kvm:tcg",
                            params ? params : "", disk);
 
     qtest_start(args);
 
-   /* Wait at most 1 minute */
-#define TEST_DELAY (1 * G_USEC_PER_SEC / 10)
-#define TEST_CYCLES MAX((60 * G_USEC_PER_SEC / TEST_DELAY), 1)
+    boot_sector_test(global_qtest);
 
-    /* Poll until code has run and modified memory.  Once it has we know BIOS
-     * initialization is done.  TODO: check that IP reached the halt
-     * instruction.
-     */
-    for (i = 0; i < TEST_CYCLES; ++i) {
-        signature_low = readb(BOOT_SECTOR_ADDRESS + SIGNATURE_OFFSET);
-        signature_high = readb(BOOT_SECTOR_ADDRESS + SIGNATURE_OFFSET + 1);
-        signature = (signature_high << 8) | signature_low;
-        if (signature == SIGNATURE) {
-            break;
-        }
-        g_usleep(TEST_DELAY);
-    }
-    g_assert_cmphex(signature, ==, SIGNATURE);
-
+    data->tables = g_array_new(false, true, sizeof(AcpiSdtTable));
     test_acpi_rsdp_address(data);
     test_acpi_rsdp_table(data);
     test_acpi_rsdt_table(data);
-    test_acpi_fadt_table(data);
+    fadt_fetch_facs_and_dsdt_ptrs(data);
     test_acpi_facs_table(data);
     test_acpi_dsdt_table(data);
-    test_acpi_tables(data);
+    fetch_rsdt_referenced_tables(data);
+
+    sanitize_fadt_ptrs(data);
 
     if (iasl) {
         if (getenv(ACPI_REBUILD_EXPECTED_AML)) {
@@ -757,15 +643,18 @@ static void test_acpi_one(const char *params, test_data *data)
         }
     }
 
-    test_smbios_ep_address(data);
-    test_smbios_ep_table(data);
+    test_smbios_entry_point(data);
     test_smbios_structs(data);
 
     qtest_quit(global_qtest);
     g_free(args);
 }
 
-static void test_acpi_tcg(void)
+static uint8_t base_required_struct_types[] = {
+    0, 1, 3, 4, 16, 17, 19, 32, 127
+};
+
+static void test_acpi_piix4_tcg(void)
 {
     test_data data;
 
@@ -774,34 +663,230 @@ static void test_acpi_tcg(void)
      */
     memset(&data, 0, sizeof(data));
     data.machine = MACHINE_PC;
-    test_acpi_one("-machine accel=tcg", &data);
+    data.required_struct_types = base_required_struct_types;
+    data.required_struct_types_len = ARRAY_SIZE(base_required_struct_types);
+    test_acpi_one(NULL, &data);
     free_test_data(&data);
+}
+
+static void test_acpi_piix4_tcg_bridge(void)
+{
+    test_data data;
+
+    memset(&data, 0, sizeof(data));
+    data.machine = MACHINE_PC;
+    data.variant = ".bridge";
+    data.required_struct_types = base_required_struct_types;
+    data.required_struct_types_len = ARRAY_SIZE(base_required_struct_types);
+    test_acpi_one("-device pci-bridge,chassis_nr=1", &data);
+    free_test_data(&data);
+}
+
+static void test_acpi_q35_tcg(void)
+{
+    test_data data;
 
     memset(&data, 0, sizeof(data));
     data.machine = MACHINE_Q35;
-    test_acpi_one("-machine q35,accel=tcg", &data);
+    data.required_struct_types = base_required_struct_types;
+    data.required_struct_types_len = ARRAY_SIZE(base_required_struct_types);
+    test_acpi_one(NULL, &data);
     free_test_data(&data);
+}
+
+static void test_acpi_q35_tcg_bridge(void)
+{
+    test_data data;
+
+    memset(&data, 0, sizeof(data));
+    data.machine = MACHINE_Q35;
+    data.variant = ".bridge";
+    data.required_struct_types = base_required_struct_types;
+    data.required_struct_types_len = ARRAY_SIZE(base_required_struct_types);
+    test_acpi_one("-device pci-bridge,chassis_nr=1",
+                  &data);
+    free_test_data(&data);
+}
+
+static void test_acpi_piix4_tcg_cphp(void)
+{
+    test_data data;
+
+    memset(&data, 0, sizeof(data));
+    data.machine = MACHINE_PC;
+    data.variant = ".cphp";
+    test_acpi_one("-smp 2,cores=3,sockets=2,maxcpus=6"
+                  " -numa node -numa node"
+                  " -numa dist,src=0,dst=1,val=21",
+                  &data);
+    free_test_data(&data);
+}
+
+static void test_acpi_q35_tcg_cphp(void)
+{
+    test_data data;
+
+    memset(&data, 0, sizeof(data));
+    data.machine = MACHINE_Q35;
+    data.variant = ".cphp";
+    test_acpi_one(" -smp 2,cores=3,sockets=2,maxcpus=6"
+                  " -numa node -numa node"
+                  " -numa dist,src=0,dst=1,val=21",
+                  &data);
+    free_test_data(&data);
+}
+
+static uint8_t ipmi_required_struct_types[] = {
+    0, 1, 3, 4, 16, 17, 19, 32, 38, 127
+};
+
+static void test_acpi_q35_tcg_ipmi(void)
+{
+    test_data data;
+
+    memset(&data, 0, sizeof(data));
+    data.machine = MACHINE_Q35;
+    data.variant = ".ipmibt";
+    data.required_struct_types = ipmi_required_struct_types;
+    data.required_struct_types_len = ARRAY_SIZE(ipmi_required_struct_types);
+    test_acpi_one("-device ipmi-bmc-sim,id=bmc0"
+                  " -device isa-ipmi-bt,bmc=bmc0",
+                  &data);
+    free_test_data(&data);
+}
+
+static void test_acpi_piix4_tcg_ipmi(void)
+{
+    test_data data;
+
+    /* Supplying -machine accel argument overrides the default (qtest).
+     * This is to make guest actually run.
+     */
+    memset(&data, 0, sizeof(data));
+    data.machine = MACHINE_PC;
+    data.variant = ".ipmikcs";
+    data.required_struct_types = ipmi_required_struct_types;
+    data.required_struct_types_len = ARRAY_SIZE(ipmi_required_struct_types);
+    test_acpi_one("-device ipmi-bmc-sim,id=bmc0"
+                  " -device isa-ipmi-kcs,irq=0,bmc=bmc0",
+                  &data);
+    free_test_data(&data);
+}
+
+static void test_acpi_q35_tcg_memhp(void)
+{
+    test_data data;
+
+    memset(&data, 0, sizeof(data));
+    data.machine = MACHINE_Q35;
+    data.variant = ".memhp";
+    test_acpi_one(" -m 128,slots=3,maxmem=1G"
+                  " -numa node -numa node"
+                  " -numa dist,src=0,dst=1,val=21",
+                  &data);
+    free_test_data(&data);
+}
+
+static void test_acpi_piix4_tcg_memhp(void)
+{
+    test_data data;
+
+    memset(&data, 0, sizeof(data));
+    data.machine = MACHINE_PC;
+    data.variant = ".memhp";
+    test_acpi_one(" -m 128,slots=3,maxmem=1G"
+                  " -numa node -numa node"
+                  " -numa dist,src=0,dst=1,val=21",
+                  &data);
+    free_test_data(&data);
+}
+
+static void test_acpi_q35_tcg_numamem(void)
+{
+    test_data data;
+
+    memset(&data, 0, sizeof(data));
+    data.machine = MACHINE_Q35;
+    data.variant = ".numamem";
+    test_acpi_one(" -numa node -numa node,mem=128", &data);
+    free_test_data(&data);
+}
+
+static void test_acpi_piix4_tcg_numamem(void)
+{
+    test_data data;
+
+    memset(&data, 0, sizeof(data));
+    data.machine = MACHINE_PC;
+    data.variant = ".numamem";
+    test_acpi_one(" -numa node -numa node,mem=128", &data);
+    free_test_data(&data);
+}
+
+static void test_acpi_tcg_dimm_pxm(const char *machine)
+{
+    test_data data;
+
+    memset(&data, 0, sizeof(data));
+    data.machine = machine;
+    data.variant = ".dimmpxm";
+    test_acpi_one(" -machine nvdimm=on,nvdimm-persistence=cpu"
+                  " -smp 4,sockets=4"
+                  " -m 128M,slots=3,maxmem=1G"
+                  " -numa node,mem=32M,nodeid=0"
+                  " -numa node,mem=32M,nodeid=1"
+                  " -numa node,mem=32M,nodeid=2"
+                  " -numa node,mem=32M,nodeid=3"
+                  " -numa cpu,node-id=0,socket-id=0"
+                  " -numa cpu,node-id=1,socket-id=1"
+                  " -numa cpu,node-id=2,socket-id=2"
+                  " -numa cpu,node-id=3,socket-id=3"
+                  " -object memory-backend-ram,id=ram0,size=128M"
+                  " -object memory-backend-ram,id=nvm0,size=128M"
+                  " -device pc-dimm,id=dimm0,memdev=ram0,node=1"
+                  " -device nvdimm,id=dimm1,memdev=nvm0,node=2",
+                  &data);
+    free_test_data(&data);
+}
+
+static void test_acpi_q35_tcg_dimm_pxm(void)
+{
+    test_acpi_tcg_dimm_pxm(MACHINE_Q35);
+}
+
+static void test_acpi_piix4_tcg_dimm_pxm(void)
+{
+    test_acpi_tcg_dimm_pxm(MACHINE_PC);
 }
 
 int main(int argc, char *argv[])
 {
     const char *arch = qtest_get_arch();
-    FILE *f = fopen(disk, "w");
     int ret;
 
-    if (!f) {
-        fprintf(stderr, "Couldn't open \"%s\": %s", disk, strerror(errno));
-        return 1;
-    }
-    fwrite(boot_sector, 1, sizeof boot_sector, f);
-    fclose(f);
+    ret = boot_sector_init(disk);
+    if(ret)
+        return ret;
 
     g_test_init(&argc, &argv, NULL);
 
     if (strcmp(arch, "i386") == 0 || strcmp(arch, "x86_64") == 0) {
-        qtest_add_func("acpi/tcg", test_acpi_tcg);
+        qtest_add_func("acpi/piix4", test_acpi_piix4_tcg);
+        qtest_add_func("acpi/piix4/bridge", test_acpi_piix4_tcg_bridge);
+        qtest_add_func("acpi/q35", test_acpi_q35_tcg);
+        qtest_add_func("acpi/q35/bridge", test_acpi_q35_tcg_bridge);
+        qtest_add_func("acpi/piix4/ipmi", test_acpi_piix4_tcg_ipmi);
+        qtest_add_func("acpi/q35/ipmi", test_acpi_q35_tcg_ipmi);
+        qtest_add_func("acpi/piix4/cpuhp", test_acpi_piix4_tcg_cphp);
+        qtest_add_func("acpi/q35/cpuhp", test_acpi_q35_tcg_cphp);
+        qtest_add_func("acpi/piix4/memhp", test_acpi_piix4_tcg_memhp);
+        qtest_add_func("acpi/q35/memhp", test_acpi_q35_tcg_memhp);
+        qtest_add_func("acpi/piix4/numamem", test_acpi_piix4_tcg_numamem);
+        qtest_add_func("acpi/q35/numamem", test_acpi_q35_tcg_numamem);
+        qtest_add_func("acpi/piix4/dimmpxm", test_acpi_piix4_tcg_dimm_pxm);
+        qtest_add_func("acpi/q35/dimmpxm", test_acpi_q35_tcg_dimm_pxm);
     }
     ret = g_test_run();
-    unlink(disk);
+    boot_sector_cleanup(disk);
     return ret;
 }

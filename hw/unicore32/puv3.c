@@ -9,11 +9,10 @@
  * See the COPYING file in the top-level directory.
  */
 
-#include "qemu-common.h"
+#include "qemu/osdep.h"
+#include "qapi/error.h"
+#include "cpu.h"
 #include "ui/console.h"
-#include "elf.h"
-#include "exec/address-spaces.h"
-#include "hw/sysbus.h"
 #include "hw/boards.h"
 #include "hw/loader.h"
 #include "hw/i386/pc.h"
@@ -21,9 +20,20 @@
 
 #undef DEBUG_PUV3
 #include "hw/unicore32/puv3.h"
+#include "hw/input/i8042.h"
 
 #define KERNEL_LOAD_ADDR        0x03000000
 #define KERNEL_MAX_SIZE         0x00800000 /* Just a guess */
+
+/* PKUnity System bus (AHB): 0xc0000000 - 0xedffffff (640MB) */
+#define PUV3_DMA_BASE           (0xc0200000) /* AHB-4 */
+
+/* PKUnity Peripheral bus (APB): 0xee000000 - 0xefffffff (128MB) */
+#define PUV3_GPIO_BASE          (0xee500000) /* APB-5 */
+#define PUV3_INTC_BASE          (0xee600000) /* APB-6 */
+#define PUV3_OST_BASE           (0xee800000) /* APB-8 */
+#define PUV3_PM_BASE            (0xeea00000) /* APB-10 */
+#define PUV3_PS2_BASE           (0xeeb00000) /* APB-11 */
 
 static void puv3_intc_cpu_handler(void *opaque, int irq, int level)
 {
@@ -40,15 +50,15 @@ static void puv3_intc_cpu_handler(void *opaque, int irq, int level)
 
 static void puv3_soc_init(CPUUniCore32State *env)
 {
-    qemu_irq *cpu_intc, irqs[PUV3_IRQS_NR];
+    qemu_irq cpu_intc, irqs[PUV3_IRQS_NR];
     DeviceState *dev;
     MemoryRegion *i8042 = g_new(MemoryRegion, 1);
     int i;
 
     /* Initialize interrupt controller */
-    cpu_intc = qemu_allocate_irqs(puv3_intc_cpu_handler,
-                                  uc32_env_get_cpu(env), 1);
-    dev = sysbus_create_simple("puv3_intc", PUV3_INTC_BASE, *cpu_intc);
+    cpu_intc = qemu_allocate_irq(puv3_intc_cpu_handler,
+                                 uc32_env_get_cpu(env), 0);
+    dev = sysbus_create_simple("puv3_intc", PUV3_INTC_BASE, cpu_intc);
     for (i = 0; i < PUV3_IRQS_NR; i++) {
         irqs[i] = qdev_get_gpio_in(dev, i);
     }
@@ -75,8 +85,7 @@ static void puv3_board_init(CPUUniCore32State *env, ram_addr_t ram_size)
 
     /* SDRAM at address zero.  */
     memory_region_init_ram(ram_memory, NULL, "puv3.ram", ram_size,
-                           &error_abort);
-    vmstate_register_ram_global(ram_memory);
+                           &error_fatal);
     memory_region_add_subregion(get_system_memory(), 0, ram_memory);
 }
 
@@ -89,13 +98,17 @@ static void puv3_load_kernel(const char *kernel_filename)
     if (kernel_filename == NULL && qtest_enabled()) {
         return;
     }
-    assert(kernel_filename != NULL);
+    if (kernel_filename == NULL) {
+        error_report("kernel parameter cannot be empty");
+        exit(1);
+    }
 
     /* only zImage format supported */
     size = load_image_targphys(kernel_filename, KERNEL_LOAD_ADDR,
             KERNEL_MAX_SIZE);
     if (size < 0) {
-        hw_error("Load kernel error: '%s'\n", kernel_filename);
+        error_report("Load kernel error: '%s'", kernel_filename);
+        exit(1);
     }
 
     /* cheat curses that we have a graphic console, only under ocd console */
@@ -105,39 +118,30 @@ static void puv3_load_kernel(const char *kernel_filename)
 static void puv3_init(MachineState *machine)
 {
     ram_addr_t ram_size = machine->ram_size;
-    const char *cpu_model = machine->cpu_model;
     const char *kernel_filename = machine->kernel_filename;
     const char *initrd_filename = machine->initrd_filename;
     CPUUniCore32State *env;
+    UniCore32CPU *cpu;
 
     if (initrd_filename) {
-        hw_error("Please use kernel built-in initramdisk.\n");
+        error_report("Please use kernel built-in initramdisk");
+        exit(1);
     }
 
-    if (!cpu_model) {
-        cpu_model = "UniCore-II";
-    }
-
-    env = cpu_init(cpu_model);
-    if (!env) {
-        hw_error("Unable to find CPU definition\n");
-    }
+    cpu = UNICORE32_CPU(cpu_create(machine->cpu_type));
+    env = &cpu->env;
 
     puv3_soc_init(env);
     puv3_board_init(env, ram_size);
     puv3_load_kernel(kernel_filename);
 }
 
-static QEMUMachine puv3_machine = {
-    .name = "puv3",
-    .desc = "PKUnity Version-3 based on UniCore32",
-    .init = puv3_init,
-    .is_default = 1,
-};
-
-static void puv3_machine_init(void)
+static void puv3_machine_init(MachineClass *mc)
 {
-    qemu_register_machine(&puv3_machine);
+    mc->desc = "PKUnity Version-3 based on UniCore32";
+    mc->init = puv3_init;
+    mc->is_default = 1;
+    mc->default_cpu_type = UNICORE32_CPU_TYPE_NAME("UniCore-II");
 }
 
-machine_init(puv3_machine_init)
+DEFINE_MACHINE("puv3", puv3_machine_init)

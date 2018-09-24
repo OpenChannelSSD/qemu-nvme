@@ -17,8 +17,9 @@
  * GNU GPL, version 2 or (at your option) any later version.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
-#include "hw/audio/audio.h"
+#include "hw/audio/soundhw.h"
 #include "audio/audio.h"
 #include "hw/pci/pci.h"
 #include "sysemu/dma.h"
@@ -1337,7 +1338,7 @@ static void ac97_on_reset (DeviceState *dev)
     mixer_reset (s);
 }
 
-static int ac97_initfn (PCIDevice *dev)
+static void ac97_realize(PCIDevice *dev, Error **errp)
 {
     AC97LinkState *s = DO_UPCAST (AC97LinkState, dev, dev);
     uint8_t *c = s->dev.config;
@@ -1384,7 +1385,16 @@ static int ac97_initfn (PCIDevice *dev)
     pci_register_bar (&s->dev, 1, PCI_BASE_ADDRESS_SPACE_IO, &s->io_nabm);
     AUD_register_card ("ac97", &s->card);
     ac97_on_reset (&s->dev.qdev);
-    return 0;
+}
+
+static void ac97_exit(PCIDevice *dev)
+{
+    AC97LinkState *s = DO_UPCAST(AC97LinkState, dev, dev);
+
+    AUD_close_in(&s->card, s->voice_pi);
+    AUD_close_out(&s->card, s->voice_po);
+    AUD_close_in(&s->card, s->voice_mc);
+    AUD_remove_card(&s->card);
 }
 
 static int ac97_init (PCIBus *bus)
@@ -1403,7 +1413,8 @@ static void ac97_class_init (ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS (klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS (klass);
 
-    k->init = ac97_initfn;
+    k->realize = ac97_realize;
+    k->exit = ac97_exit;
     k->vendor_id = PCI_VENDOR_ID_INTEL;
     k->device_id = PCI_DEVICE_ID_INTEL_82801AA_5;
     k->revision = 0x01;
@@ -1420,6 +1431,10 @@ static const TypeInfo ac97_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof (AC97LinkState),
     .class_init    = ac97_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void ac97_register_types (void)

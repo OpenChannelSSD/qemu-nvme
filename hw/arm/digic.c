@@ -20,7 +20,10 @@
  *
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "hw/arm/digic.h"
+#include "sysemu/sysemu.h"
 
 #define DIGIC4_TIMER_BASE(n)    (0xc0210000 + (n) * 0x100)
 
@@ -82,6 +85,7 @@ static void digic_realize(DeviceState *dev, Error **errp)
         sysbus_mmio_map(sbd, 0, DIGIC4_TIMER_BASE(i));
     }
 
+    qdev_prop_set_chr(DEVICE(&s->uart), "chardev", serial_hd(0));
     object_property_set_bool(OBJECT(&s->uart), true, "realized", &err);
     if (err != NULL) {
         error_propagate(errp, err);
@@ -97,6 +101,8 @@ static void digic_class_init(ObjectClass *oc, void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = digic_realize;
+    /* Reason: Uses serial_hds in the realize function --> not usable twice */
+    dc->user_creatable = false;
 }
 
 static const TypeInfo digic_type_info = {

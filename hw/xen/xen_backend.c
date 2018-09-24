@@ -22,107 +22,32 @@
  * TODO: add some xenbus / xenstore concepts overview here.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdarg.h>
-#include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <inttypes.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
+#include "qemu/osdep.h"
 #include <sys/signal.h>
 
 #include "hw/hw.h"
-#include "sysemu/char.h"
+#include "hw/sysbus.h"
+#include "hw/boards.h"
 #include "qemu/log.h"
+#include "qapi/error.h"
 #include "hw/xen/xen_backend.h"
+#include "hw/xen/xen_pvdev.h"
+#include "monitor/qdev.h"
 
 #include <xen/grant_table.h>
+
+DeviceState *xen_sysdev;
+BusState *xen_sysbus;
 
 /* ------------------------------------------------------------- */
 
 /* public */
-XenXC xen_xc = XC_HANDLER_INITIAL_VALUE;
 struct xs_handle *xenstore = NULL;
 const char *xen_protocol;
 
 /* private */
-static QTAILQ_HEAD(XenDeviceHead, XenDevice) xendevs = QTAILQ_HEAD_INITIALIZER(xendevs);
-static int debug = 0;
-
-/* ------------------------------------------------------------- */
-
-int xenstore_write_str(const char *base, const char *node, const char *val)
-{
-    char abspath[XEN_BUFSIZE];
-
-    snprintf(abspath, sizeof(abspath), "%s/%s", base, node);
-    if (!xs_write(xenstore, 0, abspath, val, strlen(val))) {
-        return -1;
-    }
-    return 0;
-}
-
-char *xenstore_read_str(const char *base, const char *node)
-{
-    char abspath[XEN_BUFSIZE];
-    unsigned int len;
-    char *str, *ret = NULL;
-
-    snprintf(abspath, sizeof(abspath), "%s/%s", base, node);
-    str = xs_read(xenstore, 0, abspath, &len);
-    if (str != NULL) {
-        /* move to qemu-allocated memory to make sure
-         * callers can savely g_free() stuff. */
-        ret = g_strdup(str);
-        free(str);
-    }
-    return ret;
-}
-
-int xenstore_write_int(const char *base, const char *node, int ival)
-{
-    char val[12];
-
-    snprintf(val, sizeof(val), "%d", ival);
-    return xenstore_write_str(base, node, val);
-}
-
-int xenstore_write_int64(const char *base, const char *node, int64_t ival)
-{
-    char val[21];
-
-    snprintf(val, sizeof(val), "%"PRId64, ival);
-    return xenstore_write_str(base, node, val);
-}
-
-int xenstore_read_int(const char *base, const char *node, int *ival)
-{
-    char *val;
-    int rc = -1;
-
-    val = xenstore_read_str(base, node);
-    if (val && 1 == sscanf(val, "%d", ival)) {
-        rc = 0;
-    }
-    g_free(val);
-    return rc;
-}
-
-int xenstore_read_uint64(const char *base, const char *node, uint64_t *uval)
-{
-    char *val;
-    int rc = -1;
-
-    val = xenstore_read_str(base, node);
-    if (val && 1 == sscanf(val, "%"SCNu64, uval)) {
-        rc = 0;
-    }
-    g_free(val);
-    return rc;
-}
+static bool xen_feature_grant_copy;
+static int debug;
 
 int xenstore_write_be_str(struct XenDevice *xendev, const char *node, const char *val)
 {
@@ -159,26 +84,13 @@ int xenstore_read_fe_int(struct XenDevice *xendev, const char *node, int *ival)
     return xenstore_read_int(xendev->fe, node, ival);
 }
 
-int xenstore_read_fe_uint64(struct XenDevice *xendev, const char *node, uint64_t *uval)
+int xenstore_read_fe_uint64(struct XenDevice *xendev, const char *node,
+                            uint64_t *uval)
 {
     return xenstore_read_uint64(xendev->fe, node, uval);
 }
 
 /* ------------------------------------------------------------- */
-
-const char *xenbus_strstate(enum xenbus_state state)
-{
-    static const char *const name[] = {
-        [ XenbusStateUnknown      ] = "Unknown",
-        [ XenbusStateInitialising ] = "Initialising",
-        [ XenbusStateInitWait     ] = "InitWait",
-        [ XenbusStateInitialised  ] = "Initialised",
-        [ XenbusStateConnected    ] = "Connected",
-        [ XenbusStateClosing      ] = "Closing",
-        [ XenbusStateClosed       ] = "Closed",
-    };
-    return (state < ARRAY_SIZE(name)) ? name[state] : "INVALID";
-}
 
 int xen_be_set_state(struct XenDevice *xendev, enum xenbus_state state)
 {
@@ -188,31 +100,160 @@ int xen_be_set_state(struct XenDevice *xendev, enum xenbus_state state)
     if (rc < 0) {
         return rc;
     }
-    xen_be_printf(xendev, 1, "backend state: %s -> %s\n",
+    xen_pv_printf(xendev, 1, "backend state: %s -> %s\n",
                   xenbus_strstate(xendev->be_state), xenbus_strstate(state));
     xendev->be_state = state;
     return 0;
 }
 
-/* ------------------------------------------------------------- */
-
-struct XenDevice *xen_be_find_xendev(const char *type, int dom, int dev)
+void xen_be_set_max_grant_refs(struct XenDevice *xendev,
+                               unsigned int nr_refs)
 {
-    struct XenDevice *xendev;
+    assert(xendev->ops->flags & DEVOPS_FLAG_NEED_GNTDEV);
 
-    QTAILQ_FOREACH(xendev, &xendevs, next) {
-        if (xendev->dom != dom) {
-            continue;
-        }
-        if (xendev->dev != dev) {
-            continue;
-        }
-        if (strcmp(xendev->type, type) != 0) {
-            continue;
-        }
-        return xendev;
+    if (xengnttab_set_max_grants(xendev->gnttabdev, nr_refs)) {
+        xen_pv_printf(xendev, 0, "xengnttab_set_max_grants failed: %s\n",
+                      strerror(errno));
     }
-    return NULL;
+}
+
+void *xen_be_map_grant_refs(struct XenDevice *xendev, uint32_t *refs,
+                            unsigned int nr_refs, int prot)
+{
+    void *ptr;
+
+    assert(xendev->ops->flags & DEVOPS_FLAG_NEED_GNTDEV);
+
+    ptr = xengnttab_map_domain_grant_refs(xendev->gnttabdev, nr_refs,
+                                          xen_domid, refs, prot);
+    if (!ptr) {
+        xen_pv_printf(xendev, 0,
+                      "xengnttab_map_domain_grant_refs failed: %s\n",
+                      strerror(errno));
+    }
+
+    return ptr;
+}
+
+void xen_be_unmap_grant_refs(struct XenDevice *xendev, void *ptr,
+                             unsigned int nr_refs)
+{
+    assert(xendev->ops->flags & DEVOPS_FLAG_NEED_GNTDEV);
+
+    if (xengnttab_unmap(xendev->gnttabdev, ptr, nr_refs)) {
+        xen_pv_printf(xendev, 0, "xengnttab_unmap failed: %s\n",
+                      strerror(errno));
+    }
+}
+
+static int compat_copy_grant_refs(struct XenDevice *xendev,
+                                  bool to_domain,
+                                  XenGrantCopySegment segs[],
+                                  unsigned int nr_segs)
+{
+    uint32_t *refs = g_new(uint32_t, nr_segs);
+    int prot = to_domain ? PROT_WRITE : PROT_READ;
+    void *pages;
+    unsigned int i;
+
+    for (i = 0; i < nr_segs; i++) {
+        XenGrantCopySegment *seg = &segs[i];
+
+        refs[i] = to_domain ?
+            seg->dest.foreign.ref : seg->source.foreign.ref;
+    }
+
+    pages = xengnttab_map_domain_grant_refs(xendev->gnttabdev, nr_segs,
+                                            xen_domid, refs, prot);
+    if (!pages) {
+        xen_pv_printf(xendev, 0,
+                      "xengnttab_map_domain_grant_refs failed: %s\n",
+                      strerror(errno));
+        g_free(refs);
+        return -1;
+    }
+
+    for (i = 0; i < nr_segs; i++) {
+        XenGrantCopySegment *seg = &segs[i];
+        void *page = pages + (i * XC_PAGE_SIZE);
+
+        if (to_domain) {
+            memcpy(page + seg->dest.foreign.offset, seg->source.virt,
+                   seg->len);
+        } else {
+            memcpy(seg->dest.virt, page + seg->source.foreign.offset,
+                   seg->len);
+        }
+    }
+
+    if (xengnttab_unmap(xendev->gnttabdev, pages, nr_segs)) {
+        xen_pv_printf(xendev, 0, "xengnttab_unmap failed: %s\n",
+                      strerror(errno));
+    }
+
+    g_free(refs);
+    return 0;
+}
+
+int xen_be_copy_grant_refs(struct XenDevice *xendev,
+                           bool to_domain,
+                           XenGrantCopySegment segs[],
+                           unsigned int nr_segs)
+{
+    xengnttab_grant_copy_segment_t *xengnttab_segs;
+    unsigned int i;
+    int rc;
+
+    assert(xendev->ops->flags & DEVOPS_FLAG_NEED_GNTDEV);
+
+    if (!xen_feature_grant_copy) {
+        return compat_copy_grant_refs(xendev, to_domain, segs, nr_segs);
+    }
+
+    xengnttab_segs = g_new0(xengnttab_grant_copy_segment_t, nr_segs);
+
+    for (i = 0; i < nr_segs; i++) {
+        XenGrantCopySegment *seg = &segs[i];
+        xengnttab_grant_copy_segment_t *xengnttab_seg = &xengnttab_segs[i];
+
+        if (to_domain) {
+            xengnttab_seg->flags = GNTCOPY_dest_gref;
+            xengnttab_seg->dest.foreign.domid = xen_domid;
+            xengnttab_seg->dest.foreign.ref = seg->dest.foreign.ref;
+            xengnttab_seg->dest.foreign.offset = seg->dest.foreign.offset;
+            xengnttab_seg->source.virt = seg->source.virt;
+        } else {
+            xengnttab_seg->flags = GNTCOPY_source_gref;
+            xengnttab_seg->source.foreign.domid = xen_domid;
+            xengnttab_seg->source.foreign.ref = seg->source.foreign.ref;
+            xengnttab_seg->source.foreign.offset =
+                seg->source.foreign.offset;
+            xengnttab_seg->dest.virt = seg->dest.virt;
+        }
+
+        xengnttab_seg->len = seg->len;
+    }
+
+    rc = xengnttab_grant_copy(xendev->gnttabdev, nr_segs, xengnttab_segs);
+
+    if (rc) {
+        xen_pv_printf(xendev, 0, "xengnttab_copy failed: %s\n",
+                      strerror(errno));
+    }
+
+    for (i = 0; i < nr_segs; i++) {
+        xengnttab_grant_copy_segment_t *xengnttab_seg =
+            &xengnttab_segs[i];
+
+        if (xengnttab_seg->status != GNTST_okay) {
+            xen_pv_printf(xendev, 0, "segment[%u] status: %d\n", i,
+                          xengnttab_seg->status);
+            rc = -1;
+        }
+    }
+
+    g_free(xengnttab_segs);
+    return rc;
 }
 
 /*
@@ -223,13 +264,20 @@ static struct XenDevice *xen_be_get_xendev(const char *type, int dom, int dev,
 {
     struct XenDevice *xendev;
 
-    xendev = xen_be_find_xendev(type, dom, dev);
+    xendev = xen_pv_find_xendev(type, dom, dev);
     if (xendev) {
         return xendev;
     }
 
     /* init new xendev */
     xendev = g_malloc0(ops->size);
+    object_initialize(&xendev->qdev, ops->size, TYPE_XENBACKEND);
+    OBJECT(xendev)->free = g_free;
+    qdev_set_parent_bus(DEVICE(xendev), xen_sysbus);
+    qdev_set_id(DEVICE(xendev), g_strdup_printf("xen-%s-%d", type, dev));
+    qdev_init_nofail(DEVICE(xendev));
+    object_unref(OBJECT(xendev));
+
     xendev->type  = type;
     xendev->dom   = dom;
     xendev->dev   = dev;
@@ -243,27 +291,15 @@ static struct XenDevice *xen_be_get_xendev(const char *type, int dom, int dev,
     xendev->debug      = debug;
     xendev->local_port = -1;
 
-    xendev->evtchndev = xen_xc_evtchn_open(NULL, 0);
-    if (xendev->evtchndev == XC_HANDLER_INITIAL_VALUE) {
-        xen_be_printf(NULL, 0, "can't open evtchn device\n");
-        g_free(xendev);
+    xendev->evtchndev = xenevtchn_open(NULL, 0);
+    if (xendev->evtchndev == NULL) {
+        xen_pv_printf(NULL, 0, "can't open evtchn device\n");
+        qdev_unplug(DEVICE(xendev), NULL);
         return NULL;
     }
-    fcntl(xc_evtchn_fd(xendev->evtchndev), F_SETFD, FD_CLOEXEC);
+    qemu_set_cloexec(xenevtchn_fd(xendev->evtchndev));
 
-    if (ops->flags & DEVOPS_FLAG_NEED_GNTDEV) {
-        xendev->gnttabdev = xen_xc_gnttab_open(NULL, 0);
-        if (xendev->gnttabdev == XC_HANDLER_INITIAL_VALUE) {
-            xen_be_printf(NULL, 0, "can't open gnttab device\n");
-            xc_evtchn_close(xendev->evtchndev);
-            g_free(xendev);
-            return NULL;
-        }
-    } else {
-        xendev->gnttabdev = XC_HANDLER_INITIAL_VALUE;
-    }
-
-    QTAILQ_INSERT_TAIL(&xendevs, xendev, next);
+    xen_pv_insert_xendev(xendev);
 
     if (xendev->ops->alloc) {
         xendev->ops->alloc(xendev);
@@ -272,52 +308,6 @@ static struct XenDevice *xen_be_get_xendev(const char *type, int dom, int dev,
     return xendev;
 }
 
-/*
- * release xen backend device.
- */
-static struct XenDevice *xen_be_del_xendev(int dom, int dev)
-{
-    struct XenDevice *xendev, *xnext;
-
-    /*
-     * This is pretty much like QTAILQ_FOREACH(xendev, &xendevs, next) but
-     * we save the next pointer in xnext because we might free xendev.
-     */
-    xnext = xendevs.tqh_first;
-    while (xnext) {
-        xendev = xnext;
-        xnext = xendev->next.tqe_next;
-
-        if (xendev->dom != dom) {
-            continue;
-        }
-        if (xendev->dev != dev && dev != -1) {
-            continue;
-        }
-
-        if (xendev->ops->free) {
-            xendev->ops->free(xendev);
-        }
-
-        if (xendev->fe) {
-            char token[XEN_BUFSIZE];
-            snprintf(token, sizeof(token), "fe:%p", xendev);
-            xs_unwatch(xenstore, xendev->fe, token);
-            g_free(xendev->fe);
-        }
-
-        if (xendev->evtchndev != XC_HANDLER_INITIAL_VALUE) {
-            xc_evtchn_close(xendev->evtchndev);
-        }
-        if (xendev->gnttabdev != XC_HANDLER_INITIAL_VALUE) {
-            xc_gnttab_close(xendev->gnttabdev);
-        }
-
-        QTAILQ_REMOVE(&xendevs, xendev, next);
-        g_free(xendev);
-    }
-    return NULL;
-}
 
 /*
  * Sync internal data structures on xenstore updates.
@@ -333,7 +323,7 @@ static void xen_be_backend_changed(struct XenDevice *xendev, const char *node)
     }
 
     if (node) {
-        xen_be_printf(xendev, 2, "backend update: %s\n", node);
+        xen_pv_printf(xendev, 2, "backend update: %s\n", node);
         if (xendev->ops->backend_changed) {
             xendev->ops->backend_changed(xendev, node);
         }
@@ -349,7 +339,7 @@ static void xen_be_frontend_changed(struct XenDevice *xendev, const char *node)
             fe_state = XenbusStateUnknown;
         }
         if (xendev->fe_state != fe_state) {
-            xen_be_printf(xendev, 1, "frontend state: %s -> %s\n",
+            xen_pv_printf(xendev, 1, "frontend state: %s -> %s\n",
                           xenbus_strstate(xendev->fe_state),
                           xenbus_strstate(fe_state));
         }
@@ -359,12 +349,13 @@ static void xen_be_frontend_changed(struct XenDevice *xendev, const char *node)
         g_free(xendev->protocol);
         xendev->protocol = xenstore_read_fe_str(xendev, "protocol");
         if (xendev->protocol) {
-            xen_be_printf(xendev, 1, "frontend protocol: %s\n", xendev->protocol);
+            xen_pv_printf(xendev, 1, "frontend protocol: %s\n",
+                          xendev->protocol);
         }
     }
 
     if (node) {
-        xen_be_printf(xendev, 2, "frontend update: %s\n", node);
+        xen_pv_printf(xendev, 2, "frontend update: %s\n", node);
         if (xendev->ops->frontend_changed) {
             xendev->ops->frontend_changed(xendev, node);
         }
@@ -388,26 +379,26 @@ static int xen_be_try_setup(struct XenDevice *xendev)
     int be_state;
 
     if (xenstore_read_be_int(xendev, "state", &be_state) == -1) {
-        xen_be_printf(xendev, 0, "reading backend state failed\n");
+        xen_pv_printf(xendev, 0, "reading backend state failed\n");
         return -1;
     }
 
     if (be_state != XenbusStateInitialising) {
-        xen_be_printf(xendev, 0, "initial backend state is wrong (%s)\n",
+        xen_pv_printf(xendev, 0, "initial backend state is wrong (%s)\n",
                       xenbus_strstate(be_state));
         return -1;
     }
 
     xendev->fe = xenstore_read_be_str(xendev, "frontend");
     if (xendev->fe == NULL) {
-        xen_be_printf(xendev, 0, "reading frontend path failed\n");
+        xen_pv_printf(xendev, 0, "reading frontend path failed\n");
         return -1;
     }
 
     /* setup frontend watch */
     snprintf(token, sizeof(token), "fe:%p", xendev);
     if (!xs_watch(xenstore, xendev->fe, token)) {
-        xen_be_printf(xendev, 0, "watching frontend path (%s) failed\n",
+        xen_pv_printf(xendev, 0, "watching frontend path (%s) failed\n",
                       xendev->fe);
         return -1;
     }
@@ -431,7 +422,7 @@ static int xen_be_try_init(struct XenDevice *xendev)
     int rc = 0;
 
     if (!xendev->online) {
-        xen_be_printf(xendev, 1, "not online\n");
+        xen_pv_printf(xendev, 1, "not online\n");
         return -1;
     }
 
@@ -439,7 +430,7 @@ static int xen_be_try_init(struct XenDevice *xendev)
         rc = xendev->ops->init(xendev);
     }
     if (rc != 0) {
-        xen_be_printf(xendev, 1, "init() failed\n");
+        xen_pv_printf(xendev, 1, "init() failed\n");
         return rc;
     }
 
@@ -462,18 +453,28 @@ static int xen_be_try_initialise(struct XenDevice *xendev)
     if (xendev->fe_state != XenbusStateInitialised  &&
         xendev->fe_state != XenbusStateConnected) {
         if (xendev->ops->flags & DEVOPS_FLAG_IGNORE_STATE) {
-            xen_be_printf(xendev, 2, "frontend not ready, ignoring\n");
+            xen_pv_printf(xendev, 2, "frontend not ready, ignoring\n");
         } else {
-            xen_be_printf(xendev, 2, "frontend not ready (yet)\n");
+            xen_pv_printf(xendev, 2, "frontend not ready (yet)\n");
             return -1;
         }
+    }
+
+    if (xendev->ops->flags & DEVOPS_FLAG_NEED_GNTDEV) {
+        xendev->gnttabdev = xengnttab_open(NULL, 0);
+        if (xendev->gnttabdev == NULL) {
+            xen_pv_printf(NULL, 0, "can't open gnttab device\n");
+            return -1;
+        }
+    } else {
+        xendev->gnttabdev = NULL;
     }
 
     if (xendev->ops->initialise) {
         rc = xendev->ops->initialise(xendev);
     }
     if (rc != 0) {
-        xen_be_printf(xendev, 0, "initialise() failed\n");
+        xen_pv_printf(xendev, 0, "initialise() failed\n");
         return rc;
     }
 
@@ -494,9 +495,9 @@ static void xen_be_try_connected(struct XenDevice *xendev)
 
     if (xendev->fe_state != XenbusStateConnected) {
         if (xendev->ops->flags & DEVOPS_FLAG_IGNORE_STATE) {
-            xen_be_printf(xendev, 2, "frontend not ready, ignoring\n");
+            xen_pv_printf(xendev, 2, "frontend not ready, ignoring\n");
         } else {
-            xen_be_printf(xendev, 2, "frontend not ready (yet)\n");
+            xen_pv_printf(xendev, 2, "frontend not ready (yet)\n");
             return;
         }
     }
@@ -516,6 +517,10 @@ static void xen_be_disconnect(struct XenDevice *xendev, enum xenbus_state state)
         xendev->ops->disconnect) {
         xendev->ops->disconnect(xendev);
     }
+    if (xendev->gnttabdev) {
+        xengnttab_close(xendev->gnttabdev);
+        xendev->gnttabdev = NULL;
+    }
     if (xendev->be_state != state) {
         xen_be_set_state(xendev, state);
     }
@@ -530,7 +535,7 @@ static int xen_be_try_reset(struct XenDevice *xendev)
         return -1;
     }
 
-    xen_be_printf(xendev, 1, "device reset (for re-connect)\n");
+    xen_pv_printf(xendev, 1, "device reset (for re-connect)\n");
     xen_be_set_state(xendev, XenbusStateInitialising);
     return 0;
 }
@@ -591,7 +596,8 @@ static int xenstore_scan(const char *type, int dom, struct XenDevOps *ops)
     snprintf(token, sizeof(token), "be:%p:%d:%p", type, dom, ops);
     snprintf(path, sizeof(path), "backend/%s/%d", type, dom);
     if (!xs_watch(xenstore, path, token)) {
-        xen_be_printf(NULL, 0, "xen be: watching backend path (%s) failed\n", path);
+        xen_pv_printf(NULL, 0, "xen be: watching backend path (%s) failed\n",
+                      path);
         return -1;
     }
 
@@ -611,8 +617,8 @@ static int xenstore_scan(const char *type, int dom, struct XenDevOps *ops)
     return 0;
 }
 
-static void xenstore_update_be(char *watch, char *type, int dom,
-                               struct XenDevOps *ops)
+void xenstore_update_be(char *watch, char *type, int dom,
+                        struct XenDevOps *ops)
 {
     struct XenDevice *xendev;
     char path[XEN_BUFSIZE], *bepath;
@@ -636,7 +642,7 @@ static void xenstore_update_be(char *watch, char *type, int dom,
     if (xendev != NULL) {
         bepath = xs_read(xenstore, 0, xendev->be, &len);
         if (bepath == NULL) {
-            xen_be_del_xendev(dom, dev);
+            xen_pv_del_xendev(xendev);
         } else {
             free(bepath);
             xen_be_backend_changed(xendev, path);
@@ -645,7 +651,7 @@ static void xenstore_update_be(char *watch, char *type, int dom,
     }
 }
 
-static void xenstore_update_fe(char *watch, struct XenDevice *xendev)
+void xenstore_update_fe(char *watch, struct XenDevice *xendev)
 {
     char *node;
     unsigned int len;
@@ -662,66 +668,38 @@ static void xenstore_update_fe(char *watch, struct XenDevice *xendev)
     xen_be_frontend_changed(xendev, node);
     xen_be_check_state(xendev);
 }
-
-static void xenstore_update(void *unused)
-{
-    char **vec = NULL;
-    intptr_t type, ops, ptr;
-    unsigned int dom, count;
-
-    vec = xs_read_watch(xenstore, &count);
-    if (vec == NULL) {
-        goto cleanup;
-    }
-
-    if (sscanf(vec[XS_WATCH_TOKEN], "be:%" PRIxPTR ":%d:%" PRIxPTR,
-               &type, &dom, &ops) == 3) {
-        xenstore_update_be(vec[XS_WATCH_PATH], (void*)type, dom, (void*)ops);
-    }
-    if (sscanf(vec[XS_WATCH_TOKEN], "fe:%" PRIxPTR, &ptr) == 1) {
-        xenstore_update_fe(vec[XS_WATCH_PATH], (void*)ptr);
-    }
-
-cleanup:
-    free(vec);
-}
-
-static void xen_be_evtchn_event(void *opaque)
-{
-    struct XenDevice *xendev = opaque;
-    evtchn_port_t port;
-
-    port = xc_evtchn_pending(xendev->evtchndev);
-    if (port != xendev->local_port) {
-        xen_be_printf(xendev, 0, "xc_evtchn_pending returned %d (expected %d)\n",
-                      port, xendev->local_port);
-        return;
-    }
-    xc_evtchn_unmask(xendev->evtchndev, port);
-
-    if (xendev->ops->event) {
-        xendev->ops->event(xendev);
-    }
-}
-
 /* -------------------------------------------------------------------- */
 
 int xen_be_init(void)
 {
+    xengnttab_handle *gnttabdev;
+
     xenstore = xs_daemon_open();
     if (!xenstore) {
-        xen_be_printf(NULL, 0, "can't connect to xenstored\n");
+        xen_pv_printf(NULL, 0, "can't connect to xenstored\n");
         return -1;
     }
 
-    if (qemu_set_fd_handler(xs_fileno(xenstore), xenstore_update, NULL, NULL) < 0) {
-        goto err;
-    }
+    qemu_set_fd_handler(xs_fileno(xenstore), xenstore_update, NULL, NULL);
 
-    if (xen_xc == XC_HANDLER_INITIAL_VALUE) {
+    if (xen_xc == NULL || xen_fmem == NULL) {
         /* Check if xen_init() have been called */
         goto err;
     }
+
+    gnttabdev = xengnttab_open(NULL, 0);
+    if (gnttabdev != NULL) {
+        if (xengnttab_grant_copy(gnttabdev, 0, NULL) == 0) {
+            xen_feature_grant_copy = true;
+        }
+        xengnttab_close(gnttabdev);
+    }
+
+    xen_sysdev = qdev_create(NULL, TYPE_XENSYSDEV);
+    qdev_init_nofail(xen_sysdev);
+    xen_sysbus = qbus_create(TYPE_XENSYSBUS, DEVICE(xen_sysdev), "xen-sysbus");
+    qbus_set_bus_hotplug_handler(xen_sysbus, &error_abort);
+
     return 0;
 
 err:
@@ -732,9 +710,47 @@ err:
     return -1;
 }
 
+static void xen_set_dynamic_sysbus(void)
+{
+    Object *machine = qdev_get_machine();
+    ObjectClass *oc = object_get_class(machine);
+    MachineClass *mc = MACHINE_CLASS(oc);
+
+    machine_class_allow_dynamic_sysbus_dev(mc, TYPE_XENSYSDEV);
+}
+
 int xen_be_register(const char *type, struct XenDevOps *ops)
 {
+    char path[50];
+    int rc;
+
+    if (ops->backend_register) {
+        rc = ops->backend_register();
+        if (rc) {
+            return rc;
+        }
+    }
+
+    snprintf(path, sizeof(path), "device-model/%u/backends/%s", xen_domid,
+             type);
+    xenstore_mkdir(path, XS_PERM_NONE);
+
     return xenstore_scan(type, xen_domid, ops);
+}
+
+void xen_be_register_common(void)
+{
+    xen_set_dynamic_sysbus();
+
+    xen_be_register("console", &xen_console_ops);
+    xen_be_register("vkbd", &xen_kbdmouse_ops);
+    xen_be_register("qdisk", &xen_blkdev_ops);
+#ifdef CONFIG_VIRTFS
+    xen_be_register("9pfs", &xen_9pfs_ops);
+#endif
+#ifdef CONFIG_USB_LIBUSB
+    xen_be_register("qusb", &xen_usb_ops);
+#endif
 }
 
 int xen_be_bind_evtchn(struct XenDevice *xendev)
@@ -742,69 +758,88 @@ int xen_be_bind_evtchn(struct XenDevice *xendev)
     if (xendev->local_port != -1) {
         return 0;
     }
-    xendev->local_port = xc_evtchn_bind_interdomain
+    xendev->local_port = xenevtchn_bind_interdomain
         (xendev->evtchndev, xendev->dom, xendev->remote_port);
     if (xendev->local_port == -1) {
-        xen_be_printf(xendev, 0, "xc_evtchn_bind_interdomain failed\n");
+        xen_pv_printf(xendev, 0, "xenevtchn_bind_interdomain failed\n");
         return -1;
     }
-    xen_be_printf(xendev, 2, "bind evtchn port %d\n", xendev->local_port);
-    qemu_set_fd_handler(xc_evtchn_fd(xendev->evtchndev),
-                        xen_be_evtchn_event, NULL, xendev);
+    xen_pv_printf(xendev, 2, "bind evtchn port %d\n", xendev->local_port);
+    qemu_set_fd_handler(xenevtchn_fd(xendev->evtchndev),
+                        xen_pv_evtchn_event, NULL, xendev);
     return 0;
 }
 
-void xen_be_unbind_evtchn(struct XenDevice *xendev)
+
+static Property xendev_properties[] = {
+    DEFINE_PROP_END_OF_LIST(),
+};
+
+static void xendev_class_init(ObjectClass *klass, void *data)
 {
-    if (xendev->local_port == -1) {
-        return;
-    }
-    qemu_set_fd_handler(xc_evtchn_fd(xendev->evtchndev), NULL, NULL, NULL);
-    xc_evtchn_unbind(xendev->evtchndev, xendev->local_port);
-    xen_be_printf(xendev, 2, "unbind evtchn port %d\n", xendev->local_port);
-    xendev->local_port = -1;
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->props = xendev_properties;
+    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
+    /* xen-backend devices can be plugged/unplugged dynamically */
+    dc->user_creatable = true;
 }
 
-int xen_be_send_notify(struct XenDevice *xendev)
+static const TypeInfo xendev_type_info = {
+    .name          = TYPE_XENBACKEND,
+    .parent        = TYPE_XENSYSDEV,
+    .class_init    = xendev_class_init,
+    .instance_size = sizeof(struct XenDevice),
+};
+
+static void xen_sysbus_class_init(ObjectClass *klass, void *data)
 {
-    return xc_evtchn_notify(xendev->evtchndev, xendev->local_port);
+    HotplugHandlerClass *hc = HOTPLUG_HANDLER_CLASS(klass);
+
+    hc->unplug = qdev_simple_device_unplug_cb;
 }
 
-/*
- * msg_level:
- *  0 == errors (stderr + logfile).
- *  1 == informative debug messages (logfile only).
- *  2 == noisy debug messages (logfile only).
- *  3 == will flood your log (logfile only).
- */
-void xen_be_printf(struct XenDevice *xendev, int msg_level, const char *fmt, ...)
-{
-    va_list args;
+static const TypeInfo xensysbus_info = {
+    .name       = TYPE_XENSYSBUS,
+    .parent     = TYPE_BUS,
+    .class_init = xen_sysbus_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { TYPE_HOTPLUG_HANDLER },
+        { }
+    }
+};
 
-    if (xendev) {
-        if (msg_level > xendev->debug) {
-            return;
-        }
-        qemu_log("xen be: %s: ", xendev->name);
-        if (msg_level == 0) {
-            fprintf(stderr, "xen be: %s: ", xendev->name);
-        }
-    } else {
-        if (msg_level > debug) {
-            return;
-        }
-        qemu_log("xen be core: ");
-        if (msg_level == 0) {
-            fprintf(stderr, "xen be core: ");
-        }
-    }
-    va_start(args, fmt);
-    qemu_log_vprintf(fmt, args);
-    va_end(args);
-    if (msg_level == 0) {
-        va_start(args, fmt);
-        vfprintf(stderr, fmt, args);
-        va_end(args);
-    }
-    qemu_log_flush();
+static int xen_sysdev_init(SysBusDevice *dev)
+{
+    return 0;
 }
+
+static Property xen_sysdev_properties[] = {
+    {/* end of property list */},
+};
+
+static void xen_sysdev_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+
+    k->init = xen_sysdev_init;
+    dc->props = xen_sysdev_properties;
+    dc->bus_type = TYPE_XENSYSBUS;
+}
+
+static const TypeInfo xensysdev_info = {
+    .name          = TYPE_XENSYSDEV,
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(SysBusDevice),
+    .class_init    = xen_sysdev_class_init,
+};
+
+static void xenbe_register_types(void)
+{
+    type_register_static(&xensysbus_info);
+    type_register_static(&xensysdev_info);
+    type_register_static(&xendev_type_info);
+}
+
+type_init(xenbe_register_types)

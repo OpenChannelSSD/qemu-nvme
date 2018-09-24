@@ -18,6 +18,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import print_function
 import sys
 import os
 import signal
@@ -36,9 +37,8 @@ except ImportError:
     try:
         import simplejson as json
     except ImportError:
-        print >>sys.stderr, \
-            "Warning: Module for JSON processing is not found.\n" \
-            "'--config' and '--command' options are not supported."
+        print("Warning: Module for JSON processing is not found.\n" \
+            "'--config' and '--command' options are not supported.", file=sys.stderr)
 
 # Backing file sizes in MB
 MAX_BACKING_FILE_SIZE = 10
@@ -128,7 +128,7 @@ class TestEnv(object):
         if seed is not None:
             self.seed = seed
         else:
-            self.seed = str(random.randint(0, sys.maxint))
+            self.seed = str(random.randint(0, sys.maxsize))
         random.seed(self.seed)
 
         self.init_path = os.getcwd()
@@ -157,10 +157,9 @@ class TestEnv(object):
 
         try:
             os.makedirs(self.current_dir)
-        except OSError, e:
-            print >>sys.stderr, \
-                "Error: The working directory '%s' cannot be used. Reason: %s"\
-                % (self.work_dir, e[1])
+        except OSError as e:
+            print("Error: The working directory '%s' cannot be used. Reason: %s"\
+                % (self.work_dir, e[1]), file=sys.stderr)
             raise TestException
         self.log = open(os.path.join(self.current_dir, "test.log"), "w")
         self.parent_log = open(run_log, "a")
@@ -244,7 +243,7 @@ class TestEnv(object):
             temp_log = StringIO.StringIO()
             try:
                 retcode = run_app(temp_log, current_cmd)
-            except OSError, e:
+            except OSError as e:
                 multilog("%sError: Start of '%s' failed. Reason: %s\n\n"
                          % (test_summary, os.path.basename(current_cmd[0]),
                             e[1]),
@@ -277,7 +276,7 @@ class TestEnv(object):
 if __name__ == '__main__':
 
     def usage():
-        print """
+        print("""
         Usage: runner.py [OPTION...] TEST_DIR IMG_GENERATOR
 
         Set up test environment in TEST_DIR and run a test in it. A module for
@@ -301,7 +300,7 @@ if __name__ == '__main__':
         JSON:
 
         '--command' accepts a JSON array of commands. Each command presents
-        an application under test with all its paramaters as a list of strings,
+        an application under test with all its parameters as a list of strings,
         e.g. ["qemu-io", "$test_img", "-c", "write $off $len"].
 
         Supported application aliases: 'qemu-img' and 'qemu-io'.
@@ -326,7 +325,7 @@ if __name__ == '__main__':
 
         If '--config' argument is specified, fields not listed in
         the configuration array will not be fuzzed.
-        """
+        """)
 
     def run_test(test_id, seed, work_dir, run_log, cleanup, log_all,
                  command, fuzz_config):
@@ -356,9 +355,8 @@ if __name__ == '__main__':
         opts, args = getopt.gnu_getopt(sys.argv[1:], 'c:hs:kvd:',
                                        ['command=', 'help', 'seed=', 'config=',
                                         'keep_passed', 'verbose', 'duration='])
-    except getopt.error, e:
-        print >>sys.stderr, \
-            "Error: %s\n\nTry 'runner.py --help' for more information" % e
+    except getopt.error as e:
+        print("Error: %s\n\nTry 'runner.py --help' for more information" % e, file=sys.stderr)
         sys.exit(1)
 
     command = None
@@ -374,10 +372,9 @@ if __name__ == '__main__':
         elif opt in ('-c', '--command'):
             try:
                 command = json.loads(arg)
-            except (TypeError, ValueError, NameError), e:
-                print >>sys.stderr, \
-                    "Error: JSON array of test commands cannot be loaded.\n" \
-                    "Reason: %s" % e
+            except (TypeError, ValueError, NameError) as e:
+                print("Error: JSON array of test commands cannot be loaded.\n" \
+                    "Reason: %s" % e, file=sys.stderr)
                 sys.exit(1)
         elif opt in ('-k', '--keep_passed'):
             cleanup = False
@@ -390,16 +387,14 @@ if __name__ == '__main__':
         elif opt == '--config':
             try:
                 config = json.loads(arg)
-            except (TypeError, ValueError, NameError), e:
-                print >>sys.stderr, \
-                    "Error: JSON array with the fuzzer configuration cannot" \
-                    " be loaded\nReason: %s" % e
+            except (TypeError, ValueError, NameError) as e:
+                print("Error: JSON array with the fuzzer configuration cannot" \
+                    " be loaded\nReason: %s" % e, file=sys.stderr)
                 sys.exit(1)
 
     if not len(args) == 2:
-        print >>sys.stderr, \
-            "Expected two parameters\nTry 'runner.py --help'" \
-            " for more information."
+        print("Expected two parameters\nTry 'runner.py --help'" \
+            " for more information.", file=sys.stderr)
         sys.exit(1)
 
     work_dir = os.path.realpath(args[0])
@@ -414,10 +409,9 @@ if __name__ == '__main__':
 
     try:
         image_generator = __import__(generator_name)
-    except ImportError, e:
-        print >>sys.stderr, \
-            "Error: The image generator '%s' cannot be imported.\n" \
-            "Reason: %s" % (generator_name, e)
+    except ImportError as e:
+        print("Error: The image generator '%s' cannot be imported.\n" \
+            "Reason: %s" % (generator_name, e), file=sys.stderr)
         sys.exit(1)
 
     # Enable core dumps
@@ -428,7 +422,7 @@ if __name__ == '__main__':
     test_id = count(1)
     while should_continue(duration, start_time):
         try:
-            run_test(str(test_id.next()), seed, work_dir, run_log, cleanup,
+            run_test(str(next(test_id)), seed, work_dir, run_log, cleanup,
                      log_all, command, config)
         except (KeyboardInterrupt, SystemExit):
             sys.exit(1)

@@ -18,6 +18,7 @@
  * with this program; if not, if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qemu/timer.h"
 #include "ui/console.h"
@@ -418,8 +419,8 @@ static void bt_hid_interrupt_sdu(void *opaque, const uint8_t *data, int len)
 
     return;
 bad:
-    fprintf(stderr, "%s: bad transaction on Interrupt channel.\n",
-                    __FUNCTION__);
+    error_report("%s: bad transaction on Interrupt channel.",
+                    __func__);
 }
 
 /* "Virtual cable" plug/unplug event.  */

@@ -21,48 +21,18 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#ifndef HW_VGA_INT_H
-#define HW_VGA_INT_H 1
 
-#include <hw/hw.h>
-#include "qapi/error.h"
+#ifndef HW_VGA_INT_H
+#define HW_VGA_INT_H
+
+#include "exec/ioport.h"
 #include "exec/memory.h"
+#include "ui/console.h"
+
+#include "hw/display/bochs-vbe.h"
 
 #define ST01_V_RETRACE      0x08
 #define ST01_DISP_ENABLE    0x01
-
-#define VBE_DISPI_MAX_XRES              16000
-#define VBE_DISPI_MAX_YRES              12000
-#define VBE_DISPI_MAX_BPP               32
-
-#define VBE_DISPI_INDEX_ID              0x0
-#define VBE_DISPI_INDEX_XRES            0x1
-#define VBE_DISPI_INDEX_YRES            0x2
-#define VBE_DISPI_INDEX_BPP             0x3
-#define VBE_DISPI_INDEX_ENABLE          0x4
-#define VBE_DISPI_INDEX_BANK            0x5
-#define VBE_DISPI_INDEX_VIRT_WIDTH      0x6
-#define VBE_DISPI_INDEX_VIRT_HEIGHT     0x7
-#define VBE_DISPI_INDEX_X_OFFSET        0x8
-#define VBE_DISPI_INDEX_Y_OFFSET        0x9
-#define VBE_DISPI_INDEX_NB              0xa /* size of vbe_regs[] */
-#define VBE_DISPI_INDEX_VIDEO_MEMORY_64K 0xa /* read-only, not in vbe_regs */
-
-#define VBE_DISPI_ID0                   0xB0C0
-#define VBE_DISPI_ID1                   0xB0C1
-#define VBE_DISPI_ID2                   0xB0C2
-#define VBE_DISPI_ID3                   0xB0C3
-#define VBE_DISPI_ID4                   0xB0C4
-#define VBE_DISPI_ID5                   0xB0C5
-
-#define VBE_DISPI_DISABLED              0x00
-#define VBE_DISPI_ENABLED               0x01
-#define VBE_DISPI_GETCAPS               0x02
-#define VBE_DISPI_8BIT_DAC              0x20
-#define VBE_DISPI_LFB_ENABLED           0x40
-#define VBE_DISPI_NOCLEARMEM            0x80
-
-#define VBE_DISPI_LFB_PHYSICAL_ADDRESS  0xE0000000
 
 #define CH_ATTR_SIZE (160 * 100)
 #define VGA_MAX_HEIGHT 2048
@@ -94,11 +64,13 @@ typedef struct VGACommonState {
     uint32_t vram_size;
     uint32_t vram_size_mb; /* property */
     uint32_t vbe_size;
+    uint32_t vbe_size_mask;
     uint32_t latch;
     bool has_chain4_alias;
     MemoryRegion chain4_alias;
     uint8_t sr_index;
     uint8_t sr[256];
+    uint8_t sr_vbe[256];
     uint8_t gr_index;
     uint8_t gr[256];
     uint8_t ar_index;
@@ -151,6 +123,7 @@ typedef struct VGACommonState {
     uint32_t last_scr_width, last_scr_height; /* in pixels */
     uint32_t last_depth; /* in bits */
     bool last_byteswap;
+    bool force_shadow;
     uint8_t cursor_start, cursor_end;
     bool cursor_visible_phase;
     int64_t cursor_blink_time;
@@ -160,8 +133,11 @@ typedef struct VGACommonState {
     bool full_update_gfx;
     bool big_endian_fb;
     bool default_endian_fb;
+    bool global_vmstate;
     /* hardware mouse cursor support */
     uint32_t invalidated_y_table[VGA_MAX_HEIGHT / 32];
+    uint32_t hw_cursor_x;
+    uint32_t hw_cursor_y;
     void (*cursor_invalidate)(struct VGACommonState *s);
     void (*cursor_draw_line)(struct VGACommonState *s, uint8_t *d, int y);
     /* tell for each page if it has been updated since the last time */
@@ -182,7 +158,7 @@ static inline int c6_to_8(int v)
     return (v << 2) | (b << 1) | b;
 }
 
-void vga_common_init(VGACommonState *s, Object *obj, bool global_vmstate);
+void vga_common_init(VGACommonState *s, Object *obj);
 void vga_init(VGACommonState *s, Object *obj, MemoryRegion *address_space,
               MemoryRegion *address_space_io, bool init_vga_ports);
 MemoryRegion *vga_init_io(VGACommonState *s, Object *obj,
@@ -215,5 +191,12 @@ extern const uint8_t gr_mask[16];
 #define VGABIOS_CIRRUS_FILENAME "vgabios-cirrus.bin"
 
 extern const MemoryRegionOps vga_mem_ops;
+
+/* vga-pci.c */
+void pci_std_vga_mmio_region_init(VGACommonState *s,
+                                  Object *owner,
+                                  MemoryRegion *parent,
+                                  MemoryRegion *subs,
+                                  bool qext);
 
 #endif

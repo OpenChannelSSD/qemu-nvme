@@ -17,6 +17,7 @@
  * You should have received a copy of the GNU General Public License along
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "ui/console.h"
 #include "hw/arm/omap.h"
@@ -212,7 +213,8 @@ static void omap_diss_write(void *opaque, hwaddr addr,
     struct omap_dss_s *s = (struct omap_dss_s *) opaque;
 
     if (size != 4) {
-        return omap_badwidth_write32(opaque, addr, value);
+        omap_badwidth_write32(opaque, addr, value);
+        return;
     }
 
     switch (addr) {
@@ -377,7 +379,8 @@ static void omap_disc_write(void *opaque, hwaddr addr,
     struct omap_dss_s *s = (struct omap_dss_s *) opaque;
 
     if (size != 4) {
-        return omap_badwidth_write32(opaque, addr, value);
+        omap_badwidth_write32(opaque, addr, value);
+        return;
     }
 
     switch (addr) {
@@ -523,7 +526,7 @@ static void omap_disc_write(void *opaque, hwaddr addr,
         s->dispc.l[0].attr = value & 0x7ff;
         if (value & (3 << 9))
             fprintf(stderr, "%s: Big-endian pixel format not supported\n",
-                            __FUNCTION__);
+                            __func__);
         s->dispc.l[0].enable = value & 1;
         s->dispc.l[0].bpp = (value >> 1) & 0xf;
         s->dispc.invalidate = 1;
@@ -614,7 +617,7 @@ static void omap_rfbi_transfer_start(struct omap_dss_s *s)
     if (s->rfbi.control & (1 << 1)) {				/* BYPASS */
         /* TODO: in non-Bypass mode we probably need to just assert the
          * DRQ and wait for DMA to write the pixels.  */
-        fprintf(stderr, "%s: Bypass mode unimplemented\n", __FUNCTION__);
+        fprintf(stderr, "%s: Bypass mode unimplemented\n", __func__);
         return;
     }
 
@@ -736,7 +739,8 @@ static void omap_rfbi_write(void *opaque, hwaddr addr,
     struct omap_dss_s *s = (struct omap_dss_s *) opaque;
 
     if (size != 4) {
-        return omap_badwidth_write32(opaque, addr, value);
+        omap_badwidth_write32(opaque, addr, value);
+        return;
     }
 
     switch (addr) {
@@ -928,7 +932,8 @@ static void omap_venc_write(void *opaque, hwaddr addr,
                             uint64_t value, unsigned size)
 {
     if (size != 4) {
-        return omap_badwidth_write32(opaque, addr, size);
+        omap_badwidth_write32(opaque, addr, size);
+        return;
     }
 
     switch (addr) {
@@ -1016,7 +1021,8 @@ static void omap_im3_write(void *opaque, hwaddr addr,
                            uint64_t value, unsigned size)
 {
     if (size != 4) {
-        return omap_badwidth_write32(opaque, addr, value);
+        omap_badwidth_write32(opaque, addr, value);
+        return;
     }
 
     switch (addr) {
@@ -1046,8 +1052,7 @@ struct omap_dss_s *omap_dss_init(struct omap_target_agent_s *ta,
                 omap_clk fck1, omap_clk fck2, omap_clk ck54m,
                 omap_clk ick1, omap_clk ick2)
 {
-    struct omap_dss_s *s = (struct omap_dss_s *)
-            g_malloc0(sizeof(struct omap_dss_s));
+    struct omap_dss_s *s = g_new0(struct omap_dss_s, 1);
 
     s->irq = irq;
     s->drq = drq;
@@ -1081,6 +1086,6 @@ struct omap_dss_s *omap_dss_init(struct omap_target_agent_s *ta,
 void omap_rfbi_attach(struct omap_dss_s *s, int cs, struct rfbi_chip_s *chip)
 {
     if (cs < 0 || cs > 1)
-        hw_error("%s: wrong CS %i\n", __FUNCTION__, cs);
+        hw_error("%s: wrong CS %i\n", __func__, cs);
     s->rfbi.chip[cs] = chip;
 }

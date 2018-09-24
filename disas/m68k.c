@@ -1,9 +1,8 @@
 /* This file is composed of several different files from the upstream
    sourceware.org CVS.  Original file boundaries marked with **** */
 
-#include <string.h>
+#include "qemu/osdep.h"
 #include <math.h>
-#include <stdio.h>
 
 #include "disas/bfd.h"
 
@@ -615,8 +614,6 @@ static const char *const reg_half_names[] =
 
 /* Maximum length of an instruction.  */
 #define MAXLEN 22
-
-#include <setjmp.h>
 
 struct private
 {
@@ -1626,6 +1623,7 @@ print_insn_arg (const char *d,
 
     case 'X':
       place = '8';
+      /* fall through */
     case 'Y':
     case 'Z':
     case 'W':
@@ -1679,7 +1677,7 @@ print_insn_arg (const char *d,
 	  (*info->fprintf_func) (info->stream, "%%sfc");
 	else
 	  /* xgettext:c-format */
-	  (*info->fprintf_func) (info->stream, _("<function code %d>"), fc);
+	  (*info->fprintf_func) (info->stream, "<function code %d>", fc);
       }
       break;
 
@@ -1830,7 +1828,7 @@ match_insn_m68k (bfd_vma memaddr,
 	{
 	  info->fprintf_func (info->stream,
 			      /* xgettext:c-format */
-			      _("<internal error in opcode table: %s %s>\n"),
+			      "<internal error in opcode table: %s %s>\n",
 			      best->name,  best->args);
 	  info->fprintf_func = save_printer;
 	  info->print_address_func = save_print_address;
@@ -2019,6 +2017,20 @@ print_insn_m68k (bfd_vma memaddr, disassemble_info *info)
 		    }
 		}
 	    }
+
+          /* Don't match FPU insns with non-default coprocessor ID.  */
+          if (*d == '\0')
+            {
+              for (d = opc->args; *d; d += 2)
+                {
+                  if (d[0] == 'I')
+                    {
+                      val = fetch_arg (buffer, 'd', 3, info);
+                      if (val != 1)
+                        break;
+                    }
+                }
+            }
 
 	  if (*d == '\0')
 	    if ((val = match_insn_m68k (memaddr, info, opc, & priv)))
@@ -4688,10 +4700,11 @@ get_field (const unsigned char *data, enum floatformat_byteorders order,
 	/* This is the last byte; zero out the bits which are not part of
 	   this field.  */
 	result |=
-	  (*(data + cur_byte) & ((1 << (len - cur_bitshift)) - 1))
+	  (unsigned long)(*(data + cur_byte)
+			  & ((1 << (len - cur_bitshift)) - 1))
 	    << cur_bitshift;
       else
-	result |= *(data + cur_byte) << cur_bitshift;
+	result |= (unsigned long)*(data + cur_byte) << cur_bitshift;
       cur_bitshift += FLOATFORMAT_CHAR_BIT;
       if (order == floatformat_little)
 	++cur_byte;
@@ -4700,10 +4713,6 @@ get_field (const unsigned char *data, enum floatformat_byteorders order,
     }
   return result;
 }
-
-#ifndef min
-#define min(a, b) ((a) < (b) ? (a) : (b))
-#endif
 
 /* Convert from FMT to a double.
    FROM is the address of the extended float.
@@ -4736,7 +4745,7 @@ floatformat_to_double (const struct floatformat *fmt,
       nan = 0;
       while (mant_bits_left > 0)
 	{
-	  mant_bits = min (mant_bits_left, 32);
+          mant_bits = MIN(mant_bits_left, 32);
 
 	  if (get_field (ufrom, fmt->byteorder, fmt->totalsize,
 			 mant_off, mant_bits) != 0)
@@ -4796,7 +4805,7 @@ floatformat_to_double (const struct floatformat *fmt,
 
   while (mant_bits_left > 0)
     {
-      mant_bits = min (mant_bits_left, 32);
+      mant_bits = MIN(mant_bits_left, 32);
 
       mant = get_field (ufrom, fmt->byteorder, fmt->totalsize,
 			 mant_off, mant_bits);

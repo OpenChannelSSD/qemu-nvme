@@ -8,27 +8,23 @@
  *
  */
 
-#include <stdlib.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <time.h>
+#include "qemu/osdep.h"
 #ifndef _WIN32
-#include <signal.h>
 #include <pthread.h>
 #endif
 #include "qemu/timer.h"
-#include "trace.h"
 #include "trace/control.h"
 #include "trace/simple.h"
+#include "qemu/error-report.h"
 
-/** Trace file header event ID */
-#define HEADER_EVENT_ID (~(uint64_t)0) /* avoids conflicting with TraceEventIDs */
+/** Trace file header event ID, picked to avoid conflict with real event IDs */
+#define HEADER_EVENT_ID (~(uint64_t)0)
 
 /** Trace file magic number */
 #define HEADER_MAGIC 0xf2b177cb0aa429b4ULL
 
 /** Trace file version number, bump if format changes */
-#define HEADER_VERSION 3
+#define HEADER_VERSION 4
 
 /** Records were dropped event ID */
 #define DROPPED_EVENT_ID (~(uint64_t)0 - 1)
@@ -40,9 +36,9 @@
  * Trace records are written out by a dedicated thread.  The thread waits for
  * records to become available, writes them out, and then waits again.
  */
-static CompatGMutex trace_lock;
-static CompatGCond trace_available_cond;
-static CompatGCond trace_empty_cond;
+static GMutex trace_lock;
+static GCond trace_available_cond;
+static GCond trace_empty_cond;
 
 static bool trace_available;
 static bool trace_writeout_enabled;
@@ -60,9 +56,12 @@ static uint32_t trace_pid;
 static FILE *trace_fp;
 static char *trace_file_name;
 
+#define TRACE_RECORD_TYPE_MAPPING 0
+#define TRACE_RECORD_TYPE_EVENT   1
+
 /* * Trace buffer entry */
 typedef struct {
-    uint64_t event; /*   TraceEventID */
+    uint64_t event; /* event ID value */
     uint64_t timestamp_ns;
     uint32_t length;   /*    in bytes */
     uint32_t pid;
@@ -112,7 +111,7 @@ static bool get_trace_record(unsigned int idx, TraceRecord **recordptr)
     smp_rmb(); /* read memory barrier before accessing record */
     /* read the record header to know record length */
     read_from_buffer(idx, &record, sizeof(TraceRecord));
-    *recordptr = malloc(record.length); /* dont use g_malloc, can deadlock when traced */
+    *recordptr = malloc(record.length); /* don't use g_malloc, can deadlock when traced */
     /* make a copy of record to avoid being overwritten */
     read_from_buffer(idx, *recordptr, record.length);
     smp_rmb(); /* memory barrier before clearing valid flag */
@@ -164,6 +163,7 @@ static gpointer writeout_thread(gpointer opaque)
     unsigned int idx = 0;
     int dropped_count;
     size_t unused __attribute__ ((unused));
+    uint64_t type = TRACE_RECORD_TYPE_EVENT;
 
     for (;;) {
         wait_for_trace_records_available();
@@ -178,13 +178,15 @@ static gpointer writeout_thread(gpointer opaque)
             } while (!g_atomic_int_compare_and_exchange(&dropped_events,
                                                         dropped_count, 0));
             dropped.rec.arguments[0] = dropped_count;
+            unused = fwrite(&type, sizeof(type), 1, trace_fp);
             unused = fwrite(&dropped.rec, dropped.rec.length, 1, trace_fp);
         }
 
         while (get_trace_record(idx, &recordptr)) {
+            unused = fwrite(&type, sizeof(type), 1, trace_fp);
             unused = fwrite(recordptr, recordptr->length, 1, trace_fp);
             writeout_idx += recordptr->length;
-            free(recordptr); /* dont use g_free, can deadlock when traced */
+            free(recordptr); /* don't use g_free, can deadlock when traced */
             idx = writeout_idx % TRACE_BUF_LEN;
         }
 
@@ -206,7 +208,7 @@ void trace_record_write_str(TraceBufferRecord *rec, const char *s, uint32_t slen
     rec->rec_off = write_to_buffer(rec->rec_off, (void*)s, slen);
 }
 
-int trace_record_start(TraceBufferRecord *rec, TraceEventID event, size_t datasize)
+int trace_record_start(TraceBufferRecord *rec, uint32_t event, size_t datasize)
 {
     unsigned int idx, rec_off, old_idx, new_idx;
     uint32_t rec_len = sizeof(TraceRecord) + datasize;
@@ -277,6 +279,28 @@ void trace_record_finish(TraceBufferRecord *rec)
     }
 }
 
+static int st_write_event_mapping(void)
+{
+    uint64_t type = TRACE_RECORD_TYPE_MAPPING;
+    TraceEventIter iter;
+    TraceEvent *ev;
+
+    trace_event_iter_init(&iter, NULL);
+    while ((ev = trace_event_iter_next(&iter)) != NULL) {
+        uint64_t id = trace_event_get_id(ev);
+        const char *name = trace_event_get_name(ev);
+        uint32_t len = strlen(name);
+        if (fwrite(&type, sizeof(type), 1, trace_fp) != 1 ||
+            fwrite(&id, sizeof(id), 1, trace_fp) != 1 ||
+            fwrite(&len, sizeof(len), 1, trace_fp) != 1 ||
+            fwrite(name, len, 1, trace_fp) != 1) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 void st_set_trace_file_enabled(bool enable)
 {
     if (enable == !!trace_fp) {
@@ -301,7 +325,8 @@ void st_set_trace_file_enabled(bool enable)
             return;
         }
 
-        if (fwrite(&header, sizeof header, 1, trace_fp) != 1) {
+        if (fwrite(&header, sizeof header, 1, trace_fp) != 1 ||
+            st_write_event_mapping() < 0) {
             fclose(trace_fp);
             trace_fp = NULL;
             return;
@@ -322,20 +347,20 @@ void st_set_trace_file_enabled(bool enable)
  * @file        The trace file name or NULL for the default name-<pid> set at
  *              config time
  */
-bool st_set_trace_file(const char *file)
+void st_set_trace_file(const char *file)
 {
     st_set_trace_file_enabled(false);
 
     g_free(trace_file_name);
 
     if (!file) {
-        trace_file_name = g_strdup_printf(CONFIG_TRACE_FILE, getpid());
+        /* Type cast needed for Windows where getpid() returns an int. */
+        trace_file_name = g_strdup_printf(CONFIG_TRACE_FILE, (pid_t)getpid());
     } else {
         trace_file_name = g_strdup_printf("%s", file);
     }
 
     st_set_trace_file_enabled(true);
-    return true;
 }
 
 void st_print_trace_file_status(FILE *stream, int (*stream_printf)(FILE *stream, const char *fmt, ...))
@@ -373,7 +398,7 @@ static GThread *trace_thread_create(GThreadFunc fn)
     return thread;
 }
 
-bool st_init(const char *file)
+bool st_init(void)
 {
     GThread *thread;
 
@@ -381,11 +406,10 @@ bool st_init(const char *file)
 
     thread = trace_thread_create(writeout_thread);
     if (!thread) {
-        fprintf(stderr, "warning: unable to initialize simple trace backend\n");
+        warn_report("unable to initialize simple trace backend");
         return false;
     }
 
     atexit(st_flush_trace_buffer);
-    st_set_trace_file(file);
     return true;
 }

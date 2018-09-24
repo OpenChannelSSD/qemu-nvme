@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
 #include <SDL.h>
 #include <SDL_thread.h>
 #include "qemu-common.h"
@@ -37,10 +38,14 @@
 #define AUDIO_CAP "sdl"
 #include "audio_int.h"
 
+#define USE_SEMAPHORE (SDL_MAJOR_VERSION < 2)
+
 typedef struct SDLVoiceOut {
     HWVoiceOut hw;
     int live;
+#if USE_SEMAPHORE
     int rpos;
+#endif
     int decr;
 } SDLVoiceOut;
 
@@ -52,9 +57,12 @@ static struct {
 
 static struct SDLAudioState {
     int exit;
+#if USE_SEMAPHORE
     SDL_mutex *mutex;
     SDL_sem *sem;
+#endif
     int initialized;
+    bool driver_created;
 } glob_sdl;
 typedef struct SDLAudioState SDLAudioState;
 
@@ -71,31 +79,45 @@ static void GCC_FMT_ATTR (1, 2) sdl_logerr (const char *fmt, ...)
 
 static int sdl_lock (SDLAudioState *s, const char *forfn)
 {
+#if USE_SEMAPHORE
     if (SDL_LockMutex (s->mutex)) {
         sdl_logerr ("SDL_LockMutex for %s failed\n", forfn);
         return -1;
     }
+#else
+    SDL_LockAudio();
+#endif
+
     return 0;
 }
 
 static int sdl_unlock (SDLAudioState *s, const char *forfn)
 {
+#if USE_SEMAPHORE
     if (SDL_UnlockMutex (s->mutex)) {
         sdl_logerr ("SDL_UnlockMutex for %s failed\n", forfn);
         return -1;
     }
+#else
+    SDL_UnlockAudio();
+#endif
+
     return 0;
 }
 
 static int sdl_post (SDLAudioState *s, const char *forfn)
 {
+#if USE_SEMAPHORE
     if (SDL_SemPost (s->sem)) {
         sdl_logerr ("SDL_SemPost for %s failed\n", forfn);
         return -1;
     }
+#endif
+
     return 0;
 }
 
+#if USE_SEMAPHORE
 static int sdl_wait (SDLAudioState *s, const char *forfn)
 {
     if (SDL_SemWait (s->sem)) {
@@ -104,6 +126,7 @@ static int sdl_wait (SDLAudioState *s, const char *forfn)
     }
     return 0;
 }
+#endif
 
 static int sdl_unlock_and_post (SDLAudioState *s, const char *forfn)
 {
@@ -244,6 +267,7 @@ static void sdl_callback (void *opaque, Uint8 *buf, int len)
         int to_mix, decr;
 
         /* dolog ("in callback samples=%d\n", samples); */
+#if USE_SEMAPHORE
         sdl_wait (s, "sdl_callback");
         if (s->exit) {
             return;
@@ -253,7 +277,7 @@ static void sdl_callback (void *opaque, Uint8 *buf, int len)
             return;
         }
 
-        if (audio_bug (AUDIO_FUNC, sdl->live < 0 || sdl->live > hw->samples)) {
+        if (audio_bug(__func__, sdl->live < 0 || sdl->live > hw->samples)) {
             dolog ("sdl->live=%d hw->samples=%d\n",
                    sdl->live, hw->samples);
             return;
@@ -262,6 +286,11 @@ static void sdl_callback (void *opaque, Uint8 *buf, int len)
         if (!sdl->live) {
             goto again;
         }
+#else
+        if (s->exit || !sdl->live) {
+            break;
+        }
+#endif
 
         /* dolog ("in callback live=%d\n", live); */
         to_mix = audio_MIN (samples, sdl->live);
@@ -272,7 +301,11 @@ static void sdl_callback (void *opaque, Uint8 *buf, int len)
 
             /* dolog ("in callback to_mix %d, chunk %d\n", to_mix, chunk); */
             hw->clip (buf, src, chunk);
+#if USE_SEMAPHORE
             sdl->rpos = (sdl->rpos + chunk) % hw->samples;
+#else
+            hw->rpos = (hw->rpos + chunk) % hw->samples;
+#endif
             to_mix -= chunk;
             buf += chunk << hw->info.shift;
         }
@@ -280,12 +313,21 @@ static void sdl_callback (void *opaque, Uint8 *buf, int len)
         sdl->live -= decr;
         sdl->decr += decr;
 
+#if USE_SEMAPHORE
     again:
         if (sdl_unlock (s, "sdl_callback")) {
             return;
         }
+#endif
     }
     /* dolog ("done len=%d\n", len); */
+
+#if (SDL_MAJOR_VERSION >= 2)
+    /* SDL2 does not clear the remaining buffer for us, so do it on our own */
+    if (samples) {
+        memset(buf, 0, samples << hw->info.shift);
+    }
+#endif
 }
 
 static int sdl_write_out (SWVoiceOut *sw, void *buf, int len)
@@ -313,8 +355,12 @@ static int sdl_run_out (HWVoiceOut *hw, int live)
     decr = audio_MIN (sdl->decr, live);
     sdl->decr -= decr;
 
+#if USE_SEMAPHORE
     sdl->live = live - decr;
     hw->rpos = sdl->rpos;
+#else
+    sdl->live = live;
+#endif
 
     if (sdl->live > 0) {
         sdl_unlock_and_post (s, "sdl_run_out");
@@ -332,7 +378,8 @@ static void sdl_fini_out (HWVoiceOut *hw)
     sdl_close (&glob_sdl);
 }
 
-static int sdl_init_out (HWVoiceOut *hw, struct audsettings *as)
+static int sdl_init_out(HWVoiceOut *hw, struct audsettings *as,
+                        void *drv_opaque)
 {
     SDLVoiceOut *sdl = (SDLVoiceOut *) hw;
     SDLAudioState *s = &glob_sdl;
@@ -392,12 +439,17 @@ static int sdl_ctl_out (HWVoiceOut *hw, int cmd, ...)
 static void *sdl_audio_init (void)
 {
     SDLAudioState *s = &glob_sdl;
+    if (s->driver_created) {
+        sdl_logerr("Can't create multiple sdl backends\n");
+        return NULL;
+    }
 
     if (SDL_InitSubSystem (SDL_INIT_AUDIO)) {
         sdl_logerr ("SDL failed to initialize audio subsystem\n");
         return NULL;
     }
 
+#if USE_SEMAPHORE
     s->mutex = SDL_CreateMutex ();
     if (!s->mutex) {
         sdl_logerr ("Failed to create SDL mutex\n");
@@ -412,7 +464,9 @@ static void *sdl_audio_init (void)
         SDL_QuitSubSystem (SDL_INIT_AUDIO);
         return NULL;
     }
+#endif
 
+    s->driver_created = true;
     return s;
 }
 
@@ -420,9 +474,12 @@ static void sdl_audio_fini (void *opaque)
 {
     SDLAudioState *s = opaque;
     sdl_close (s);
+#if USE_SEMAPHORE
     SDL_DestroySemaphore (s->sem);
     SDL_DestroyMutex (s->mutex);
+#endif
     SDL_QuitSubSystem (SDL_INIT_AUDIO);
+    s->driver_created = false;
 }
 
 static struct audio_option sdl_options[] = {
@@ -443,7 +500,7 @@ static struct audio_pcm_ops sdl_pcm_ops = {
     .ctl_out  = sdl_ctl_out,
 };
 
-struct audio_driver sdl_audio_driver = {
+static struct audio_driver sdl_audio_driver = {
     .name           = "sdl",
     .descr          = "SDL http://www.libsdl.org",
     .options        = sdl_options,
@@ -456,3 +513,9 @@ struct audio_driver sdl_audio_driver = {
     .voice_size_out = sizeof (SDLVoiceOut),
     .voice_size_in  = 0
 };
+
+static void register_audio_sdl(void)
+{
+    audio_driver_register(&sdl_audio_driver);
+}
+type_init(register_audio_sdl);

@@ -31,26 +31,20 @@
  *  - Add indirect descriptors support
  *  - Maybe do autosense (PAPR seems to mandate it, linux doesn't care)
  */
+#include "qemu/osdep.h"
+#include "qemu-common.h"
+#include "cpu.h"
 #include "hw/hw.h"
 #include "hw/scsi/scsi.h"
-#include "block/scsi.h"
+#include "scsi/constants.h"
 #include "srp.h"
 #include "hw/qdev.h"
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_vio.h"
 #include "viosrp.h"
+#include "trace.h"
 
 #include <libfdt.h>
-
-/*#define DEBUG_VSCSI*/
-
-#ifdef DEBUG_VSCSI
-#define DPRINTF(fmt, ...) \
-    do { fprintf(stderr, fmt, ## __VA_ARGS__); } while (0)
-#else
-#define DPRINTF(fmt, ...) \
-    do { } while (0)
-#endif
 
 /*
  * Virtual SCSI device
@@ -234,8 +228,7 @@ static int vscsi_send_rsp(VSCSIState *s, vscsi_req *req,
     int total_len = sizeof(iu->srp.rsp);
     uint8_t sol_not = iu->srp.cmd.sol_not;
 
-    DPRINTF("VSCSI: Sending resp status: 0x%x, "
-            "res_in: %d, res_out: %d\n", status, res_in, res_out);
+    trace_spapr_vscsi_send_rsp(status, res_in, res_out);
 
     memset(iu, 0, sizeof(struct srp_rsp));
     iu->srp.rsp.opcode = SRP_RSP;
@@ -295,13 +288,13 @@ static int vscsi_fetch_desc(VSCSIState *s, struct vscsi_req *req,
 
     switch (req->dma_fmt) {
     case SRP_NO_DATA_DESC: {
-        DPRINTF("VSCSI: no data descriptor\n");
+        trace_spapr_vscsi_fetch_desc_no_data();
         return 0;
     }
     case SRP_DATA_DESC_DIRECT: {
         memcpy(ret, cmd->add_data + req->cdb_offset, sizeof(*ret));
         assert(req->cur_desc_num == 0);
-        DPRINTF("VSCSI: direct segment\n");
+        trace_spapr_vscsi_fetch_desc_direct();
         break;
     }
     case SRP_DATA_DESC_INDIRECT: {
@@ -309,30 +302,29 @@ static int vscsi_fetch_desc(VSCSIState *s, struct vscsi_req *req,
                                        (cmd->add_data + req->cdb_offset);
         if (n < req->local_desc) {
             *ret = tmp->desc_list[n];
-            DPRINTF("VSCSI: indirect segment local tag=0x%x desc#%d/%d\n",
-                    req->qtag, n, req->local_desc);
-
+            trace_spapr_vscsi_fetch_desc_indirect(req->qtag, n,
+                                                  req->local_desc);
         } else if (n < req->total_desc) {
             int rc;
             struct srp_direct_buf tbl_desc = vscsi_swap_desc(tmp->table_desc);
             unsigned desc_offset = n * sizeof(struct srp_direct_buf);
 
             if (desc_offset >= tbl_desc.len) {
-                DPRINTF("VSCSI:   #%d is ouf of range (%d bytes)\n",
-                        n, desc_offset);
+                trace_spapr_vscsi_fetch_desc_out_of_range(n, desc_offset);
                 return -1;
             }
             rc = spapr_vio_dma_read(&s->vdev, tbl_desc.va + desc_offset,
                                     ret, sizeof(struct srp_direct_buf));
             if (rc) {
-                DPRINTF("VSCSI: spapr_vio_dma_read -> %d reading ext_desc\n",
-                        rc);
+                trace_spapr_vscsi_fetch_desc_dma_read_error(rc);
                 return -1;
             }
-            DPRINTF("VSCSI: indirect segment ext. tag=0x%x desc#%d/%d { va=%"PRIx64" len=%x }\n",
-                    req->qtag, n, req->total_desc, tbl_desc.va, tbl_desc.len);
+            trace_spapr_vscsi_fetch_desc_indirect_seg_ext(req->qtag, n,
+                                                          req->total_desc,
+                                                          tbl_desc.va,
+                                                          tbl_desc.len);
         } else {
-            DPRINTF("VSCSI:   Out of descriptors !\n");
+            trace_spapr_vscsi_fetch_desc_out_of_desc();
             return 0;
         }
         break;
@@ -344,15 +336,16 @@ static int vscsi_fetch_desc(VSCSIState *s, struct vscsi_req *req,
 
     *ret = vscsi_swap_desc(*ret);
     if (buf_offset > ret->len) {
-        DPRINTF("   offset=%x is out of a descriptor #%d boundary=%x\n",
-                buf_offset, req->cur_desc_num, ret->len);
+        trace_spapr_vscsi_fetch_desc_out_of_desc_boundary(buf_offset,
+                                                          req->cur_desc_num,
+                                                          ret->len);
         return -1;
     }
     ret->va += buf_offset;
     ret->len -= buf_offset;
 
-    DPRINTF("   cur=%d offs=%x ret { va=%"PRIx64" len=%x }\n",
-            req->cur_desc_num, req->cur_desc_offset, ret->va, ret->len);
+    trace_spapr_vscsi_fetch_desc_done(req->cur_desc_num, req->cur_desc_offset,
+                                      ret->va, ret->len);
 
     return ret->len ? 1 : 0;
 }
@@ -395,7 +388,7 @@ static int vscsi_srp_indirect_data(VSCSIState *s, vscsi_req *req,
     int rc = 0;
     uint32_t llen, total = 0;
 
-    DPRINTF("VSCSI: indirect segment 0x%x bytes\n", len);
+    trace_spapr_vscsi_srp_indirect_data(len);
 
     /* While we have data ... */
     while (len) {
@@ -414,11 +407,10 @@ static int vscsi_srp_indirect_data(VSCSIState *s, vscsi_req *req,
             rc = spapr_vio_dma_write(&s->vdev, md.va, buf, llen);
         }
         if (rc) {
-            DPRINTF("VSCSI: spapr_vio_dma_r/w(%d) -> %d\n", req->writing, rc);
+            trace_spapr_vscsi_srp_indirect_data_rw(req->writing, rc);
             break;
         }
-        DPRINTF("VSCSI:     data: %02x %02x %02x %02x...\n",
-                buf[0], buf[1], buf[2], buf[3]);
+        trace_spapr_vscsi_srp_indirect_data_buf(buf[0], buf[1], buf[2], buf[3]);
 
         len -= llen;
         buf += llen;
@@ -444,7 +436,7 @@ static int vscsi_srp_transfer_data(VSCSIState *s, vscsi_req *req,
 
     switch (req->dma_fmt) {
     case SRP_NO_DATA_DESC:
-        DPRINTF("VSCSI: no data desc transfer, skipping 0x%x bytes\n", len);
+        trace_spapr_vscsi_srp_transfer_data(len);
         break;
     case SRP_DATA_DESC_DIRECT:
         err = vscsi_srp_direct_data(s, req, buf, len);
@@ -524,8 +516,7 @@ static void vscsi_transfer_data(SCSIRequest *sreq, uint32_t len)
     uint8_t *buf;
     int rc = 0;
 
-    DPRINTF("VSCSI: SCSI xfer complete tag=0x%x len=0x%x, req=%p\n",
-            sreq->tag, len, req);
+    trace_spapr_vscsi_transfer_data(sreq->tag, len, req);
     if (req == NULL) {
         fprintf(stderr, "VSCSI: Can't find request for tag 0x%x\n", sreq->tag);
         return;
@@ -554,8 +545,7 @@ static void vscsi_command_complete(SCSIRequest *sreq, uint32_t status, size_t re
     vscsi_req *req = sreq->hba_private;
     int32_t res_in = 0, res_out = 0;
 
-    DPRINTF("VSCSI: SCSI cmd complete, tag=0x%x status=0x%x, req=%p\n",
-            sreq->tag, status, req);
+    trace_spapr_vscsi_command_complete(sreq->tag, status, req);
     if (req == NULL) {
         fprintf(stderr, "VSCSI: Can't find request for tag 0x%x\n", sreq->tag);
         return;
@@ -564,16 +554,15 @@ static void vscsi_command_complete(SCSIRequest *sreq, uint32_t status, size_t re
     if (status == CHECK_CONDITION) {
         req->senselen = scsi_req_get_sense(req->sreq, req->sense,
                                            sizeof(req->sense));
-        DPRINTF("VSCSI: Sense data, %d bytes:\n", req->senselen);
-        DPRINTF("       %02x  %02x  %02x  %02x  %02x  %02x  %02x  %02x\n",
+        trace_spapr_vscsi_command_complete_sense_data1(req->senselen,
                 req->sense[0], req->sense[1], req->sense[2], req->sense[3],
                 req->sense[4], req->sense[5], req->sense[6], req->sense[7]);
-        DPRINTF("       %02x  %02x  %02x  %02x  %02x  %02x  %02x  %02x\n",
+        trace_spapr_vscsi_command_complete_sense_data2(
                 req->sense[8], req->sense[9], req->sense[10], req->sense[11],
                 req->sense[12], req->sense[13], req->sense[14], req->sense[15]);
     }
 
-    DPRINTF("VSCSI: Command complete err=%d\n", status);
+    trace_spapr_vscsi_command_complete_status(status);
     if (status == 0) {
         /* We handle overflows, not underflows for normal commands,
          * but hopefully nobody cares
@@ -630,10 +619,10 @@ static void vscsi_save_request(QEMUFile *f, SCSIRequest *sreq)
     vscsi_req *req = sreq->hba_private;
     assert(req->active);
 
-    vmstate_save_state(f, &vmstate_spapr_vscsi_req, req);
+    vmstate_save_state(f, &vmstate_spapr_vscsi_req, req, NULL);
 
-    DPRINTF("VSCSI: saving tag=%u, current desc#%d, offset=%x\n",
-            req->qtag, req->cur_desc_num, req->cur_desc_offset);
+    trace_spapr_vscsi_save_request(req->qtag, req->cur_desc_num,
+                                   req->cur_desc_offset);
 }
 
 static void *vscsi_load_request(QEMUFile *f, SCSIRequest *sreq)
@@ -657,8 +646,8 @@ static void *vscsi_load_request(QEMUFile *f, SCSIRequest *sreq)
 
     req->sreq = scsi_req_ref(sreq);
 
-    DPRINTF("VSCSI: restoring tag=%u, current desc#%d, offset=%x\n",
-            req->qtag, req->cur_desc_num, req->cur_desc_offset);
+    trace_spapr_vscsi_load_request(req->qtag, req->cur_desc_num,
+                                   req->cur_desc_offset);
 
     return req;
 }
@@ -669,7 +658,7 @@ static void vscsi_process_login(VSCSIState *s, vscsi_req *req)
     struct srp_login_rsp *rsp = &iu->srp.login_rsp;
     uint64_t tag = iu->srp.rsp.tag;
 
-    DPRINTF("VSCSI: Got login, sendin response !\n");
+    trace_spapr_vscsi_process_login();
 
     /* TODO handle case that requested size is wrong and
      * buffer format is wrong
@@ -695,7 +684,7 @@ static void vscsi_inquiry_no_target(VSCSIState *s, vscsi_req *req)
     uint8_t resp_data[36];
     int rc, len, alen;
 
-    /* We dont do EVPD. Also check that page_code is 0 */
+    /* We don't do EVPD. Also check that page_code is 0 */
     if ((cdb[1] & 0x01) || cdb[2] != 0) {
         /* Send INVALID FIELD IN CDB */
         vscsi_makeup_sense(s, req, ILLEGAL_REQUEST, 0x24, 0);
@@ -750,7 +739,6 @@ static void vscsi_report_luns(VSCSIState *s, vscsi_req *req)
     len = n+8;
 
     resp_data = g_malloc0(len);
-    memset(resp_data, 0, len);
     stl_be_p(resp_data, n);
     i = found_lun0 ? 8 : 16;
     QTAILQ_FOREACH(kid, &s->bus.qbus.children, sibling) {
@@ -793,8 +781,7 @@ static int vscsi_queue_cmd(VSCSIState *s, vscsi_req *req)
 
     sdev = vscsi_device_find(&s->bus, be64_to_cpu(srp->cmd.lun), &lun);
     if (!sdev) {
-        DPRINTF("VSCSI: Command for lun %08" PRIx64 " with no drive\n",
-                be64_to_cpu(srp->cmd.lun));
+        trace_spapr_vscsi_queue_cmd_no_drive(be64_to_cpu(srp->cmd.lun));
         if (srp->cmd.cdb[0] == INQUIRY) {
             vscsi_inquiry_no_target(s, req);
         } else {
@@ -806,9 +793,8 @@ static int vscsi_queue_cmd(VSCSIState *s, vscsi_req *req)
     req->sreq = scsi_req_new(sdev, req->qtag, lun, srp->cmd.cdb, req);
     n = scsi_req_enqueue(req->sreq);
 
-    DPRINTF("VSCSI: Queued command tag 0x%x CMD 0x%x=%s LUN %d ret: %d\n",
-            req->qtag, srp->cmd.cdb[0], scsi_command_name(srp->cmd.cdb[0]),
-            lun, n);
+    trace_spapr_vscsi_queue_cmd(req->qtag, srp->cmd.cdb[0],
+                                scsi_command_name(srp->cmd.cdb[0]), lun, n);
 
     if (n) {
         /* Transfer direction must be set before preprocessing the
@@ -1139,7 +1125,7 @@ static int vscsi_do_crq(struct VIOsPAPRDevice *dev, uint8_t *crq_data)
     crq.s.IU_length = be16_to_cpu(crq.s.IU_length);
     crq.s.IU_data_ptr = be64_to_cpu(crq.s.IU_data_ptr);
 
-    DPRINTF("VSCSI: do_crq %02x %02x ...\n", crq.raw[0], crq.raw[1]);
+    trace_spapr_vscsi_do_crq(crq.raw[0], crq.raw[1]);
 
     switch (crq.s.valid) {
     case 0xc0: /* Init command/response */
@@ -1212,24 +1198,14 @@ static void spapr_vscsi_reset(VIOsPAPRDevice *dev)
     }
 }
 
-static int spapr_vscsi_init(VIOsPAPRDevice *dev)
+static void spapr_vscsi_realize(VIOsPAPRDevice *dev, Error **errp)
 {
     VSCSIState *s = VIO_SPAPR_VSCSI_DEVICE(dev);
-    Error *err = NULL;
 
     dev->crq.SendFunc = vscsi_do_crq;
 
     scsi_bus_new(&s->bus, sizeof(s->bus), DEVICE(dev),
                  &vscsi_scsi_info, NULL);
-    if (!dev->qdev.hotplugged) {
-        scsi_bus_legacy_handle_cmdline(&s->bus, &err);
-        if (err != NULL) {
-            error_free(err);
-            return -1;
-        }
-    }
-
-    return 0;
 }
 
 void spapr_vscsi_create(VIOsPAPRBus *bus)
@@ -1239,6 +1215,7 @@ void spapr_vscsi_create(VIOsPAPRBus *bus)
     dev = qdev_create(&bus->bus, "spapr-vscsi");
 
     qdev_init_nofail(dev);
+    scsi_bus_legacy_handle_cmdline(&VIO_SPAPR_VSCSI_DEVICE(dev)->bus);
 }
 
 static int spapr_vscsi_devnode(VIOsPAPRDevice *dev, void *fdt, int node_off)
@@ -1281,7 +1258,7 @@ static void spapr_vscsi_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     VIOsPAPRDeviceClass *k = VIO_SPAPR_DEVICE_CLASS(klass);
 
-    k->init = spapr_vscsi_init;
+    k->realize = spapr_vscsi_realize;
     k->reset = spapr_vscsi_reset;
     k->devnode = spapr_vscsi_devnode;
     k->dt_name = "v-scsi";

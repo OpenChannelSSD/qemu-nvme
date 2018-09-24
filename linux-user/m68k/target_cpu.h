@@ -18,8 +18,8 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef TARGET_CPU_H
-#define TARGET_CPU_H
+#ifndef M68K_TARGET_CPU_H
+#define M68K_TARGET_CPU_H
 
 static inline void cpu_clone_regs(CPUM68KState *env, target_ulong newsp)
 {
@@ -37,4 +37,8 @@ static inline void cpu_set_tls(CPUM68KState *env, target_ulong newtls)
     ts->tp_value = newtls;
 }
 
+static inline abi_ulong get_sp_from_cpustate(CPUM68KState *state)
+{
+    return state->aregs[7];
+}
 #endif

@@ -11,11 +11,12 @@
  *
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "qemu-common.h"
 #include "qemu/error-report.h"
 #include "hw/scsi/scsi.h"
 #include "sysemu/block-backend.h"
-#include "sysemu/blockdev.h"
 
 #ifdef __linux__
 
@@ -31,20 +32,8 @@ do { printf("scsi-generic: " fmt , ## __VA_ARGS__); } while (0)
 #define BADF(fmt, ...) \
 do { fprintf(stderr, "scsi-generic: " fmt , ## __VA_ARGS__); } while (0)
 
-#include <stdio.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <scsi/sg.h>
-#include "block/scsi.h"
-
-#define SG_ERR_DRIVER_TIMEOUT  0x06
-#define SG_ERR_DRIVER_SENSE    0x08
-
-#define SG_ERR_DID_OK          0x00
-#define SG_ERR_DID_NO_CONNECT  0x01
-#define SG_ERR_DID_BUS_BUSY    0x02
-#define SG_ERR_DID_TIME_OUT    0x03
+#include "scsi/constants.h"
 
 #ifndef MAX_UINT
 #define MAX_UINT ((unsigned int)-1)
@@ -88,58 +77,45 @@ static void scsi_free_request(SCSIRequest *req)
 }
 
 /* Helper function for command completion.  */
-static void scsi_command_complete(void *opaque, int ret)
+static void scsi_command_complete_noio(SCSIGenericReq *r, int ret)
 {
     int status;
-    SCSIGenericReq *r = (SCSIGenericReq *)opaque;
+    SCSISense sense;
 
-    r->req.aiocb = NULL;
+    assert(r->req.aiocb == NULL);
+
     if (r->req.io_canceled) {
         scsi_req_cancel_complete(&r->req);
         goto done;
     }
-    if (r->io_header.driver_status & SG_ERR_DRIVER_SENSE) {
-        r->req.sense_len = r->io_header.sb_len_wr;
+    status = sg_io_sense_from_errno(-ret, &r->io_header, &sense);
+    if (status == CHECK_CONDITION) {
+        if (r->io_header.driver_status & SG_ERR_DRIVER_SENSE) {
+            r->req.sense_len = r->io_header.sb_len_wr;
+        } else {
+            scsi_req_build_sense(&r->req, sense);
+        }
     }
 
-    if (ret != 0) {
-        switch (ret) {
-        case -EDOM:
-            status = TASK_SET_FULL;
-            break;
-        case -ENOMEM:
-            status = CHECK_CONDITION;
-            scsi_req_build_sense(&r->req, SENSE_CODE(TARGET_FAILURE));
-            break;
-        default:
-            status = CHECK_CONDITION;
-            scsi_req_build_sense(&r->req, SENSE_CODE(IO_ERROR));
-            break;
-        }
-    } else {
-        if (r->io_header.host_status == SG_ERR_DID_NO_CONNECT ||
-            r->io_header.host_status == SG_ERR_DID_BUS_BUSY ||
-            r->io_header.host_status == SG_ERR_DID_TIME_OUT ||
-            (r->io_header.driver_status & SG_ERR_DRIVER_TIMEOUT)) {
-            status = BUSY;
-            BADF("Driver Timeout\n");
-        } else if (r->io_header.host_status) {
-            status = CHECK_CONDITION;
-            scsi_req_build_sense(&r->req, SENSE_CODE(I_T_NEXUS_LOSS));
-        } else if (r->io_header.status) {
-            status = r->io_header.status;
-        } else if (r->io_header.driver_status & SG_ERR_DRIVER_SENSE) {
-            status = CHECK_CONDITION;
-        } else {
-            status = GOOD;
-        }
-    }
     DPRINTF("Command complete 0x%p tag=0x%x status=%d\n",
             r, r->req.tag, status);
 
     scsi_req_complete(&r->req, status);
 done:
     scsi_req_unref(&r->req);
+}
+
+static void scsi_command_complete(void *opaque, int ret)
+{
+    SCSIGenericReq *r = (SCSIGenericReq *)opaque;
+    SCSIDevice *s = r->req.dev;
+
+    assert(r->req.aiocb != NULL);
+    r->req.aiocb = NULL;
+
+    aio_context_acquire(blk_get_aio_context(s->conf.blk));
+    scsi_command_complete_noio(r, ret);
+    aio_context_release(blk_get_aio_context(s->conf.blk));
 }
 
 static int execute_command(BlockBackend *blk,
@@ -166,39 +142,162 @@ static int execute_command(BlockBackend *blk,
     return 0;
 }
 
+static void scsi_handle_inquiry_reply(SCSIGenericReq *r, SCSIDevice *s)
+{
+    uint8_t page, page_len;
+
+    /*
+     *  EVPD set to zero returns the standard INQUIRY data.
+     *
+     *  Check if scsi_version is unset (-1) to avoid re-defining it
+     *  each time an INQUIRY with standard data is received.
+     *  scsi_version is initialized with -1 in scsi_generic_reset
+     *  and scsi_disk_reset, making sure that we'll set the
+     *  scsi_version after a reset. If the version field of the
+     *  INQUIRY response somehow changes after a guest reboot,
+     *  we'll be able to keep track of it.
+     *
+     *  On SCSI-2 and older, first 3 bits of byte 2 is the
+     *  ANSI-approved version, while on later versions the
+     *  whole byte 2 contains the version. Check if we're dealing
+     *  with a newer version and, in that case, assign the
+     *  whole byte.
+     */
+    if (s->scsi_version == -1 && !(r->req.cmd.buf[1] & 0x01)) {
+        s->scsi_version = r->buf[2] & 0x07;
+        if (s->scsi_version > 2) {
+            s->scsi_version = r->buf[2];
+        }
+    }
+
+    if (s->type == TYPE_DISK && (r->req.cmd.buf[1] & 0x01)) {
+        page = r->req.cmd.buf[2];
+        if (page == 0xb0) {
+            uint32_t max_transfer =
+                blk_get_max_transfer(s->conf.blk) / s->blocksize;
+
+            assert(max_transfer);
+            stl_be_p(&r->buf[8], max_transfer);
+            /* Also take care of the opt xfer len. */
+            stl_be_p(&r->buf[12],
+                    MIN_NON_ZERO(max_transfer, ldl_be_p(&r->buf[12])));
+        } else if (page == 0x00 && s->needs_vpd_bl_emulation) {
+            /*
+             * Now we're capable of supplying the VPD Block Limits
+             * response if the hardware can't. Add it in the INQUIRY
+             * Supported VPD pages response in case we are using the
+             * emulation for this device.
+             *
+             * This way, the guest kernel will be aware of the support
+             * and will use it to proper setup the SCSI device.
+             */
+            page_len = r->buf[3];
+            r->buf[page_len + 4] = 0xb0;
+            r->buf[3] = ++page_len;
+        }
+    }
+}
+
+static int scsi_emulate_block_limits(SCSIGenericReq *r)
+{
+    r->buflen = scsi_disk_emulate_vpd_page(&r->req, r->buf);
+    r->io_header.sb_len_wr = 0;
+
+    /*
+    * We have valid contents in the reply buffer but the
+    * io_header can report a sense error coming from
+    * the hardware in scsi_command_complete_noio. Clean
+    * up the io_header to avoid reporting it.
+    */
+    r->io_header.driver_status = 0;
+    r->io_header.status = 0;
+
+    return r->buflen;
+}
+
 static void scsi_read_complete(void * opaque, int ret)
 {
     SCSIGenericReq *r = (SCSIGenericReq *)opaque;
     SCSIDevice *s = r->req.dev;
+    SCSISense sense;
     int len;
 
+    assert(r->req.aiocb != NULL);
     r->req.aiocb = NULL;
+
+    aio_context_acquire(blk_get_aio_context(s->conf.blk));
+
     if (ret || r->req.io_canceled) {
-        scsi_command_complete(r, ret);
-        return;
+        scsi_command_complete_noio(r, ret);
+        goto done;
     }
+
     len = r->io_header.dxfer_len - r->io_header.resid;
     DPRINTF("Data ready tag=0x%x len=%d\n", r->req.tag, len);
 
     r->len = -1;
-    if (len == 0) {
-        scsi_command_complete(r, 0);
-    } else {
-        /* Snoop READ CAPACITY output to set the blocksize.  */
-        if (r->req.cmd.buf[0] == READ_CAPACITY_10 &&
-            (ldl_be_p(&r->buf[0]) != 0xffffffffU || s->max_lba == 0)) {
-            s->blocksize = ldl_be_p(&r->buf[4]);
-            s->max_lba = ldl_be_p(&r->buf[0]) & 0xffffffffULL;
-        } else if (r->req.cmd.buf[0] == SERVICE_ACTION_IN_16 &&
-                   (r->req.cmd.buf[1] & 31) == SAI_READ_CAPACITY_16) {
-            s->blocksize = ldl_be_p(&r->buf[8]);
-            s->max_lba = ldq_be_p(&r->buf[0]);
-        }
-        blk_set_guest_block_size(s->conf.blk, s->blocksize);
 
-        scsi_req_data(&r->req, len);
-        scsi_req_unref(&r->req);
+    /*
+     * Check if this is a VPD Block Limits request that
+     * resulted in sense error but would need emulation.
+     * In this case, emulate a valid VPD response.
+     */
+    if (s->needs_vpd_bl_emulation) {
+        int is_vpd_bl = r->req.cmd.buf[0] == INQUIRY &&
+                         r->req.cmd.buf[1] & 0x01 &&
+                         r->req.cmd.buf[2] == 0xb0;
+
+        if (is_vpd_bl && sg_io_sense_from_errno(-ret, &r->io_header, &sense)) {
+            len = scsi_emulate_block_limits(r);
+            /*
+             * No need to let scsi_read_complete go on and handle an
+             * INQUIRY VPD BL request we created manually.
+             */
+            goto req_complete;
+        }
     }
+
+    if (len == 0) {
+        scsi_command_complete_noio(r, 0);
+        goto done;
+    }
+
+    /* Snoop READ CAPACITY output to set the blocksize.  */
+    if (r->req.cmd.buf[0] == READ_CAPACITY_10 &&
+        (ldl_be_p(&r->buf[0]) != 0xffffffffU || s->max_lba == 0)) {
+        s->blocksize = ldl_be_p(&r->buf[4]);
+        s->max_lba = ldl_be_p(&r->buf[0]) & 0xffffffffULL;
+    } else if (r->req.cmd.buf[0] == SERVICE_ACTION_IN_16 &&
+               (r->req.cmd.buf[1] & 31) == SAI_READ_CAPACITY_16) {
+        s->blocksize = ldl_be_p(&r->buf[8]);
+        s->max_lba = ldq_be_p(&r->buf[0]);
+    }
+    blk_set_guest_block_size(s->conf.blk, s->blocksize);
+
+    /* Patch MODE SENSE device specific parameters if the BDS is opened
+     * readonly.
+     */
+    if ((s->type == TYPE_DISK || s->type == TYPE_TAPE) &&
+        blk_is_read_only(s->conf.blk) &&
+        (r->req.cmd.buf[0] == MODE_SENSE ||
+         r->req.cmd.buf[0] == MODE_SENSE_10) &&
+        (r->req.cmd.buf[1] & 0x8) == 0) {
+        if (r->req.cmd.buf[0] == MODE_SENSE) {
+            r->buf[2] |= 0x80;
+        } else  {
+            r->buf[3] |= 0x80;
+        }
+    }
+    if (r->req.cmd.buf[0] == INQUIRY) {
+        scsi_handle_inquiry_reply(r, s);
+    }
+
+req_complete:
+    scsi_req_data(&r->req, len);
+    scsi_req_unref(&r->req);
+
+done:
+    aio_context_release(blk_get_aio_context(s->conf.blk));
 }
 
 /* Read more data from scsi device into buffer.  */
@@ -208,19 +307,19 @@ static void scsi_read_data(SCSIRequest *req)
     SCSIDevice *s = r->req.dev;
     int ret;
 
-    DPRINTF("scsi_read_data 0x%x\n", req->tag);
+    DPRINTF("scsi_read_data tag=0x%x\n", req->tag);
 
     /* The request is used as the AIO opaque value, so add a ref.  */
     scsi_req_ref(&r->req);
     if (r->len == -1) {
-        scsi_command_complete(r, 0);
+        scsi_command_complete_noio(r, 0);
         return;
     }
 
     ret = execute_command(s->conf.blk, r, SG_DXFER_FROM_DEV,
                           scsi_read_complete);
     if (ret < 0) {
-        scsi_command_complete(r, ret);
+        scsi_command_complete_noio(r, ret);
     }
 }
 
@@ -230,10 +329,15 @@ static void scsi_write_complete(void * opaque, int ret)
     SCSIDevice *s = r->req.dev;
 
     DPRINTF("scsi_write_complete() ret = %d\n", ret);
+
+    assert(r->req.aiocb != NULL);
     r->req.aiocb = NULL;
+
+    aio_context_acquire(blk_get_aio_context(s->conf.blk));
+
     if (ret || r->req.io_canceled) {
-        scsi_command_complete(r, ret);
-        return;
+        scsi_command_complete_noio(r, ret);
+        goto done;
     }
 
     if (r->req.cmd.buf[0] == MODE_SELECT && r->req.cmd.buf[4] == 12 &&
@@ -242,7 +346,10 @@ static void scsi_write_complete(void * opaque, int ret)
         DPRINTF("block size %d\n", s->blocksize);
     }
 
-    scsi_command_complete(r, ret);
+    scsi_command_complete_noio(r, ret);
+
+done:
+    aio_context_release(blk_get_aio_context(s->conf.blk));
 }
 
 /* Write data to a scsi device.  Returns nonzero on failure.
@@ -253,7 +360,7 @@ static void scsi_write_data(SCSIRequest *req)
     SCSIDevice *s = r->req.dev;
     int ret;
 
-    DPRINTF("scsi_write_data 0x%x\n", req->tag);
+    DPRINTF("scsi_write_data tag=0x%x\n", req->tag);
     if (r->len == 0) {
         r->len = r->buflen;
         scsi_req_data(&r->req, r->len);
@@ -264,7 +371,7 @@ static void scsi_write_data(SCSIRequest *req)
     scsi_req_ref(&r->req);
     ret = execute_command(s->conf.blk, r, SG_DXFER_TO_DEV, scsi_write_complete);
     if (ret < 0) {
-        scsi_command_complete(r, ret);
+        scsi_command_complete_noio(r, ret);
     }
 }
 
@@ -288,6 +395,7 @@ static int32_t scsi_send_command(SCSIRequest *req, uint8_t *cmd)
     int ret;
 
 #ifdef DEBUG_SCSI
+    DPRINTF("Command: data=0x%02x", cmd[0]);
     {
         int i;
         for (i = 1; i < r->req.cmd.len; i++) {
@@ -298,8 +406,7 @@ static int32_t scsi_send_command(SCSIRequest *req, uint8_t *cmd)
 #endif
 
     if (r->req.cmd.xfer == 0) {
-        if (r->buf != NULL)
-            g_free(r->buf);
+        g_free(r->buf);
         r->buflen = 0;
         r->buf = NULL;
         /* The request is used as the AIO opaque value, so add a ref.  */
@@ -307,15 +414,14 @@ static int32_t scsi_send_command(SCSIRequest *req, uint8_t *cmd)
         ret = execute_command(s->conf.blk, r, SG_DXFER_NONE,
                               scsi_command_complete);
         if (ret < 0) {
-            scsi_command_complete(r, ret);
+            scsi_command_complete_noio(r, ret);
             return 0;
         }
         return 0;
     }
 
     if (r->buflen != r->req.cmd.xfer) {
-        if (r->buf != NULL)
-            g_free(r->buf);
+        g_free(r->buf);
         r->buf = g_malloc(r->req.cmd.xfer);
         r->buflen = r->req.cmd.xfer;
     }
@@ -330,26 +436,53 @@ static int32_t scsi_send_command(SCSIRequest *req, uint8_t *cmd)
     }
 }
 
-static int get_stream_blocksize(BlockBackend *blk)
+static int read_naa_id(const uint8_t *p, uint64_t *p_wwn)
 {
-    uint8_t cmd[6];
-    uint8_t buf[12];
-    uint8_t sensebuf[8];
-    sg_io_hdr_t io_header;
-    int ret;
+    int i;
 
-    memset(cmd, 0, sizeof(cmd));
-    memset(buf, 0, sizeof(buf));
-    cmd[0] = MODE_SENSE;
-    cmd[4] = sizeof(buf);
+    if ((p[1] & 0xF) == 3) {
+        /* NAA designator type */
+        if (p[3] != 8) {
+            return -EINVAL;
+        }
+        *p_wwn = ldq_be_p(p + 4);
+        return 0;
+    }
+
+    if ((p[1] & 0xF) == 8) {
+        /* SCSI name string designator type */
+        if (p[3] < 20 || memcmp(&p[4], "naa.", 4)) {
+            return -EINVAL;
+        }
+        if (p[3] > 20 && p[24] != ',') {
+            return -EINVAL;
+        }
+        *p_wwn = 0;
+        for (i = 8; i < 24; i++) {
+            char c = qemu_toupper(p[i]);
+            c -= (c >= '0' && c <= '9' ? '0' : 'A' - 10);
+            *p_wwn = (*p_wwn << 4) | c;
+        }
+        return 0;
+    }
+
+    return -EINVAL;
+}
+
+int scsi_SG_IO_FROM_DEV(BlockBackend *blk, uint8_t *cmd, uint8_t cmd_size,
+                        uint8_t *buf, uint8_t buf_size)
+{
+    sg_io_hdr_t io_header;
+    uint8_t sensebuf[8];
+    int ret;
 
     memset(&io_header, 0, sizeof(io_header));
     io_header.interface_id = 'S';
     io_header.dxfer_direction = SG_DXFER_FROM_DEV;
-    io_header.dxfer_len = sizeof(buf);
+    io_header.dxfer_len = buf_size;
     io_header.dxferp = buf;
     io_header.cmdp = cmd;
-    io_header.cmd_len = sizeof(cmd);
+    io_header.cmd_len = cmd_size;
     io_header.mx_sb_len = sizeof(sensebuf);
     io_header.sbp = sensebuf;
     io_header.timeout = 6000; /* XXX */
@@ -358,6 +491,122 @@ static int get_stream_blocksize(BlockBackend *blk)
     if (ret < 0 || io_header.driver_status || io_header.host_status) {
         return -1;
     }
+    return 0;
+}
+
+/*
+ * Executes an INQUIRY request with EVPD set to retrieve the
+ * available VPD pages of the device. If the device does
+ * not support the Block Limits page (page 0xb0), set
+ * the needs_vpd_bl_emulation flag for future use.
+ */
+static void scsi_generic_set_vpd_bl_emulation(SCSIDevice *s)
+{
+    uint8_t cmd[6];
+    uint8_t buf[250];
+    uint8_t page_len;
+    int ret, i;
+
+    memset(cmd, 0, sizeof(cmd));
+    memset(buf, 0, sizeof(buf));
+    cmd[0] = INQUIRY;
+    cmd[1] = 1;
+    cmd[2] = 0x00;
+    cmd[4] = sizeof(buf);
+
+    ret = scsi_SG_IO_FROM_DEV(s->conf.blk, cmd, sizeof(cmd),
+                              buf, sizeof(buf));
+    if (ret < 0) {
+        /*
+         * Do not assume anything if we can't retrieve the
+         * INQUIRY response to assert the VPD Block Limits
+         * support.
+         */
+        s->needs_vpd_bl_emulation = false;
+        return;
+    }
+
+    page_len = buf[3];
+    for (i = 4; i < page_len + 4; i++) {
+        if (buf[i] == 0xb0) {
+            s->needs_vpd_bl_emulation = false;
+            return;
+        }
+    }
+    s->needs_vpd_bl_emulation = true;
+}
+
+static void scsi_generic_read_device_identification(SCSIDevice *s)
+{
+    uint8_t cmd[6];
+    uint8_t buf[250];
+    int ret;
+    int i, len;
+
+    memset(cmd, 0, sizeof(cmd));
+    memset(buf, 0, sizeof(buf));
+    cmd[0] = INQUIRY;
+    cmd[1] = 1;
+    cmd[2] = 0x83;
+    cmd[4] = sizeof(buf);
+
+    ret = scsi_SG_IO_FROM_DEV(s->conf.blk, cmd, sizeof(cmd),
+                              buf, sizeof(buf));
+    if (ret < 0) {
+        return;
+    }
+
+    len = MIN((buf[2] << 8) | buf[3], sizeof(buf) - 4);
+    for (i = 0; i + 3 <= len; ) {
+        const uint8_t *p = &buf[i + 4];
+        uint64_t wwn;
+
+        if (i + (p[3] + 4) > len) {
+            break;
+        }
+
+        if ((p[1] & 0x10) == 0) {
+            /* Associated with the logical unit */
+            if (read_naa_id(p, &wwn) == 0) {
+                s->wwn = wwn;
+            }
+        } else if ((p[1] & 0x10) == 0x10) {
+            /* Associated with the target port */
+            if (read_naa_id(p, &wwn) == 0) {
+                s->port_wwn = wwn;
+            }
+        }
+
+        i += p[3] + 4;
+    }
+}
+
+void scsi_generic_read_device_inquiry(SCSIDevice *s)
+{
+    scsi_generic_read_device_identification(s);
+    if (s->type == TYPE_DISK) {
+        scsi_generic_set_vpd_bl_emulation(s);
+    } else {
+        s->needs_vpd_bl_emulation = false;
+    }
+}
+
+static int get_stream_blocksize(BlockBackend *blk)
+{
+    uint8_t cmd[6];
+    uint8_t buf[12];
+    int ret;
+
+    memset(cmd, 0, sizeof(cmd));
+    memset(buf, 0, sizeof(buf));
+    cmd[0] = MODE_SENSE;
+    cmd[4] = sizeof(buf);
+
+    ret = scsi_SG_IO_FROM_DEV(blk, cmd, sizeof(cmd), buf, sizeof(buf));
+    if (ret < 0) {
+        return -1;
+    }
+
     return (buf[9] << 16) | (buf[10] << 8) | buf[11];
 }
 
@@ -365,13 +614,8 @@ static void scsi_generic_reset(DeviceState *dev)
 {
     SCSIDevice *s = SCSI_DEVICE(dev);
 
+    s->scsi_version = s->default_scsi_version;
     scsi_device_purge_requests(s, SENSE_CODE(RESET));
-}
-
-static void scsi_unrealize(SCSIDevice *s, Error **errp)
-{
-    scsi_device_purge_requests(s, SENSE_CODE(NO_SENSE));
-    blockdev_mark_auto_del(s->conf.blk);
 }
 
 static void scsi_generic_realize(SCSIDevice *s, Error **errp)
@@ -397,9 +641,10 @@ static void scsi_generic_realize(SCSIDevice *s, Error **errp)
     /* check we are using a driver managing SG_IO (version 3 and after */
     rc = blk_ioctl(s->conf.blk, SG_GET_VERSION_NUM, &sg_version);
     if (rc < 0) {
-        error_setg(errp, "cannot get SG_IO version number: %s.  "
-                         "Is this a SCSI device?",
-                         strerror(-rc));
+        error_setg_errno(errp, -rc, "cannot get SG_IO version number");
+        if (rc != -EPERM) {
+            error_append_hint(errp, "Is this a SCSI device?\n");
+        }
         return;
     }
     if (sg_version < 30000) {
@@ -410,6 +655,11 @@ static void scsi_generic_realize(SCSIDevice *s, Error **errp)
     /* get LUN of the /dev/sg? */
     if (blk_ioctl(s->conf.blk, SG_GET_SCSI_ID, &scsiid)) {
         error_setg(errp, "SG_GET_SCSI_ID ioctl failed");
+        return;
+    }
+    if (!blkconf_apply_backend_options(&s->conf,
+                                       blk_is_read_only(s->conf.blk),
+                                       true, errp)) {
         return;
     }
 
@@ -439,6 +689,10 @@ static void scsi_generic_realize(SCSIDevice *s, Error **errp)
     }
 
     DPRINTF("block size %d\n", s->blocksize);
+
+    /* Only used by scsi-block, but initialize it nevertheless to be clean.  */
+    s->default_scsi_version = -1;
+    scsi_generic_read_device_inquiry(s);
 }
 
 const SCSIReqOps scsi_generic_req_ops = {
@@ -455,14 +709,12 @@ const SCSIReqOps scsi_generic_req_ops = {
 static SCSIRequest *scsi_new_request(SCSIDevice *d, uint32_t tag, uint32_t lun,
                                      uint8_t *buf, void *hba_private)
 {
-    SCSIRequest *req;
-
-    req = scsi_req_alloc(&scsi_generic_req_ops, d, tag, lun, hba_private);
-    return req;
+    return scsi_req_alloc(&scsi_generic_req_ops, d, tag, lun, hba_private);
 }
 
 static Property scsi_generic_properties[] = {
     DEFINE_PROP_DRIVE("drive", SCSIDevice, conf.blk),
+    DEFINE_PROP_BOOL("share-rw", SCSIDevice, conf.share_rw, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -478,7 +730,6 @@ static void scsi_generic_class_initfn(ObjectClass *klass, void *data)
     SCSIDeviceClass *sc = SCSI_DEVICE_CLASS(klass);
 
     sc->realize      = scsi_generic_realize;
-    sc->unrealize    = scsi_unrealize;
     sc->alloc_req    = scsi_new_request;
     sc->parse_cdb    = scsi_generic_parse_cdb;
     dc->fw_name = "disk";

@@ -14,9 +14,12 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
+#include "qapi/error.h"
 #include "qemu/timer.h"
 #include "sysemu/dma.h"
+#include "qemu/log.h"
 
 #ifndef PL330_ERR_DEBUG
 #define PL330_ERR_DEBUG 0
@@ -26,7 +29,7 @@
     if (PL330_ERR_DEBUG >= lvl) {\
         fprintf(stderr, "PL330: %s:" fmt, __func__, ## args);\
     } \
-} while (0);
+} while (0)
 
 #define DB_PRINT(fmt, args...) DB_PRINT_L(1, fmt, ## args)
 
@@ -170,8 +173,8 @@ static const VMStateDescription vmstate_pl330_fifo = {
     .version_id = 1,
     .minimum_version_id = 1,
     .fields = (VMStateField[]) {
-        VMSTATE_VBUFFER_UINT32(buf, PL330Fifo, 1, NULL, 0, buf_size),
-        VMSTATE_VBUFFER_UINT32(tag, PL330Fifo, 1, NULL, 0, buf_size),
+        VMSTATE_VBUFFER_UINT32(buf, PL330Fifo, 1, NULL, buf_size),
+        VMSTATE_VBUFFER_UINT32(tag, PL330Fifo, 1, NULL, buf_size),
         VMSTATE_UINT32(head, PL330Fifo),
         VMSTATE_UINT32(num, PL330Fifo),
         VMSTATE_UINT32(buf_size, PL330Fifo),
@@ -279,14 +282,14 @@ static const VMStateDescription vmstate_pl330 = {
         VMSTATE_STRUCT(manager, PL330State, 0, vmstate_pl330_chan, PL330Chan),
         VMSTATE_STRUCT_VARRAY_UINT32(chan, PL330State, num_chnls, 0,
                                      vmstate_pl330_chan, PL330Chan),
-        VMSTATE_VBUFFER_UINT32(lo_seqn, PL330State, 1, NULL, 0, num_chnls),
-        VMSTATE_VBUFFER_UINT32(hi_seqn, PL330State, 1, NULL, 0, num_chnls),
+        VMSTATE_VBUFFER_UINT32(lo_seqn, PL330State, 1, NULL, num_chnls),
+        VMSTATE_VBUFFER_UINT32(hi_seqn, PL330State, 1, NULL, num_chnls),
         VMSTATE_STRUCT(fifo, PL330State, 0, vmstate_pl330_fifo, PL330Fifo),
         VMSTATE_STRUCT(read_queue, PL330State, 0, vmstate_pl330_queue,
                        PL330Queue),
         VMSTATE_STRUCT(write_queue, PL330State, 0, vmstate_pl330_queue,
                        PL330Queue),
-        VMSTATE_TIMER(timer, PL330State),
+        VMSTATE_TIMER_PTR(timer, PL330State),
         VMSTATE_UINT32(inten, PL330State),
         VMSTATE_UINT32(int_status, PL330State),
         VMSTATE_UINT32(ev_status, PL330State),
@@ -1566,7 +1569,7 @@ static void pl330_realize(DeviceState *dev, Error **errp)
         s->cfg[1] |= 5;
         break;
     default:
-        error_setg(errp, "Bad value for i-cache_len property: %" PRIx8 "\n",
+        error_setg(errp, "Bad value for i-cache_len property: %" PRIx8,
                    s->i_cache_len);
         return;
     }
@@ -1601,7 +1604,7 @@ static void pl330_realize(DeviceState *dev, Error **errp)
         s->cfg[CFG_CRD] |= 0x4;
         break;
     default:
-        error_setg(errp, "Bad value for data_width property: %" PRIx8 "\n",
+        error_setg(errp, "Bad value for data_width property: %" PRIx8,
                    s->data_width);
         return;
     }

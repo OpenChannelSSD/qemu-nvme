@@ -18,6 +18,7 @@ the GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this file; see the file COPYING.  If not,
 see <http://www.gnu.org/licenses/>.  */
+#include "qemu/osdep.h"
 #include "disas/bfd.h"
 #define BFD_DEFAULT_TARGET_SIZE 64
 
@@ -1119,7 +1120,7 @@ insert_bo (unsigned long insn,
 	   const char **errmsg)
 {
   if (!valid_bo (value, dialect, 0))
-    *errmsg = _("invalid conditional option");
+    *errmsg = "invalid conditional option";
   return insn | ((value & 0x1f) << 21);
 }
 
@@ -1147,9 +1148,9 @@ insert_boe (unsigned long insn,
 	    const char **errmsg)
 {
   if (!valid_bo (value, dialect, 0))
-    *errmsg = _("invalid conditional option");
+    *errmsg = "invalid conditional option";
   else if ((value & 1) != 0)
-    *errmsg = _("attempt to set y bit when using + or - modifier");
+    *errmsg = "attempt to set y bit when using + or - modifier";
 
   return insn | ((value & 0x1f) << 21);
 }
@@ -1181,7 +1182,7 @@ insert_fxm (unsigned long insn,
     {
       if (value == 0 || (value & -value) != value)
 	{
-	  *errmsg = _("invalid mask field");
+	  *errmsg = "invalid mask field";
 	  value = 0;
 	}
     }
@@ -1207,7 +1208,7 @@ insert_fxm (unsigned long insn,
   /* Any other value on mfcr is an error.  */
   else if ((insn & (0x3ff << 1)) == 19 << 1)
     {
-      *errmsg = _("ignoring invalid mfcr mask");
+      *errmsg = "ignoring invalid mfcr mask";
       value = 0;
     }
 
@@ -1257,7 +1258,7 @@ insert_mbe (unsigned long insn,
 
   if (uval == 0)
     {
-      *errmsg = _("illegal bitmask");
+      *errmsg = "illegal bitmask";
       return insn;
     }
 
@@ -1292,7 +1293,7 @@ insert_mbe (unsigned long insn,
     me = 32;
 
   if (count != 2 && (count != 0 || ! last))
-    *errmsg = _("illegal bitmask");
+    *errmsg = "illegal bitmask";
 
   return insn | (mb << 6) | ((me - 1) << 1);
 }
@@ -1412,7 +1413,7 @@ insert_ram (unsigned long insn,
 	    const char **errmsg)
 {
   if ((unsigned long) value >= ((insn >> 21) & 0x1f))
-    *errmsg = _("index register in load range");
+    *errmsg = "index register in load range";
   return insn | ((value & 0x1f) << 16);
 }
 
@@ -1428,7 +1429,7 @@ insert_raq (unsigned long insn,
   long rtvalue = (insn & RT_MASK) >> 21;
 
   if (value == rtvalue)
-    *errmsg = _("source and target register operands must be different");
+    *errmsg = "source and target register operands must be different";
   return insn | ((value & 0x1f) << 16);
 }
 
@@ -1443,7 +1444,7 @@ insert_ras (unsigned long insn,
 	    const char **errmsg)
 {
   if (value == 0)
-    *errmsg = _("invalid register operand when updating");
+    *errmsg = "invalid register operand when updating";
   return insn | ((value & 0x1f) << 16);
 }
 
@@ -1525,7 +1526,7 @@ insert_sprg (unsigned long insn,
   if (value > 7
       || (value > 3
 	  && (dialect & (PPC_OPCODE_BOOKE | PPC_OPCODE_403)) == 0))
-    *errmsg = _("invalid sprg number");
+    *errmsg = "invalid sprg number";
 
   /* If this is mfsprg4..7 then use spr 260..263 which can be read in
      user mode.  Anything else must use spr 272..279.  */
@@ -1652,11 +1653,11 @@ extract_tbr (unsigned long insn,
 #define BBOYBI_MASK (BBOYCB_MASK | BI_MASK)
 #define BBOATBI_MASK (BBOAT2CB_MASK | BI_MASK)
 
-/* An Context form instruction.  */
+/* A Context form instruction.  */
 #define CTX(op, xop)   (OP (op) | (((unsigned long)(xop)) & 0x7))
 #define CTX_MASK CTX(0x3f, 0x7)
 
-/* An User Context form instruction.  */
+/* A User Context form instruction.  */
 #define UCTX(op, xop)  (OP (op) | (((unsigned long)(xop)) & 0x1f))
 #define UCTX_MASK UCTX(0x3f, 0x1f)
 
@@ -1709,19 +1710,19 @@ extract_tbr (unsigned long insn,
 #define SC(op, sa, lk) (OP (op) | ((((unsigned long)(sa)) & 1) << 1) | ((lk) & 1))
 #define SC_MASK (OP_MASK | (((unsigned long)0x3ff) << 16) | (((unsigned long)1) << 1) | 1)
 
-/* An VX form instruction.  */
+/* A VX form instruction.  */
 #define VX(op, xop) (OP (op) | (((unsigned long)(xop)) & 0x7ff))
 
 /* The mask for an VX form instruction.  */
 #define VX_MASK	VX(0x3f, 0x7ff)
 
-/* An VA form instruction.  */
+/* A VA form instruction.  */
 #define VXA(op, xop) (OP (op) | (((unsigned long)(xop)) & 0x03f))
 
-/* The mask for an VA form instruction.  */
+/* The mask for a VA form instruction.  */
 #define VXA_MASK VXA(0x3f, 0x3f)
 
-/* An VXR form instruction.  */
+/* A VXR form instruction.  */
 #define VXR(op, xop, rc) (OP (op) | (((rc) & 1) << 10) | (((unsigned long)(xop)) & 0x3ff))
 
 /* The mask for a VXR form instruction.  */
@@ -1954,6 +1955,9 @@ extract_tbr (unsigned long insn,
 #define POWER4	PPC_OPCODE_POWER4
 #define POWER5	PPC_OPCODE_POWER5
 #define POWER6	PPC_OPCODE_POWER6
+/* Documentation purposes only; we don't actually check the isa for disas.  */
+#define POWER7  PPC_OPCODE_POWER6
+#define POWER9  PPC_OPCODE_POWER6
 #define CELL	PPC_OPCODE_CELL
 #define PPC32   PPC_OPCODE_32 | PPC_OPCODE_PPC
 #define PPC64   PPC_OPCODE_64 | PPC_OPCODE_PPC
@@ -2285,6 +2289,10 @@ const struct powerpc_opcode powerpc_opcodes[] = {
 { "vrlh",      VX(4,   68), VX_MASK,	PPCVEC,		{ VD, VA, VB } },
 { "vrlw",      VX(4,  132), VX_MASK,	PPCVEC,		{ VD, VA, VB } },
 { "vrsqrtefp", VX(4,  330), VX_MASK,	PPCVEC,		{ VD, VB } },
+{ "vrldmi",    VX(4,  197), VX_MASK,    PPCVEC,         { VD, VA, VB } },
+{ "vrldnm",    VX(4,  453), VX_MASK,    PPCVEC,         { VD, VA, VB } },
+{ "vrlwmi",    VX(4,  133), VX_MASK,    PPCVEC,         { VD, VA, VB} },
+{ "vrlwnm",    VX(4,  389), VX_MASK,    PPCVEC,         { VD, VA, VB } },
 { "vsel",      VXA(4,  42), VXA_MASK,	PPCVEC,		{ VD, VA, VB, VC } },
 { "vsl",       VX(4,  452), VX_MASK,	PPCVEC,		{ VD, VA, VB } },
 { "vslb",      VX(4,  260), VX_MASK,	PPCVEC,		{ VD, VA, VB } },
@@ -3584,6 +3592,13 @@ const struct powerpc_opcode powerpc_opcodes[] = {
 { "lbzux",   X(31,119),	X_MASK,		COM,		{ RT, RAL, RB } },
 
 { "popcntb", X(31,122), XRB_MASK,	POWER5,		{ RA, RS } },
+{ "popcntw", X(31,378), XRB_MASK,       POWER7,         { RA, RS } },
+{ "popcntd", X(31,506), XRB_MASK,       POWER7,         { RA, RS } },
+
+{ "cnttzw",  XRC(31,538,0), XRB_MASK,   POWER9,         { RA, RS } },
+{ "cnttzw.", XRC(31,538,1), XRB_MASK,   POWER9,         { RA, RS } },
+{ "cnttzd",  XRC(31,570,0), XRB_MASK,   POWER9,         { RA, RS } },
+{ "cnttzd.", XRC(31,570,1), XRB_MASK,   POWER9,         { RA, RS } },
 
 { "not",     XRC(31,124,0), X_MASK,	COM,		{ RA, RS, RBS } },
 { "nor",     XRC(31,124,0), X_MASK,	COM,		{ RA, RS, RB } },

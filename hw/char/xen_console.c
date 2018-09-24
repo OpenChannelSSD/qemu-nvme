@@ -19,18 +19,13 @@
  *  with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <stdlib.h>
-#include <errno.h>
-#include <string.h>
+#include "qemu/osdep.h"
 #include <sys/select.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <termios.h>
-#include <stdarg.h>
-#include <sys/mman.h>
 
+#include "qapi/error.h"
 #include "hw/hw.h"
-#include "sysemu/char.h"
+#include "chardev/char-fe.h"
 #include "hw/xen/xen_backend.h"
 
 #include <xen/io/console.h>
@@ -49,7 +44,7 @@ struct XenConsole {
     char              console[XEN_BUFSIZE];
     int               ring_ref;
     void              *sring;
-    CharDriverState   *chr;
+    CharBackend       chr;
     int               backlog;
 };
 
@@ -78,7 +73,7 @@ static void buffer_append(struct XenConsole *con)
 
     xen_mb();
     intf->out_cons = cons;
-    xen_be_send_notify(&con->xendev);
+    xen_pv_send_notify(&con->xendev);
 
     if (buffer->max_capacity &&
 	buffer->size > buffer->max_capacity) {
@@ -146,7 +141,7 @@ static void xencons_receive(void *opaque, const uint8_t *buf, int len)
     }
     xen_wmb();
     intf->in_prod = prod;
-    xen_be_send_notify(&con->xendev);
+    xen_pv_send_notify(&con->xendev);
 }
 
 static void xencons_send(struct XenConsole *con)
@@ -154,22 +149,25 @@ static void xencons_send(struct XenConsole *con)
     ssize_t len, size;
 
     size = con->buffer.size - con->buffer.consumed;
-    if (con->chr)
-        len = qemu_chr_fe_write(con->chr, con->buffer.data + con->buffer.consumed,
-                             size);
-    else
-        len = size;
-    if (len < 1) {
-	if (!con->backlog) {
-	    con->backlog = 1;
-	    xen_be_printf(&con->xendev, 1, "backlog piling up, nobody listening?\n");
-	}
+    if (qemu_chr_fe_backend_connected(&con->chr)) {
+        len = qemu_chr_fe_write(&con->chr,
+                                con->buffer.data + con->buffer.consumed,
+                                size);
     } else {
-	buffer_advance(&con->buffer, len);
-	if (con->backlog && len == size) {
-	    con->backlog = 0;
-	    xen_be_printf(&con->xendev, 1, "backlog is gone\n");
-	}
+        len = size;
+    }
+    if (len < 1) {
+        if (!con->backlog) {
+            con->backlog = 1;
+            xen_pv_printf(&con->xendev, 1,
+                          "backlog piling up, nobody listening?\n");
+        }
+    } else {
+        buffer_advance(&con->buffer, len);
+        if (con->backlog && len == size) {
+            con->backlog = 0;
+            xen_pv_printf(&con->xendev, 1, "backlog is gone\n");
+        }
     }
 }
 
@@ -193,7 +191,7 @@ static int con_init(struct XenDevice *xendev)
 
     type = xenstore_read_str(con->console, "type");
     if (!type || strcmp(type, "ioemu") != 0) {
-	xen_be_printf(xendev, 1, "not for me (type=%s)\n", type);
+        xen_pv_printf(xendev, 1, "not for me (type=%s)\n", type);
         ret = -1;
         goto out;
     }
@@ -202,13 +200,18 @@ static int con_init(struct XenDevice *xendev)
 
     /* no Xen override, use qemu output device */
     if (output == NULL) {
-        con->chr = serial_hds[con->xendev.dev];
+        if (con->xendev.dev) {
+            qemu_chr_fe_init(&con->chr, serial_hd(con->xendev.dev),
+                             &error_abort);
+        }
     } else {
         snprintf(label, sizeof(label), "xencons%d", con->xendev.dev);
-        con->chr = qemu_chr_new(label, output, NULL);
+        qemu_chr_fe_init(&con->chr,
+                         qemu_chr_new(label, output), &error_abort);
     }
 
-    xenstore_store_pv_console_info(con->xendev.dev, con->chr);
+    xenstore_store_pv_console_info(con->xendev.dev,
+                                   qemu_chr_fe_get_driver(&con->chr));
 
 out:
     g_free(type);
@@ -228,32 +231,23 @@ static int con_initialise(struct XenDevice *xendev)
 	con->buffer.max_capacity = limit;
 
     if (!xendev->dev) {
-        con->sring = xc_map_foreign_range(xen_xc, con->xendev.dom,
-                                          XC_PAGE_SIZE,
-                                          PROT_READ|PROT_WRITE,
-                                          con->ring_ref);
+        xen_pfn_t mfn = con->ring_ref;
+        con->sring = xenforeignmemory_map(xen_fmem, con->xendev.dom,
+                                          PROT_READ | PROT_WRITE,
+                                          1, &mfn, NULL);
     } else {
-        con->sring = xc_gnttab_map_grant_ref(xendev->gnttabdev, con->xendev.dom,
-                                             con->ring_ref,
-                                             PROT_READ|PROT_WRITE);
+        con->sring = xen_be_map_grant_ref(xendev, con->ring_ref,
+                                          PROT_READ | PROT_WRITE);
     }
     if (!con->sring)
 	return -1;
 
     xen_be_bind_evtchn(&con->xendev);
-    if (con->chr) {
-        if (qemu_chr_fe_claim(con->chr) == 0) {
-            qemu_chr_add_handlers(con->chr, xencons_can_receive,
-                                  xencons_receive, NULL, con);
-        } else {
-            xen_be_printf(xendev, 0,
-                          "xen_console_init error chardev %s already used\n",
-                          con->chr->label);
-            con->chr = NULL;
-        }
-    }
+    qemu_chr_fe_set_handlers(&con->chr, xencons_can_receive,
+                             xencons_receive, NULL, NULL, con, NULL, true);
 
-    xen_be_printf(xendev, 1, "ring mfn %d, remote port %d, local port %d, limit %zd\n",
+    xen_pv_printf(xendev, 1,
+                  "ring mfn %d, remote port %d, local port %d, limit %zd\n",
 		  con->ring_ref,
 		  con->xendev.remote_port,
 		  con->xendev.local_port,
@@ -265,22 +259,16 @@ static void con_disconnect(struct XenDevice *xendev)
 {
     struct XenConsole *con = container_of(xendev, struct XenConsole, xendev);
 
-    if (!xendev->dev) {
-        return;
-    }
-    if (con->chr) {
-        qemu_chr_add_handlers(con->chr, NULL, NULL, NULL, NULL);
-        qemu_chr_fe_release(con->chr);
-    }
-    xen_be_unbind_evtchn(&con->xendev);
+    qemu_chr_fe_deinit(&con->chr, false);
+    xen_pv_unbind_evtchn(&con->xendev);
 
     if (con->sring) {
-        if (!xendev->gnttabdev) {
-            munmap(con->sring, XC_PAGE_SIZE);
+        if (!xendev->dev) {
+            xenforeignmemory_unmap(xen_fmem, con->sring, 1);
         } else {
-            xc_gnttab_munmap(xendev->gnttabdev, con->sring, 1);
+            xen_be_unmap_grant_ref(xendev, con->sring);
         }
-	con->sring = NULL;
+        con->sring = NULL;
     }
 }
 

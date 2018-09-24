@@ -10,13 +10,13 @@
  * See the COPYING file in the top-level directory.
  */
 
-#include <glib.h>
+#include "qemu/osdep.h"
 
 #include "qemu/config-file.h"     /* qemu_add_opts() */
 #include "qemu/option.h"          /* qemu_opts_parse() */
+#include "qapi/error.h"
 #include "qapi/opts-visitor.h"    /* opts_visitor_new() */
 #include "test-qapi-visit.h"      /* visit_type_UserDefOptions() */
-#include "qapi/dealloc-visitor.h" /* qapi_dealloc_visitor_new() */
 
 static QemuOptsList userdef_opts = {
     .name = "userdef",
@@ -37,15 +37,15 @@ setup_fixture(OptsVisitorFixture *f, gconstpointer test_data)
 {
     const char *opts_string = test_data;
     QemuOpts *opts;
-    OptsVisitor *ov;
+    Visitor *v;
 
-    opts = qemu_opts_parse(qemu_find_opts("userdef"), opts_string, 0);
+    opts = qemu_opts_parse(qemu_find_opts("userdef"), opts_string, false,
+                           NULL);
     g_assert(opts != NULL);
 
-    ov = opts_visitor_new(opts);
-    visit_type_UserDefOptions(opts_get_visitor(ov), &f->userdef, NULL,
-                              &f->err);
-    opts_visitor_cleanup(ov);
+    v = opts_visitor_new(opts);
+    visit_type_UserDefOptions(v, NULL, &f->userdef, &f->err);
+    visit_free(v);
     qemu_opts_del(opts);
 }
 
@@ -53,14 +53,7 @@ setup_fixture(OptsVisitorFixture *f, gconstpointer test_data)
 static void
 teardown_fixture(OptsVisitorFixture *f, gconstpointer test_data)
 {
-    if (f->userdef != NULL) {
-        QapiDeallocVisitor *dv;
-
-        dv = qapi_dealloc_visitor_new();
-        visit_type_UserDefOptions(qapi_dealloc_get_visitor(dv), &f->userdef,
-                                  NULL, NULL);
-        qapi_dealloc_visitor_cleanup(dv);
-    }
+    qapi_free_UserDefOptions(f->userdef);
     error_free(f->err);
 }
 
@@ -179,6 +172,102 @@ expect_u64_max(OptsVisitorFixture *f, gconstpointer test_data)
 
 /* test cases */
 
+static void
+test_opts_range_unvisited(void)
+{
+    Error *err = NULL;
+    intList *list = NULL;
+    intList *tail;
+    QemuOpts *opts;
+    Visitor *v;
+
+    opts = qemu_opts_parse(qemu_find_opts("userdef"), "ilist=0-2", false,
+                           &error_abort);
+
+    v = opts_visitor_new(opts);
+
+    visit_start_struct(v, NULL, NULL, 0, &error_abort);
+
+    /* Would be simpler if the visitor genuinely supported virtual walks */
+    visit_start_list(v, "ilist", (GenericList **)&list, sizeof(*list),
+                     &error_abort);
+    tail = list;
+    visit_type_int(v, NULL, &tail->value, &error_abort);
+    g_assert_cmpint(tail->value, ==, 0);
+    tail = (intList *)visit_next_list(v, (GenericList *)tail, sizeof(*list));
+    g_assert(tail);
+    visit_type_int(v, NULL, &tail->value, &error_abort);
+    g_assert_cmpint(tail->value, ==, 1);
+    tail = (intList *)visit_next_list(v, (GenericList *)tail, sizeof(*list));
+    g_assert(tail);
+    visit_check_list(v, &error_abort); /* unvisited tail ignored until... */
+    visit_end_list(v, (void **)&list);
+
+    visit_check_struct(v, &err); /* ...here */
+    error_free_or_abort(&err);
+    visit_end_struct(v, NULL);
+
+    qapi_free_intList(list);
+    visit_free(v);
+    qemu_opts_del(opts);
+}
+
+static void
+test_opts_range_beyond(void)
+{
+    Error *err = NULL;
+    intList *list = NULL;
+    intList *tail;
+    QemuOpts *opts;
+    Visitor *v;
+    int64_t val;
+
+    opts = qemu_opts_parse(qemu_find_opts("userdef"), "ilist=0", false,
+                           &error_abort);
+
+    v = opts_visitor_new(opts);
+
+    visit_start_struct(v, NULL, NULL, 0, &error_abort);
+
+    /* Would be simpler if the visitor genuinely supported virtual walks */
+    visit_start_list(v, "ilist", (GenericList **)&list, sizeof(*list),
+                     &error_abort);
+    tail = list;
+    visit_type_int(v, NULL, &tail->value, &error_abort);
+    g_assert_cmpint(tail->value, ==, 0);
+    tail = (intList *)visit_next_list(v, (GenericList *)tail, sizeof(*tail));
+    g_assert(!tail);
+    visit_type_int(v, NULL, &val, &err);
+    error_free_or_abort(&err);
+    visit_end_list(v, (void **)&list);
+
+    visit_check_struct(v, &error_abort);
+    visit_end_struct(v, NULL);
+
+    qapi_free_intList(list);
+    visit_free(v);
+    qemu_opts_del(opts);
+}
+
+static void
+test_opts_dict_unvisited(void)
+{
+    Error *err = NULL;
+    QemuOpts *opts;
+    Visitor *v;
+    UserDefOptions *userdef;
+
+    opts = qemu_opts_parse(qemu_find_opts("userdef"), "i64x=0,bogus=1", false,
+                           &error_abort);
+
+    v = opts_visitor_new(opts);
+    visit_type_UserDefOptions(v, NULL, &userdef, &err);
+    error_free_or_abort(&err);
+    visit_free(v);
+    qemu_opts_del(opts);
+    g_assert(!userdef);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -269,6 +358,13 @@ main(int argc, char **argv)
              "i64=-0x8000000000000000--0x7fffffffffff0000");
     add_test("/visitor/opts/i64/range/2big/full", &expect_fail,
              "i64=-0x8000000000000000-0x7fffffffffffffff");
+
+    g_test_add_func("/visitor/opts/range/unvisited",
+                    test_opts_range_unvisited);
+    g_test_add_func("/visitor/opts/range/beyond",
+                    test_opts_range_beyond);
+
+    g_test_add_func("/visitor/opts/dict/unvisited", test_opts_dict_unvisited);
 
     g_test_run();
     return 0;

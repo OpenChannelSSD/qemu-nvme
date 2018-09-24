@@ -14,11 +14,10 @@
 #define QEMU_XATTR_H
 
 /*
- * Modern distributions (e.g. Fedora 15, have no libattr.so, place attr.h
+ * Modern distributions (e.g. Fedora 15), have no libattr.so, place attr.h
  * in /usr/include/sys, and don't have ENOATTR.
  */
 
-#include "config-host.h"
 
 #ifdef CONFIG_LIBATTR
 #  include <attr/xattr.h>

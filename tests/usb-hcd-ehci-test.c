@@ -7,12 +7,9 @@
  * See the COPYING file in the top-level directory.
  */
 
-#include <glib.h>
-#include <string.h>
-#include <stdio.h>
+#include "qemu/osdep.h"
 #include "libqtest.h"
 #include "libqos/pci-pc.h"
-#include "qemu/osdep.h"
 #include "hw/usb/uhci-regs.h"
 #include "hw/usb/ehci-regs.h"
 #include "libqos/usb.h"
@@ -41,8 +38,7 @@ static void uhci_port_update(struct qhc *hc, int port,
 
 static void ehci_port_test(struct qhc *hc, int port, uint32_t expect)
 {
-    void *addr = hc->base + 0x64 + 4 * port;
-    uint32_t value = qpci_io_readl(hc->dev, addr);
+    uint32_t value = qpci_io_readl(hc->dev, hc->bar, 0x64 + 4 * port);
     uint16_t mask = ~(PORTSC_CSC | PORTSC_PEDC | PORTSC_OCC);
 
 #if 0
@@ -54,18 +50,24 @@ static void ehci_port_test(struct qhc *hc, int port, uint32_t expect)
 
 /* tests */
 
-static void pci_init(void)
+static void test_init(void)
 {
-    if (pcibus) {
-        return;
-    }
-    pcibus = qpci_init_pc();
+    pcibus = qpci_init_pc(global_qtest, NULL);
     g_assert(pcibus != NULL);
 
     qusb_pci_init_one(pcibus, &uhci1, QPCI_DEVFN(0x1d, 0), 4);
     qusb_pci_init_one(pcibus, &uhci2, QPCI_DEVFN(0x1d, 1), 4);
     qusb_pci_init_one(pcibus, &uhci3, QPCI_DEVFN(0x1d, 2), 4);
     qusb_pci_init_one(pcibus, &ehci1, QPCI_DEVFN(0x1d, 7), 0);
+}
+
+static void test_deinit(void)
+{
+    uhci_deinit(&uhci1);
+    uhci_deinit(&uhci2);
+    uhci_deinit(&uhci3);
+    uhci_deinit(&ehci1);
+    qpci_free_pc(pcibus);
 }
 
 static void pci_uhci_port_1(void)
@@ -94,7 +96,7 @@ static void pci_ehci_port_1(void)
 static void pci_ehci_config(void)
 {
     /* hands over all ports from companion uhci to ehci */
-    qpci_io_writew(ehci1.dev, ehci1.base + 0x60, 1);
+    qpci_io_writew(ehci1.dev, ehci1.bar, 0x60, 1);
 }
 
 static void pci_uhci_port_2(void)
@@ -137,7 +139,7 @@ static void pci_ehci_port_3_hotplug(void)
 
 static void pci_ehci_port_hotplug(void)
 {
-    usb_test_hotplug("ich9-ehci-1", 3, pci_ehci_port_3_hotplug);
+    usb_test_hotplug("ich9-ehci-1", "3", pci_ehci_port_3_hotplug);
 }
 
 
@@ -146,7 +148,7 @@ int main(int argc, char **argv)
     int ret;
 
     g_test_init(&argc, &argv, NULL);
-    qtest_add_func("/ehci/pci/init", pci_init);
+
     qtest_add_func("/ehci/pci/uhci-port-1", pci_uhci_port_1);
     qtest_add_func("/ehci/pci/ehci-port-1", pci_ehci_port_1);
     qtest_add_func("/ehci/pci/ehci-config", pci_ehci_config);
@@ -165,7 +167,10 @@ int main(int argc, char **argv)
                 "-drive if=none,id=usbcdrom,media=cdrom "
                 "-device usb-tablet,bus=ich9-ehci-1.0,port=1,usb_version=1 "
                 "-device usb-storage,bus=ich9-ehci-1.0,port=2,drive=usbcdrom ");
+
+    test_init();
     ret = g_test_run();
+    test_deinit();
 
     qtest_end();
 

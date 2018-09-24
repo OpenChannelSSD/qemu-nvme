@@ -16,8 +16,8 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
-#ifndef TARGET_STRUCTS_H
-#define TARGET_STRUCTS_H
+#ifndef ARM_TARGET_STRUCTS_H
+#define ARM_TARGET_STRUCTS_H
 
 struct target_ipc_perm {
     abi_int __key;                      /* Key.  */
@@ -49,4 +49,11 @@ struct target_shmid_ds {
     abi_ulong __unused5;
 };
 
+struct target_oabi_flock64 {
+    abi_short l_type;
+    abi_short l_whence;
+    abi_llong l_start;
+    abi_llong l_len;
+    abi_int   l_pid;
+} QEMU_PACKED;
 #endif

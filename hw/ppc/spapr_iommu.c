@@ -16,7 +16,10 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
+#include "qemu/osdep.h"
+#include "qemu/error-report.h"
 #include "hw/hw.h"
+#include "qemu/log.h"
 #include "sysemu/kvm.h"
 #include "hw/qdev.h"
 #include "kvm_ppc.h"
@@ -25,6 +28,7 @@
 #include "trace.h"
 
 #include "hw/ppc/spapr.h"
+#include "hw/ppc/spapr_vio.h"
 
 #include <libfdt.h>
 
@@ -40,7 +44,7 @@ enum sPAPRTCEAccess {
 
 static QLIST_HEAD(spapr_tce_tables, sPAPRTCETable) spapr_tce_tables;
 
-static sPAPRTCETable *spapr_tce_find_by_liobn(uint32_t liobn)
+sPAPRTCETable *spapr_tce_find_by_liobn(target_ulong liobn)
 {
     sPAPRTCETable *tcet;
 
@@ -51,7 +55,7 @@ static sPAPRTCETable *spapr_tce_find_by_liobn(uint32_t liobn)
     }
 
     QLIST_FOREACH(tcet, &spapr_tce_tables, list) {
-        if (tcet->liobn == liobn) {
+        if (tcet->liobn == (uint32_t)liobn) {
             return tcet;
         }
     }
@@ -59,8 +63,57 @@ static sPAPRTCETable *spapr_tce_find_by_liobn(uint32_t liobn)
     return NULL;
 }
 
-static IOMMUTLBEntry spapr_tce_translate_iommu(MemoryRegion *iommu, hwaddr addr,
-                                               bool is_write)
+static IOMMUAccessFlags spapr_tce_iommu_access_flags(uint64_t tce)
+{
+    switch (tce & SPAPR_TCE_RW) {
+    case SPAPR_TCE_FAULT:
+        return IOMMU_NONE;
+    case SPAPR_TCE_RO:
+        return IOMMU_RO;
+    case SPAPR_TCE_WO:
+        return IOMMU_WO;
+    default: /* SPAPR_TCE_RW */
+        return IOMMU_RW;
+    }
+}
+
+static uint64_t *spapr_tce_alloc_table(uint32_t liobn,
+                                       uint32_t page_shift,
+                                       uint64_t bus_offset,
+                                       uint32_t nb_table,
+                                       int *fd,
+                                       bool need_vfio)
+{
+    uint64_t *table = NULL;
+
+    if (kvm_enabled()) {
+        table = kvmppc_create_spapr_tce(liobn, page_shift, bus_offset, nb_table,
+                                        fd, need_vfio);
+    }
+
+    if (!table) {
+        *fd = -1;
+        table = g_malloc0(nb_table * sizeof(uint64_t));
+    }
+
+    trace_spapr_iommu_new_table(liobn, table, *fd);
+
+    return table;
+}
+
+static void spapr_tce_free_table(uint64_t *table, int fd, uint32_t nb_table)
+{
+    if (!kvm_enabled() ||
+        (kvmppc_remove_spapr_tce(table, fd, nb_table) != 0)) {
+        g_free(table);
+    }
+}
+
+/* Called from RCU critical section */
+static IOMMUTLBEntry spapr_tce_translate_iommu(IOMMUMemoryRegion *iommu,
+                                               hwaddr addr,
+                                               IOMMUAccessFlags flag,
+                                               int iommu_idx)
 {
     sPAPRTCETable *tcet = container_of(iommu, sPAPRTCETable, iommu);
     uint64_t tce;
@@ -72,9 +125,7 @@ static IOMMUTLBEntry spapr_tce_translate_iommu(MemoryRegion *iommu, hwaddr addr,
         .perm = IOMMU_NONE,
     };
 
-    if (tcet->bypass) {
-        ret.perm = IOMMU_RW;
-    } else if ((addr >> tcet->page_shift) < tcet->nb_table) {
+    if ((addr >> tcet->page_shift) < tcet->nb_table) {
         /* Check if we are in bound */
         hwaddr page_mask = IOMMU_PAGE_MASK(tcet->page_shift);
 
@@ -82,7 +133,7 @@ static IOMMUTLBEntry spapr_tce_translate_iommu(MemoryRegion *iommu, hwaddr addr,
         ret.iova = addr & page_mask;
         ret.translated_addr = tce & page_mask;
         ret.addr_mask = ~page_mask;
-        ret.perm = tce & IOMMU_RW;
+        ret.perm = spapr_tce_iommu_access_flags(tce);
     }
     trace_spapr_iommu_xlate(tcet->liobn, addr, ret.iova, ret.perm,
                             ret.addr_mask);
@@ -90,110 +141,262 @@ static IOMMUTLBEntry spapr_tce_translate_iommu(MemoryRegion *iommu, hwaddr addr,
     return ret;
 }
 
-static const VMStateDescription vmstate_spapr_tce_table = {
-    .name = "spapr_iommu",
-    .version_id = 2,
-    .minimum_version_id = 2,
-    .fields      = (VMStateField []) {
-        /* Sanity check */
-        VMSTATE_UINT32_EQUAL(liobn, sPAPRTCETable),
-        VMSTATE_UINT32_EQUAL(nb_table, sPAPRTCETable),
+static int spapr_tce_table_pre_save(void *opaque)
+{
+    sPAPRTCETable *tcet = SPAPR_TCE_TABLE(opaque);
 
-        /* IOMMU state */
-        VMSTATE_BOOL(bypass, sPAPRTCETable),
-        VMSTATE_VARRAY_UINT32(table, sPAPRTCETable, nb_table, 0, vmstate_info_uint64, uint64_t),
+    tcet->mig_table = tcet->table;
+    tcet->mig_nb_table = tcet->nb_table;
 
+    trace_spapr_iommu_pre_save(tcet->liobn, tcet->mig_nb_table,
+                               tcet->bus_offset, tcet->page_shift);
+
+    return 0;
+}
+
+static uint64_t spapr_tce_get_min_page_size(IOMMUMemoryRegion *iommu)
+{
+    sPAPRTCETable *tcet = container_of(iommu, sPAPRTCETable, iommu);
+
+    return 1ULL << tcet->page_shift;
+}
+
+static int spapr_tce_get_attr(IOMMUMemoryRegion *iommu,
+                              enum IOMMUMemoryRegionAttr attr, void *data)
+{
+    sPAPRTCETable *tcet = container_of(iommu, sPAPRTCETable, iommu);
+
+    if (attr == IOMMU_ATTR_SPAPR_TCE_FD && kvmppc_has_cap_spapr_vfio()) {
+        *(int *) data = tcet->fd;
+        return 0;
+    }
+
+    return -EINVAL;
+}
+
+static void spapr_tce_notify_flag_changed(IOMMUMemoryRegion *iommu,
+                                          IOMMUNotifierFlag old,
+                                          IOMMUNotifierFlag new)
+{
+    struct sPAPRTCETable *tbl = container_of(iommu, sPAPRTCETable, iommu);
+
+    if (old == IOMMU_NOTIFIER_NONE && new != IOMMU_NOTIFIER_NONE) {
+        spapr_tce_set_need_vfio(tbl, true);
+    } else if (old != IOMMU_NOTIFIER_NONE && new == IOMMU_NOTIFIER_NONE) {
+        spapr_tce_set_need_vfio(tbl, false);
+    }
+}
+
+static int spapr_tce_table_post_load(void *opaque, int version_id)
+{
+    sPAPRTCETable *tcet = SPAPR_TCE_TABLE(opaque);
+    uint32_t old_nb_table = tcet->nb_table;
+    uint64_t old_bus_offset = tcet->bus_offset;
+    uint32_t old_page_shift = tcet->page_shift;
+
+    if (tcet->vdev) {
+        spapr_vio_set_bypass(tcet->vdev, tcet->bypass);
+    }
+
+    if (tcet->mig_nb_table != tcet->nb_table) {
+        spapr_tce_table_disable(tcet);
+    }
+
+    if (tcet->mig_nb_table) {
+        if (!tcet->nb_table) {
+            spapr_tce_table_enable(tcet, old_page_shift, old_bus_offset,
+                                   tcet->mig_nb_table);
+        }
+
+        memcpy(tcet->table, tcet->mig_table,
+               tcet->nb_table * sizeof(tcet->table[0]));
+
+        free(tcet->mig_table);
+        tcet->mig_table = NULL;
+    }
+
+    trace_spapr_iommu_post_load(tcet->liobn, old_nb_table, tcet->nb_table,
+                                tcet->bus_offset, tcet->page_shift);
+
+    return 0;
+}
+
+static bool spapr_tce_table_ex_needed(void *opaque)
+{
+    sPAPRTCETable *tcet = opaque;
+
+    return tcet->bus_offset || tcet->page_shift != 0xC;
+}
+
+static const VMStateDescription vmstate_spapr_tce_table_ex = {
+    .name = "spapr_iommu_ex",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = spapr_tce_table_ex_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT64(bus_offset, sPAPRTCETable),
+        VMSTATE_UINT32(page_shift, sPAPRTCETable),
         VMSTATE_END_OF_LIST()
     },
 };
 
-static MemoryRegionIOMMUOps spapr_iommu_ops = {
-    .translate = spapr_tce_translate_iommu,
+static const VMStateDescription vmstate_spapr_tce_table = {
+    .name = "spapr_iommu",
+    .version_id = 2,
+    .minimum_version_id = 2,
+    .pre_save = spapr_tce_table_pre_save,
+    .post_load = spapr_tce_table_post_load,
+    .fields      = (VMStateField []) {
+        /* Sanity check */
+        VMSTATE_UINT32_EQUAL(liobn, sPAPRTCETable, NULL),
+
+        /* IOMMU state */
+        VMSTATE_UINT32(mig_nb_table, sPAPRTCETable),
+        VMSTATE_BOOL(bypass, sPAPRTCETable),
+        VMSTATE_VARRAY_UINT32_ALLOC(mig_table, sPAPRTCETable, mig_nb_table, 0,
+                                    vmstate_info_uint64, uint64_t),
+
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription*[]) {
+        &vmstate_spapr_tce_table_ex,
+        NULL
+    }
 };
 
-static int spapr_tce_table_realize(DeviceState *dev)
+static void spapr_tce_table_realize(DeviceState *dev, Error **errp)
 {
     sPAPRTCETable *tcet = SPAPR_TCE_TABLE(dev);
+    Object *tcetobj = OBJECT(tcet);
+    gchar *tmp;
 
-    if (kvm_enabled()) {
-        tcet->table = kvmppc_create_spapr_tce(tcet->liobn,
-                                              tcet->nb_table <<
-                                              tcet->page_shift,
-                                              &tcet->fd,
-                                              tcet->vfio_accel);
-    }
+    tcet->fd = -1;
+    tcet->need_vfio = false;
+    tmp = g_strdup_printf("tce-root-%x", tcet->liobn);
+    memory_region_init(&tcet->root, tcetobj, tmp, UINT64_MAX);
+    g_free(tmp);
 
-    if (!tcet->table) {
-        size_t table_size = tcet->nb_table * sizeof(uint64_t);
-        tcet->table = g_malloc0(table_size);
-    }
-
-    trace_spapr_iommu_new_table(tcet->liobn, tcet, tcet->table, tcet->fd);
-
-    memory_region_init_iommu(&tcet->iommu, OBJECT(dev), &spapr_iommu_ops,
-                             "iommu-spapr", ram_size);
+    tmp = g_strdup_printf("tce-iommu-%x", tcet->liobn);
+    memory_region_init_iommu(&tcet->iommu, sizeof(tcet->iommu),
+                             TYPE_SPAPR_IOMMU_MEMORY_REGION,
+                             tcetobj, tmp, 0);
+    g_free(tmp);
 
     QLIST_INSERT_HEAD(&spapr_tce_tables, tcet, list);
 
     vmstate_register(DEVICE(tcet), tcet->liobn, &vmstate_spapr_tce_table,
                      tcet);
-
-    return 0;
 }
 
-sPAPRTCETable *spapr_tce_new_table(DeviceState *owner, uint32_t liobn,
-                                   uint64_t bus_offset,
-                                   uint32_t page_shift,
-                                   uint32_t nb_table,
-                                   bool vfio_accel)
+void spapr_tce_set_need_vfio(sPAPRTCETable *tcet, bool need_vfio)
 {
-    sPAPRTCETable *tcet;
+    size_t table_size = tcet->nb_table * sizeof(uint64_t);
+    uint64_t *oldtable;
+    int newfd = -1;
 
-    if (spapr_tce_find_by_liobn(liobn)) {
-        fprintf(stderr, "Attempted to create TCE table with duplicate"
-                " LIOBN 0x%x\n", liobn);
-        return NULL;
+    g_assert(need_vfio != tcet->need_vfio);
+
+    tcet->need_vfio = need_vfio;
+
+    if (!need_vfio || (tcet->fd != -1 && kvmppc_has_cap_spapr_vfio())) {
+        return;
     }
 
-    if (!nb_table) {
+    oldtable = tcet->table;
+
+    tcet->table = spapr_tce_alloc_table(tcet->liobn,
+                                        tcet->page_shift,
+                                        tcet->bus_offset,
+                                        tcet->nb_table,
+                                        &newfd,
+                                        need_vfio);
+    memcpy(tcet->table, oldtable, table_size);
+
+    spapr_tce_free_table(oldtable, tcet->fd, tcet->nb_table);
+
+    tcet->fd = newfd;
+}
+
+sPAPRTCETable *spapr_tce_new_table(DeviceState *owner, uint32_t liobn)
+{
+    sPAPRTCETable *tcet;
+    gchar *tmp;
+
+    if (spapr_tce_find_by_liobn(liobn)) {
+        error_report("Attempted to create TCE table with duplicate"
+                " LIOBN 0x%x", liobn);
         return NULL;
     }
 
     tcet = SPAPR_TCE_TABLE(object_new(TYPE_SPAPR_TCE_TABLE));
     tcet->liobn = liobn;
-    tcet->bus_offset = bus_offset;
-    tcet->page_shift = page_shift;
-    tcet->nb_table = nb_table;
-    tcet->vfio_accel = vfio_accel;
 
-    object_property_add_child(OBJECT(owner), "tce-table", OBJECT(tcet), NULL);
+    tmp = g_strdup_printf("tce-table-%x", liobn);
+    object_property_add_child(OBJECT(owner), tmp, OBJECT(tcet), NULL);
+    g_free(tmp);
+    object_unref(OBJECT(tcet));
 
     object_property_set_bool(OBJECT(tcet), true, "realized", NULL);
 
     return tcet;
 }
 
-static void spapr_tce_table_finalize(Object *obj)
+void spapr_tce_table_enable(sPAPRTCETable *tcet,
+                            uint32_t page_shift, uint64_t bus_offset,
+                            uint32_t nb_table)
 {
-    sPAPRTCETable *tcet = SPAPR_TCE_TABLE(obj);
+    if (tcet->nb_table) {
+        warn_report("trying to enable already enabled TCE table");
+        return;
+    }
+
+    tcet->bus_offset = bus_offset;
+    tcet->page_shift = page_shift;
+    tcet->nb_table = nb_table;
+    tcet->table = spapr_tce_alloc_table(tcet->liobn,
+                                        tcet->page_shift,
+                                        tcet->bus_offset,
+                                        tcet->nb_table,
+                                        &tcet->fd,
+                                        tcet->need_vfio);
+
+    memory_region_set_size(MEMORY_REGION(&tcet->iommu),
+                           (uint64_t)tcet->nb_table << tcet->page_shift);
+    memory_region_add_subregion(&tcet->root, tcet->bus_offset,
+                                MEMORY_REGION(&tcet->iommu));
+}
+
+void spapr_tce_table_disable(sPAPRTCETable *tcet)
+{
+    if (!tcet->nb_table) {
+        return;
+    }
+
+    memory_region_del_subregion(&tcet->root, MEMORY_REGION(&tcet->iommu));
+    memory_region_set_size(MEMORY_REGION(&tcet->iommu), 0);
+
+    spapr_tce_free_table(tcet->table, tcet->fd, tcet->nb_table);
+    tcet->fd = -1;
+    tcet->table = NULL;
+    tcet->bus_offset = 0;
+    tcet->page_shift = 0;
+    tcet->nb_table = 0;
+}
+
+static void spapr_tce_table_unrealize(DeviceState *dev, Error **errp)
+{
+    sPAPRTCETable *tcet = SPAPR_TCE_TABLE(dev);
+
+    vmstate_unregister(DEVICE(tcet), &vmstate_spapr_tce_table, tcet);
 
     QLIST_REMOVE(tcet, list);
 
-    if (!kvm_enabled() ||
-        (kvmppc_remove_spapr_tce(tcet->table, tcet->fd,
-                                 tcet->nb_table) != 0)) {
-        g_free(tcet->table);
-    }
+    spapr_tce_table_disable(tcet);
 }
 
 MemoryRegion *spapr_tce_get_iommu(sPAPRTCETable *tcet)
 {
-    return &tcet->iommu;
-}
-
-void spapr_tce_set_bypass(sPAPRTCETable *tcet, bool bypass)
-{
-    tcet->bypass = bypass;
+    return &tcet->root;
 }
 
 static void spapr_tce_reset(DeviceState *dev)
@@ -201,8 +404,9 @@ static void spapr_tce_reset(DeviceState *dev)
     sPAPRTCETable *tcet = SPAPR_TCE_TABLE(dev);
     size_t table_size = tcet->nb_table * sizeof(uint64_t);
 
-    tcet->bypass = false;
-    memset(tcet->table, 0, table_size);
+    if (tcet->nb_table) {
+        memset(tcet->table, 0, table_size);
+    }
 }
 
 static target_ulong put_tce_emu(sPAPRTCETable *tcet, target_ulong ioba,
@@ -221,17 +425,17 @@ static target_ulong put_tce_emu(sPAPRTCETable *tcet, target_ulong ioba,
     tcet->table[index] = tce;
 
     entry.target_as = &address_space_memory,
-    entry.iova = ioba & page_mask;
+    entry.iova = (ioba - tcet->bus_offset) & page_mask;
     entry.translated_addr = tce & page_mask;
     entry.addr_mask = ~page_mask;
-    entry.perm = tce & IOMMU_RW;
-    memory_region_notify_iommu(&tcet->iommu, entry);
+    entry.perm = spapr_tce_iommu_access_flags(tce);
+    memory_region_notify_iommu(&tcet->iommu, 0, entry);
 
     return H_SUCCESS;
 }
 
 static target_ulong h_put_tce_indirect(PowerPCCPU *cpu,
-                                       sPAPREnvironment *spapr,
+                                       sPAPRMachineState *spapr,
                                        target_ulong opcode, target_ulong *args)
 {
     int i;
@@ -240,7 +444,7 @@ static target_ulong h_put_tce_indirect(PowerPCCPU *cpu,
     target_ulong ioba1 = ioba;
     target_ulong tce_list = args[2];
     target_ulong npages = args[3];
-    target_ulong ret = H_PARAMETER;
+    target_ulong ret = H_PARAMETER, tce = 0;
     sPAPRTCETable *tcet = spapr_tce_find_by_liobn(liobn);
     CPUState *cs = CPU(cpu);
     hwaddr page_mask, page_size;
@@ -258,9 +462,7 @@ static target_ulong h_put_tce_indirect(PowerPCCPU *cpu,
     ioba &= page_mask;
 
     for (i = 0; i < npages; ++i, ioba += page_size) {
-        target_ulong off = (tce_list & ~SPAPR_TCE_RW) +
-                                i * sizeof(target_ulong);
-        target_ulong tce = ldq_phys(cs->as, off);
+        tce = ldq_be_phys(cs->as, tce_list + i * sizeof(target_ulong));
 
         ret = put_tce_emu(tcet, ioba, tce);
         if (ret) {
@@ -270,15 +472,15 @@ static target_ulong h_put_tce_indirect(PowerPCCPU *cpu,
 
     /* Trace last successful or the first problematic entry */
     i = i ? (i - 1) : 0;
-    trace_spapr_iommu_indirect(liobn, ioba1, tce_list, i,
-                               ldq_phys(cs->as,
-                               tce_list + i * sizeof(target_ulong)),
-                               ret);
-
+    if (SPAPR_IS_PCI_LIOBN(liobn)) {
+        trace_spapr_iommu_pci_indirect(liobn, ioba1, tce_list, i, tce, ret);
+    } else {
+        trace_spapr_iommu_indirect(liobn, ioba1, tce_list, i, tce, ret);
+    }
     return ret;
 }
 
-static target_ulong h_stuff_tce(PowerPCCPU *cpu, sPAPREnvironment *spapr,
+static target_ulong h_stuff_tce(PowerPCCPU *cpu, sPAPRMachineState *spapr,
                               target_ulong opcode, target_ulong *args)
 {
     int i;
@@ -308,12 +510,16 @@ static target_ulong h_stuff_tce(PowerPCCPU *cpu, sPAPREnvironment *spapr,
             break;
         }
     }
-    trace_spapr_iommu_stuff(liobn, ioba, tce_value, npages, ret);
+    if (SPAPR_IS_PCI_LIOBN(liobn)) {
+        trace_spapr_iommu_pci_stuff(liobn, ioba, tce_value, npages, ret);
+    } else {
+        trace_spapr_iommu_stuff(liobn, ioba, tce_value, npages, ret);
+    }
 
     return ret;
 }
 
-static target_ulong h_put_tce(PowerPCCPU *cpu, sPAPREnvironment *spapr,
+static target_ulong h_put_tce(PowerPCCPU *cpu, sPAPRMachineState *spapr,
                               target_ulong opcode, target_ulong *args)
 {
     target_ulong liobn = args[0];
@@ -329,7 +535,11 @@ static target_ulong h_put_tce(PowerPCCPU *cpu, sPAPREnvironment *spapr,
 
         ret = put_tce_emu(tcet, ioba, tce);
     }
-    trace_spapr_iommu_put(liobn, ioba, tce, ret);
+    if (SPAPR_IS_PCI_LIOBN(liobn)) {
+        trace_spapr_iommu_pci_put(liobn, ioba, tce, ret);
+    } else {
+        trace_spapr_iommu_put(liobn, ioba, tce, ret);
+    }
 
     return ret;
 }
@@ -350,7 +560,7 @@ static target_ulong get_tce_emu(sPAPRTCETable *tcet, target_ulong ioba,
     return H_SUCCESS;
 }
 
-static target_ulong h_get_tce(PowerPCCPU *cpu, sPAPREnvironment *spapr,
+static target_ulong h_get_tce(PowerPCCPU *cpu, sPAPRMachineState *spapr,
                               target_ulong opcode, target_ulong *args)
 {
     target_ulong liobn = args[0];
@@ -369,7 +579,11 @@ static target_ulong h_get_tce(PowerPCCPU *cpu, sPAPREnvironment *spapr,
             args[0] = tce;
         }
     }
-    trace_spapr_iommu_get(liobn, ioba, ret, tce);
+    if (SPAPR_IS_PCI_LIOBN(liobn)) {
+        trace_spapr_iommu_pci_get(liobn, ioba, ret, tce);
+    } else {
+        trace_spapr_iommu_get(liobn, ioba, ret, tce);
+    }
 
     return ret;
 }
@@ -418,8 +632,11 @@ int spapr_tcet_dma_dt(void *fdt, int node_off, const char *propname,
 static void spapr_tce_table_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    dc->init = spapr_tce_table_realize;
+    dc->realize = spapr_tce_table_realize;
     dc->reset = spapr_tce_reset;
+    dc->unrealize = spapr_tce_table_unrealize;
+    /* Reason: This is just an internal device for handling the hypercalls */
+    dc->user_creatable = false;
 
     QLIST_INIT(&spapr_tce_tables);
 
@@ -435,12 +652,28 @@ static TypeInfo spapr_tce_table_info = {
     .parent = TYPE_DEVICE,
     .instance_size = sizeof(sPAPRTCETable),
     .class_init = spapr_tce_table_class_init,
-    .instance_finalize = spapr_tce_table_finalize,
+};
+
+static void spapr_iommu_memory_region_class_init(ObjectClass *klass, void *data)
+{
+    IOMMUMemoryRegionClass *imrc = IOMMU_MEMORY_REGION_CLASS(klass);
+
+    imrc->translate = spapr_tce_translate_iommu;
+    imrc->get_min_page_size = spapr_tce_get_min_page_size;
+    imrc->notify_flag_changed = spapr_tce_notify_flag_changed;
+    imrc->get_attr = spapr_tce_get_attr;
+}
+
+static const TypeInfo spapr_iommu_memory_region_info = {
+    .parent = TYPE_IOMMU_MEMORY_REGION,
+    .name = TYPE_SPAPR_IOMMU_MEMORY_REGION,
+    .class_init = spapr_iommu_memory_region_class_init,
 };
 
 static void register_types(void)
 {
     type_register_static(&spapr_tce_table_info);
+    type_register_static(&spapr_iommu_memory_region_info);
 }
 
 type_init(register_types);

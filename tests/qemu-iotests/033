@@ -25,7 +25,6 @@ seq=`basename $0`
 echo "QA output created by $seq"
 
 here=`pwd`
-tmp=/tmp/$$
 status=1	# failure is the default!
 
 _cleanup()
@@ -46,28 +45,94 @@ _supported_os Linux
 size=128M
 _make_test_img $size
 
-echo
-echo "== preparing image =="
-$QEMU_IO -c "write -P 0xa 0x200 0x400" "$TEST_IMG" | _filter_qemu_io
-$QEMU_IO -c "write -P 0xa 0x20000 0x600" "$TEST_IMG" | _filter_qemu_io
-$QEMU_IO -c "write -z 0x400 0x20000" "$TEST_IMG" | _filter_qemu_io
+do_test()
+{
+	local align=$1
+	local iocmd=$2
+	local img=$3
+	if [ "$IMGOPTSSYNTAX" = "true" ]
+	then
+	    IO_OPEN_ARG="$img"
+	    IO_EXTRA_ARGS="--image-opts"
+	else
+	    IO_OPEN_ARG="-o driver=$IMGFMT,file.align=$align blkdebug::$img"
+	    IO_EXTRA_ARGS=""
+	fi
+	{
+		echo "open $IO_OPEN_ARG"
+		echo $iocmd
+	} | $QEMU_IO $IO_EXTRA_ARGS
+}
 
 echo
-echo "== verifying patterns (1) =="
-$QEMU_IO -c "read -P 0xa 0x200 0x200" "$TEST_IMG" | _filter_qemu_io
-$QEMU_IO -c "read -P 0x0 0x400 0x20000" "$TEST_IMG" | _filter_qemu_io
-$QEMU_IO -c "read -P 0xa 0x20400 0x200" "$TEST_IMG" | _filter_qemu_io
+echo "=== Test aligned and misaligned write zeroes operations ==="
+
+for write_zero_cmd in "write -z" "aio_write -z"; do
+for align in 512 4k; do
+	echo
+	echo "== preparing image =="
+	do_test $align "write -P 0xa 0x200 0x400" "$TEST_IMG" | _filter_qemu_io
+	do_test $align "write -P 0xa 0x20000 0x600" "$TEST_IMG" | _filter_qemu_io
+	do_test $align "$write_zero_cmd 0x400 0x20000" "$TEST_IMG" | _filter_qemu_io
+
+	echo
+	echo "== verifying patterns (1) =="
+	do_test $align "read -P 0xa 0x200 0x200" "$TEST_IMG" | _filter_qemu_io
+	do_test $align "read -P 0x0 0x400 0x20000" "$TEST_IMG" | _filter_qemu_io
+	do_test $align "read -P 0xa 0x20400 0x200" "$TEST_IMG" | _filter_qemu_io
+
+	echo
+	echo "== rewriting zeroes =="
+	do_test $align "write -P 0xb 0x10000 0x10000" "$TEST_IMG" | _filter_qemu_io
+	do_test $align "$write_zero_cmd 0x10000 0x10000" "$TEST_IMG" | _filter_qemu_io
+
+	echo
+	echo "== verifying patterns (2) =="
+	do_test $align "read -P 0x0 0x400 0x20000" "$TEST_IMG" | _filter_qemu_io
+
+	echo
+	echo "== rewriting unaligned zeroes =="
+	do_test $align "write -P 0xb 0x0 0x1000" "$TEST_IMG" | _filter_qemu_io
+	do_test $align "$write_zero_cmd 0x200 0x200" "$TEST_IMG" | _filter_qemu_io
+
+	echo
+	echo "== verifying patterns (3) =="
+	do_test $align "read -P 0xb 0x0 0x200" "$TEST_IMG" | _filter_qemu_io
+	do_test $align "read -P 0x0 0x200 0x200" "$TEST_IMG" | _filter_qemu_io
+	do_test $align "read -P 0xb 0x400 0xc00" "$TEST_IMG" | _filter_qemu_io
+
+	echo
+done
+done
+
+_cleanup_test_img
+
+# Trigger truncate that would shrink qcow2 L1 table, which is done by
+#   clearing one entry (8 bytes) with bdrv_co_pwrite_zeroes()
 
 echo
-echo "== rewriting zeroes =="
-$QEMU_IO -c "write -P 0xb 0x10000 0x10000" "$TEST_IMG" | _filter_qemu_io
-$QEMU_IO -c "write -z 0x10000 0x10000" "$TEST_IMG" | _filter_qemu_io
-
+echo "=== Test misaligned write zeroes via truncate ==="
 echo
-echo "== verifying patterns (2) =="
-$QEMU_IO -c "read -P 0x0 0x400 0x20000" "$TEST_IMG" | _filter_qemu_io
+
+# any size will do, but the smaller the size the smaller the required image
+CLUSTER_SIZE=$((4 * 1024))
+L2_COVERAGE=$(($CLUSTER_SIZE * $CLUSTER_SIZE / 8))
+_make_test_img $(($L2_COVERAGE * 2))
+
+do_test 512 "write -P 1 0 0x200" "$TEST_IMG" | _filter_qemu_io
+# next L2 table
+do_test 512 "write -P 1 $L2_COVERAGE 0x200" "$TEST_IMG" | _filter_qemu_io
+
+# only interested in qcow2 here; also other formats might respond with
+#  "not supported" error message
+if [ $IMGFMT = "qcow2" ]; then
+    do_test 512 "truncate $L2_COVERAGE" "$TEST_IMG" | _filter_qemu_io
+fi
+
+do_test 512 "read -P 1 0 0x200" "$TEST_IMG" | _filter_qemu_io
 
 # success, all done
+echo
 echo "*** done"
 rm -f $seq.full
 status=0

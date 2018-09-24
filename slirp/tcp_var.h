@@ -30,8 +30,8 @@
  * tcp_var.h,v 1.3 1994/08/21 05:27:39 paul Exp
  */
 
-#ifndef _TCP_VAR_H_
-#define _TCP_VAR_H_
+#ifndef TCP_VAR_H
+#define TCP_VAR_H
 
 #include "tcpip.h"
 #include "tcp_timer.h"
@@ -48,7 +48,7 @@ struct tcpcb {
 	short	t_rxtcur;		/* current retransmit value */
 	short	t_dupacks;		/* consecutive dup acks recd */
 	u_short	t_maxseg;		/* maximum segment size */
-	char	t_force;		/* 1 if forcing out a byte */
+	uint8_t t_force;		/* 1 if forcing out a byte */
 	u_short	t_flags;
 #define	TF_ACKNOW	0x0001		/* ack peer immediately */
 #define	TF_DELACK	0x0002		/* ack, but try to delay it */
@@ -109,8 +109,8 @@ struct tcpcb {
 	uint32_t max_sndwnd;		/* largest window peer has offered */
 
 /* out-of-band data */
-	char	t_oobflags;		/* have some */
-	char	t_iobc;			/* input character */
+	uint8_t	t_oobflags;		/* have some */
+	uint8_t	t_iobc;			/* input character */
 #define	TCPOOB_HAVEDATA	0x01
 #define	TCPOOB_HADDATA	0x02
 	short	t_softerror;		/* possible error not yet reported */

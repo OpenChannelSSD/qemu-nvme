@@ -23,7 +23,7 @@
  */
 
 #ifndef QEMU_MAIN_LOOP_H
-#define QEMU_MAIN_LOOP_H 1
+#define QEMU_MAIN_LOOP_H
 
 #include "block/aio.h"
 
@@ -64,11 +64,11 @@ int qemu_init_main_loop(Error **errp);
  *
  *     void enter_co_bh(void *opaque) {
  *         QEMUCoroutine *co = opaque;
- *         qemu_coroutine_enter(co, NULL);
+ *         qemu_coroutine_enter(co);
  *     }
  *
  *     ...
- *     QEMUCoroutine *co = qemu_coroutine_create(coroutine_entry);
+ *     QEMUCoroutine *co = qemu_coroutine_create(coroutine_entry, NULL);
  *     QEMUBH *start_bh = qemu_bh_new(enter_co_bh, co);
  *     qemu_bh_schedule(start_bh);
  *     while (...) {
@@ -79,7 +79,7 @@ int qemu_init_main_loop(Error **errp);
  *
  * @nonblocking: Whether the caller should block until an event occurs.
  */
-int main_loop_wait(int nonblocking);
+void main_loop_wait(int nonblocking);
 
 /**
  * qemu_get_aio_context: Return the main loop's AioContext
@@ -96,8 +96,7 @@ AioContext *qemu_get_aio_context(void);
  * that the main loop waits for.
  *
  * Calling qemu_notify_event is rarely necessary, because main loop
- * services (bottom halves and timers) call it themselves.  One notable
- * exception occurs when using qemu_set_fd_handler2 (see below).
+ * services (bottom halves and timers) call it themselves.
  */
 void qemu_notify_event(void);
 
@@ -169,53 +168,21 @@ void qemu_del_wait_object(HANDLE handle, WaitObjectFunc *func, void *opaque);
 /* async I/O support */
 
 typedef void IOReadHandler(void *opaque, const uint8_t *buf, int size);
-typedef int IOCanReadHandler(void *opaque);
 
 /**
- * qemu_set_fd_handler2: Register a file descriptor with the main loop
+ * IOCanReadHandler: Return the number of bytes that #IOReadHandler can accept
  *
- * This function tells the main loop to wake up whenever one of the
- * following conditions is true:
+ * This function reports how many bytes #IOReadHandler is prepared to accept.
+ * #IOReadHandler may be invoked with up to this number of bytes.  If this
+ * function returns 0 then #IOReadHandler is not invoked.
  *
- * 1) if @fd_write is not %NULL, when the file descriptor is writable;
- *
- * 2) if @fd_read is not %NULL, when the file descriptor is readable.
- *
- * @fd_read_poll can be used to disable the @fd_read callback temporarily.
- * This is useful to avoid calling qemu_set_fd_handler2 every time the
- * client becomes interested in reading (or dually, stops being interested).
- * A typical example is when @fd is a listening socket and you want to bound
- * the number of active clients.  Remember to call qemu_notify_event whenever
- * the condition may change from %false to %true.
- *
- * The callbacks that are set up by qemu_set_fd_handler2 are level-triggered.
- * If @fd_read does not read from @fd, or @fd_write does not write to @fd
- * until its buffers are full, they will be called again on the next
- * iteration.
- *
- * @fd: The file descriptor to be observed.  Under Windows it must be
- * a #SOCKET.
- *
- * @fd_read_poll: A function that returns 1 if the @fd_read callback
- * should be fired.  If the function returns 0, the main loop will not
- * end its iteration even if @fd becomes readable.
- *
- * @fd_read: A level-triggered callback that is fired if @fd is readable
- * at the beginning of a main loop iteration, or if it becomes readable
- * during one.
- *
- * @fd_write: A level-triggered callback that is fired when @fd is writable
- * at the beginning of a main loop iteration, or if it becomes writable
- * during one.
- *
- * @opaque: A pointer-sized value that is passed to @fd_read_poll,
- * @fd_read and @fd_write.
+ * This function is typically called from an event loop.  If the number of
+ * bytes changes outside the event loop (e.g. because a vcpu thread drained the
+ * buffer), then it is necessary to kick the event loop so that this function
+ * is called again.  aio_notify() or qemu_notify_event() can be used to kick
+ * the event loop.
  */
-int qemu_set_fd_handler2(int fd,
-                         IOCanReadHandler *fd_read_poll,
-                         IOHandler *fd_read,
-                         IOHandler *fd_write,
-                         void *opaque);
+typedef int IOCanReadHandler(void *opaque);
 
 /**
  * qemu_set_fd_handler: Register a file descriptor with the main loop
@@ -245,11 +212,28 @@ int qemu_set_fd_handler2(int fd,
  *
  * @opaque: A pointer-sized value that is passed to @fd_read and @fd_write.
  */
-int qemu_set_fd_handler(int fd,
-                        IOHandler *fd_read,
-                        IOHandler *fd_write,
-                        void *opaque);
+void qemu_set_fd_handler(int fd,
+                         IOHandler *fd_read,
+                         IOHandler *fd_write,
+                         void *opaque);
 
+
+/**
+ * event_notifier_set_handler: Register an EventNotifier with the main loop
+ *
+ * This function tells the main loop to wake up whenever the
+ * #EventNotifier was set.
+ *
+ * @e: The #EventNotifier to be observed.
+ *
+ * @handler: A level-triggered callback that is fired when @e
+ * has been set.  @e is passed to it as a parameter.
+ */
+void event_notifier_set_handler(EventNotifier *e,
+                                EventNotifierHandler *handler);
+
+GSource *iohandler_get_g_source(void);
+AioContext *iohandler_get_aio_context(void);
 #ifdef CONFIG_POSIX
 /**
  * qemu_add_child_watch: Register a child process for reaping.
@@ -270,10 +254,20 @@ int qemu_add_child_watch(pid_t pid);
 #endif
 
 /**
+ * qemu_mutex_iothread_locked: Return lock status of the main loop mutex.
+ *
+ * The main loop mutex is the coarsest lock in QEMU, and as such it
+ * must always be taken outside other locks.  This function helps
+ * functions take different paths depending on whether the current
+ * thread is running within the main loop mutex.
+ */
+bool qemu_mutex_iothread_locked(void);
+
+/**
  * qemu_mutex_lock_iothread: Lock the main loop mutex.
  *
  * This function locks the main loop mutex.  The mutex is taken by
- * qemu_init_main_loop and always taken except while waiting on
+ * main() in vl.c and always taken except while waiting on
  * external events (such as with select).  The mutex should be taken
  * by threads other than the main loop thread when calling
  * qemu_bh_new(), qemu_set_fd_handler() and basically all other
@@ -282,13 +276,15 @@ int qemu_add_child_watch(pid_t pid);
  * NOTE: tools currently are single-threaded and qemu_mutex_lock_iothread
  * is a no-op there.
  */
-void qemu_mutex_lock_iothread(void);
+#define qemu_mutex_lock_iothread()                      \
+    qemu_mutex_lock_iothread_impl(__FILE__, __LINE__)
+void qemu_mutex_lock_iothread_impl(const char *file, int line);
 
 /**
  * qemu_mutex_unlock_iothread: Unlock the main loop mutex.
  *
  * This function unlocks the main loop mutex.  The mutex is taken by
- * qemu_init_main_loop and always taken except while waiting on
+ * main() in vl.c and always taken except while waiting on
  * external events (such as with select).  The mutex should be unlocked
  * as soon as possible by threads other than the main loop thread,
  * because it prevents the main loop from processing callbacks,
@@ -302,8 +298,6 @@ void qemu_mutex_unlock_iothread(void);
 /* internal interfaces */
 
 void qemu_fd_register(int fd);
-void qemu_iohandler_fill(GArray *pollfds);
-void qemu_iohandler_poll(GArray *pollfds, int rc);
 
 QEMUBH *qemu_bh_new(QEMUBHFunc *cb, void *opaque);
 void qemu_bh_schedule_idle(QEMUBH *bh);

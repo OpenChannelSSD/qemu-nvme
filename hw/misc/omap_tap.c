@@ -18,6 +18,7 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/arm/omap.h"
 
@@ -43,7 +44,7 @@ static uint64_t omap_tap_read(void *opaque, hwaddr addr,
         case omap3430:
             return 0x1b7ae02f;	/* ES 2 */
         default:
-            hw_error("%s: Bad mpu model\n", __FUNCTION__);
+            hw_error("%s: Bad mpu model\n", __func__);
         }
 
     case 0x208:	/* PRODUCTION_ID_reg for OMAP2 */
@@ -60,7 +61,7 @@ static uint64_t omap_tap_read(void *opaque, hwaddr addr,
         case omap3430:
             return 0x000000f0;
         default:
-            hw_error("%s: Bad mpu model\n", __FUNCTION__);
+            hw_error("%s: Bad mpu model\n", __func__);
         }
 
     case 0x20c:
@@ -74,7 +75,7 @@ static uint64_t omap_tap_read(void *opaque, hwaddr addr,
         case omap3430:
             return 0xcafeb7ae;	/* ES 2 */
         default:
-            hw_error("%s: Bad mpu model\n", __FUNCTION__);
+            hw_error("%s: Bad mpu model\n", __func__);
         }
 
     case 0x218:	/* DIE_ID_reg */
@@ -95,7 +96,8 @@ static void omap_tap_write(void *opaque, hwaddr addr,
                            uint64_t value, unsigned size)
 {
     if (size != 4) {
-        return omap_badwidth_write32(opaque, addr, value);
+        omap_badwidth_write32(opaque, addr, value);
+        return;
     }
 
     OMAP_BAD_REG(addr);

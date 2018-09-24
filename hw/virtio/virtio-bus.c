@@ -22,11 +22,14 @@
  *
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "qemu/error-report.h"
+#include "qapi/error.h"
 #include "hw/qdev.h"
 #include "hw/virtio/virtio-bus.h"
 #include "hw/virtio/virtio.h"
+#include "exec/address-spaces.h"
 
 /* #define DEBUG_VIRTIO_BUS */
 
@@ -38,19 +41,49 @@ do { printf("virtio_bus: " fmt , ## __VA_ARGS__); } while (0)
 #endif
 
 /* A VirtIODevice is being plugged */
-int virtio_bus_device_plugged(VirtIODevice *vdev)
+void virtio_bus_device_plugged(VirtIODevice *vdev, Error **errp)
 {
     DeviceState *qdev = DEVICE(vdev);
     BusState *qbus = BUS(qdev_get_parent_bus(qdev));
     VirtioBusState *bus = VIRTIO_BUS(qbus);
     VirtioBusClass *klass = VIRTIO_BUS_GET_CLASS(bus);
+    VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
+    bool has_iommu = virtio_host_has_feature(vdev, VIRTIO_F_IOMMU_PLATFORM);
+    Error *local_err = NULL;
+
     DPRINTF("%s: plug device.\n", qbus->name);
 
-    if (klass->device_plugged != NULL) {
-        klass->device_plugged(qbus->parent);
+    if (klass->pre_plugged != NULL) {
+        klass->pre_plugged(qbus->parent, &local_err);
+        if (local_err) {
+            error_propagate(errp, local_err);
+            return;
+        }
     }
 
-    return 0;
+    /* Get the features of the plugged device. */
+    assert(vdc->get_features != NULL);
+    vdev->host_features = vdc->get_features(vdev, vdev->host_features,
+                                            &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return;
+    }
+
+    if (klass->device_plugged != NULL) {
+        klass->device_plugged(qbus->parent, &local_err);
+    }
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return;
+    }
+
+    if (klass->get_dma_as != NULL && has_iommu) {
+        virtio_add_feature(&vdev->host_features, VIRTIO_F_IOMMU_PLATFORM);
+        vdev->dma_as = klass->get_dma_as(qbus->parent);
+    } else {
+        vdev->dma_as = &address_space_memory;
+    }
 }
 
 /* Reset the virtio_bus */
@@ -58,7 +91,7 @@ void virtio_bus_reset(VirtioBusState *bus)
 {
     VirtIODevice *vdev = virtio_bus_get_device(bus);
 
-    DPRINTF("%s: reset device.\n", qbus->name);
+    DPRINTF("%s: reset device.\n", BUS(bus)->name);
     if (vdev != NULL) {
         virtio_reset(vdev);
     }
@@ -94,33 +127,6 @@ size_t virtio_bus_get_vdev_config_len(VirtioBusState *bus)
     VirtIODevice *vdev = virtio_bus_get_device(bus);
     assert(vdev != NULL);
     return vdev->config_len;
-}
-
-/* Get the features of the plugged device. */
-uint32_t virtio_bus_get_vdev_features(VirtioBusState *bus,
-                                    uint32_t requested_features)
-{
-    VirtIODevice *vdev = virtio_bus_get_device(bus);
-    VirtioDeviceClass *k;
-
-    assert(vdev != NULL);
-    k = VIRTIO_DEVICE_GET_CLASS(vdev);
-    assert(k->get_features != NULL);
-    return k->get_features(vdev, requested_features);
-}
-
-/* Set the features of the plugged device. */
-void virtio_bus_set_vdev_features(VirtioBusState *bus,
-                                      uint32_t requested_features)
-{
-    VirtIODevice *vdev = virtio_bus_get_device(bus);
-    VirtioDeviceClass *k;
-
-    assert(vdev != NULL);
-    k = VIRTIO_DEVICE_GET_CLASS(vdev);
-    if (k->set_features != NULL) {
-        k->set_features(vdev, requested_features);
-    }
 }
 
 /* Get bad features of the plugged device. */
@@ -162,6 +168,141 @@ void virtio_bus_set_vdev_config(VirtioBusState *bus, uint8_t *config)
     if (k->set_config != NULL) {
         k->set_config(vdev, config);
     }
+}
+
+/* On success, ioeventfd ownership belongs to the caller.  */
+int virtio_bus_grab_ioeventfd(VirtioBusState *bus)
+{
+    VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(bus);
+
+    /* vhost can be used even if ioeventfd=off in the proxy device,
+     * so do not check k->ioeventfd_enabled.
+     */
+    if (!k->ioeventfd_assign) {
+        return -ENOSYS;
+    }
+
+    if (bus->ioeventfd_grabbed == 0 && bus->ioeventfd_started) {
+        virtio_bus_stop_ioeventfd(bus);
+        /* Remember that we need to restart ioeventfd
+         * when ioeventfd_grabbed becomes zero.
+         */
+        bus->ioeventfd_started = true;
+    }
+    bus->ioeventfd_grabbed++;
+    return 0;
+}
+
+void virtio_bus_release_ioeventfd(VirtioBusState *bus)
+{
+    assert(bus->ioeventfd_grabbed != 0);
+    if (--bus->ioeventfd_grabbed == 0 && bus->ioeventfd_started) {
+        /* Force virtio_bus_start_ioeventfd to act.  */
+        bus->ioeventfd_started = false;
+        virtio_bus_start_ioeventfd(bus);
+    }
+}
+
+int virtio_bus_start_ioeventfd(VirtioBusState *bus)
+{
+    VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(bus);
+    DeviceState *proxy = DEVICE(BUS(bus)->parent);
+    VirtIODevice *vdev = virtio_bus_get_device(bus);
+    VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
+    int r;
+
+    if (!k->ioeventfd_assign || !k->ioeventfd_enabled(proxy)) {
+        return -ENOSYS;
+    }
+    if (bus->ioeventfd_started) {
+        return 0;
+    }
+
+    /* Only set our notifier if we have ownership.  */
+    if (!bus->ioeventfd_grabbed) {
+        r = vdc->start_ioeventfd(vdev);
+        if (r < 0) {
+            error_report("%s: failed. Fallback to userspace (slower).", __func__);
+            return r;
+        }
+    }
+    bus->ioeventfd_started = true;
+    return 0;
+}
+
+void virtio_bus_stop_ioeventfd(VirtioBusState *bus)
+{
+    VirtIODevice *vdev;
+    VirtioDeviceClass *vdc;
+
+    if (!bus->ioeventfd_started) {
+        return;
+    }
+
+    /* Only remove our notifier if we have ownership.  */
+    if (!bus->ioeventfd_grabbed) {
+        vdev = virtio_bus_get_device(bus);
+        vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
+        vdc->stop_ioeventfd(vdev);
+    }
+    bus->ioeventfd_started = false;
+}
+
+bool virtio_bus_ioeventfd_enabled(VirtioBusState *bus)
+{
+    VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(bus);
+    DeviceState *proxy = DEVICE(BUS(bus)->parent);
+
+    return k->ioeventfd_assign && k->ioeventfd_enabled(proxy);
+}
+
+/*
+ * This function switches ioeventfd on/off in the device.
+ * The caller must set or clear the handlers for the EventNotifier.
+ */
+int virtio_bus_set_host_notifier(VirtioBusState *bus, int n, bool assign)
+{
+    VirtIODevice *vdev = virtio_bus_get_device(bus);
+    VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(bus);
+    DeviceState *proxy = DEVICE(BUS(bus)->parent);
+    VirtQueue *vq = virtio_get_queue(vdev, n);
+    EventNotifier *notifier = virtio_queue_get_host_notifier(vq);
+    int r = 0;
+
+    if (!k->ioeventfd_assign) {
+        return -ENOSYS;
+    }
+
+    if (assign) {
+        r = event_notifier_init(notifier, 1);
+        if (r < 0) {
+            error_report("%s: unable to init event notifier: %s (%d)",
+                         __func__, strerror(-r), r);
+            return r;
+        }
+        r = k->ioeventfd_assign(proxy, notifier, n, true);
+        if (r < 0) {
+            error_report("%s: unable to assign ioeventfd: %d", __func__, r);
+            virtio_bus_cleanup_host_notifier(bus, n);
+        }
+    } else {
+        k->ioeventfd_assign(proxy, notifier, n, false);
+    }
+
+    return r;
+}
+
+void virtio_bus_cleanup_host_notifier(VirtioBusState *bus, int n)
+{
+    VirtIODevice *vdev = virtio_bus_get_device(bus);
+    VirtQueue *vq = virtio_get_queue(vdev, n);
+    EventNotifier *notifier = virtio_queue_get_host_notifier(vq);
+
+    /* Test and clear notifier after disabling event,
+     * in case poll callback didn't have time to run.
+     */
+    virtio_queue_host_notifier_read(notifier);
+    event_notifier_cleanup(notifier);
 }
 
 static char *virtio_bus_get_dev_path(DeviceState *dev)

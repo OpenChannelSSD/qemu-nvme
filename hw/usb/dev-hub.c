@@ -21,10 +21,12 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "qemu-common.h"
 #include "trace.h"
 #include "hw/usb.h"
-#include "hw/usb/desc.h"
+#include "desc.h"
 #include "qemu/error-report.h"
 
 #define NUM_PORTS 8
@@ -40,6 +42,9 @@ typedef struct USBHubState {
     USBEndpoint *intr;
     USBHubPort ports[NUM_PORTS];
 } USBHubState;
+
+#define TYPE_USB_HUB "usb-hub"
+#define USB_HUB(obj) OBJECT_CHECK(USBHubState, (obj), TYPE_USB_HUB)
 
 #define ClearHubFeature		(0x2000 | USB_REQ_CLEAR_FEATURE)
 #define ClearPortFeature	(0x2300 | USB_REQ_CLEAR_FEATURE)
@@ -104,7 +109,7 @@ static const USBDescIface desc_iface_hub = {
         {
             .bEndpointAddress      = USB_DIR_IN | 0x01,
             .bmAttributes          = USB_ENDPOINT_XFER_INT,
-            .wMaxPacketSize        = 1 + (NUM_PORTS + 7) / 8,
+            .wMaxPacketSize        = 1 + DIV_ROUND_UP(NUM_PORTS, 8),
             .bInterval             = 0xff,
         },
     }
@@ -203,6 +208,7 @@ static void usb_hub_wakeup(USBPort *port1)
     USBHubPort *port = &s->ports[port1->index];
 
     if (port->wPortStatus & PORT_STAT_SUSPEND) {
+        port->wPortStatus &= ~PORT_STAT_SUSPEND;
         port->wPortChange |= PORT_STAT_C_SUSPEND;
         usb_wakeup(s->intr, 0);
     }
@@ -227,7 +233,7 @@ static void usb_hub_complete(USBPort *port, USBPacket *packet)
 
 static USBDevice *usb_hub_find_device(USBDevice *dev, uint8_t addr)
 {
-    USBHubState *s = DO_UPCAST(USBHubState, dev, dev);
+    USBHubState *s = USB_HUB(dev);
     USBHubPort *port;
     USBDevice *downstream;
     int i;
@@ -247,7 +253,7 @@ static USBDevice *usb_hub_find_device(USBDevice *dev, uint8_t addr)
 
 static void usb_hub_handle_reset(USBDevice *dev)
 {
-    USBHubState *s = DO_UPCAST(USBHubState, dev, dev);
+    USBHubState *s = USB_HUB(dev);
     USBHubPort *port;
     int i;
 
@@ -396,7 +402,20 @@ static void usb_hub_handle_control(USBDevice *dev, USBPacket *p,
                 port->wPortChange &= ~PORT_STAT_C_ENABLE;
                 break;
             case PORT_SUSPEND:
-                port->wPortStatus &= ~PORT_STAT_SUSPEND;
+                if (port->wPortStatus & PORT_STAT_SUSPEND) {
+                    port->wPortStatus &= ~PORT_STAT_SUSPEND;
+
+                    /*
+                     * USB Spec rev2.0 11.24.2.7.2.3 C_PORT_SUSPEND
+                     * "This bit is set on the following transitions:
+                     *  - On transition from the Resuming state to the
+                     *    SendEOP [sic] state"
+                     *
+                     * Note that this includes both remote wake-up and
+                     * explicit ClearPortFeature(PORT_SUSPEND).
+                     */
+                    port->wPortChange |= PORT_STAT_C_SUSPEND;
+                }
                 break;
             case PORT_C_SUSPEND:
                 port->wPortChange &= ~PORT_STAT_C_SUSPEND;
@@ -423,14 +442,14 @@ static void usb_hub_handle_control(USBDevice *dev, USBPacket *p,
             data[2] = NUM_PORTS;
 
             /* fill DeviceRemovable bits */
-            limit = ((NUM_PORTS + 1 + 7) / 8) + 7;
+            limit = DIV_ROUND_UP(NUM_PORTS + 1, 8) + 7;
             for (n = 7; n < limit; n++) {
                 data[n] = 0x00;
                 var_hub_size++;
             }
 
             /* fill PortPwrCtrlMask bits */
-            limit = limit + ((NUM_PORTS + 7) / 8);
+            limit = limit + DIV_ROUND_UP(NUM_PORTS, 8);
             for (;n < limit; n++) {
                 data[n] = 0xff;
                 var_hub_size++;
@@ -458,7 +477,7 @@ static void usb_hub_handle_data(USBDevice *dev, USBPacket *p)
             unsigned int status;
             uint8_t buf[4];
             int i, n;
-            n = (NUM_PORTS + 1 + 7) / 8;
+            n = DIV_ROUND_UP(NUM_PORTS + 1, 8);
             if (p->iov.size == 1) { /* FreeBSD workaround */
                 n = 1;
             } else if (n > p->iov.size) {
@@ -492,7 +511,7 @@ static void usb_hub_handle_data(USBDevice *dev, USBPacket *p)
     }
 }
 
-static void usb_hub_handle_destroy(USBDevice *dev)
+static void usb_hub_unrealize(USBDevice *dev, Error **errp)
 {
     USBHubState *s = (USBHubState *)dev;
     int i;
@@ -513,7 +532,7 @@ static USBPortOps usb_hub_port_ops = {
 
 static void usb_hub_realize(USBDevice *dev, Error **errp)
 {
-    USBHubState *s = DO_UPCAST(USBHubState, dev, dev);
+    USBHubState *s = USB_HUB(dev);
     USBHubPort *port;
     int i;
 
@@ -570,14 +589,14 @@ static void usb_hub_class_initfn(ObjectClass *klass, void *data)
     uc->handle_reset   = usb_hub_handle_reset;
     uc->handle_control = usb_hub_handle_control;
     uc->handle_data    = usb_hub_handle_data;
-    uc->handle_destroy = usb_hub_handle_destroy;
+    uc->unrealize      = usb_hub_unrealize;
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
     dc->fw_name = "hub";
     dc->vmsd = &vmstate_usb_hub;
 }
 
 static const TypeInfo hub_info = {
-    .name          = "usb-hub",
+    .name          = TYPE_USB_HUB,
     .parent        = TYPE_USB_DEVICE,
     .instance_size = sizeof(USBHubState),
     .class_init    = usb_hub_class_initfn,

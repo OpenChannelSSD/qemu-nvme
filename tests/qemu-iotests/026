@@ -25,7 +25,6 @@ seq=`basename $0`
 echo "QA output created by $seq"
 
 here=`pwd`
-tmp=/tmp/$$
 status=1	# failure is the default!
 
 _cleanup()
@@ -46,6 +45,13 @@ _supported_proto file
 _supported_os Linux
 _default_cache_mode "writethrough"
 _supported_cache_modes "writethrough" "none"
+# The refcount table tests expect a certain minimum width for refcount entries
+# (so that the refcount table actually needs to grow); that minimum is 16 bits,
+# being the default refcount entry width.
+# 32 and 64 bits do not work either, however, due to different leaked cluster
+# count on error.
+# Thus, the only remaining option is refcount_bits=16.
+_unsupported_imgopts 'refcount_bits=\([^1]\|.\([^6]\|$\)\)'
 
 echo "Errors while writing 128 kB"
 echo
@@ -59,7 +65,7 @@ for event in \
     \
     l2_load \
     l2_update \
-    l2_alloc.write \
+    l2_alloc_write \
     \
     write_aio \
     \
@@ -113,17 +119,17 @@ done
 
 
 echo
-echo === Refcout table growth tests ===
+echo === Refcount table growth tests ===
 echo
 CLUSTER_SIZE=512
 
 
 for event in \
-    refblock_alloc.hookup \
-    refblock_alloc.write \
-    refblock_alloc.write_blocks \
-    refblock_alloc.write_table \
-    refblock_alloc.switch_table \
+    refblock_alloc_hookup \
+    refblock_alloc_write \
+    refblock_alloc_write_blocks \
+    refblock_alloc_write_table \
+    refblock_alloc_switch_table \
 
 do
 
@@ -163,9 +169,9 @@ CLUSTER_SIZE=1024
 
 
 for event in \
-    l1_grow.alloc_table \
-    l1_grow.write_table \
-    l1_grow.activate_table \
+    l1_grow_alloc_table \
+    l1_grow_write_table \
+    l1_grow_activate_table \
 
 do
 
@@ -193,6 +199,23 @@ done
 done
 done
 done
+
+echo
+echo === Avoid cluster leaks after temporary failure ===
+echo
+
+cat > "$TEST_DIR/blkdebug.conf" <<EOF
+[inject-error]
+event = "write_aio"
+errno = "5"
+once = "on"
+EOF
+
+# After the failed first write, do a second write so that the updated refcount
+# block is actually written back
+_make_test_img 64M
+$QEMU_IO -c "write 0 1M" -c "write 0 1M" "$BLKDBG_TEST_IMG" | _filter_qemu_io
+_check_test_img
 
 # success, all done
 echo "*** done"

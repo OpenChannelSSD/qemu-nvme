@@ -1,7 +1,5 @@
-#ifndef _QEMU_ELF_H
-#define _QEMU_ELF_H
-
-#include <inttypes.h>
+#ifndef QEMU_ELF_H
+#define QEMU_ELF_H
 
 /* 32-bit ELF base types. */
 typedef uint32_t Elf32_Addr;
@@ -35,6 +33,9 @@ typedef int64_t  Elf64_Sxword;
 
 /* Flags in the e_flags field of the header */
 /* MIPS architecture level. */
+#define EF_MIPS_ARCH            0xf0000000
+
+/* Legal values for MIPS architecture level.  */
 #define EF_MIPS_ARCH_1		0x00000000	/* -mips1 code.  */
 #define EF_MIPS_ARCH_2		0x10000000	/* -mips2 code.  */
 #define EF_MIPS_ARCH_3		0x20000000	/* -mips3 code.  */
@@ -42,6 +43,10 @@ typedef int64_t  Elf64_Sxword;
 #define EF_MIPS_ARCH_5		0x40000000	/* -mips5 code.  */
 #define EF_MIPS_ARCH_32		0x50000000	/* MIPS32 code.  */
 #define EF_MIPS_ARCH_64		0x60000000	/* MIPS64 code.  */
+#define EF_MIPS_ARCH_32R2       0x70000000      /* MIPS32r2 code.  */
+#define EF_MIPS_ARCH_64R2       0x80000000      /* MIPS64r2 code.  */
+#define EF_MIPS_ARCH_32R6       0x90000000      /* MIPS32r6 code.  */
+#define EF_MIPS_ARCH_64R6       0xa0000000      /* MIPS64r6 code.  */
 
 /* The ABI of a file. */
 #define EF_MIPS_ABI_O32		0x00001000	/* O32 ABI.  */
@@ -54,7 +59,31 @@ typedef int64_t  Elf64_Sxword;
 #define EF_MIPS_OPTIONS_FIRST	0x00000080
 #define EF_MIPS_32BITMODE	0x00000100
 #define EF_MIPS_ABI		0x0000f000
-#define EF_MIPS_ARCH      0xf0000000
+#define EF_MIPS_FP64      0x00000200
+#define EF_MIPS_NAN2008   0x00000400
+
+/* MIPS machine variant */
+#define EF_MIPS_MACH_NONE     0x00000000  /* A standard MIPS implementation  */
+#define EF_MIPS_MACH_3900     0x00810000  /* Toshiba R3900                   */
+#define EF_MIPS_MACH_4010     0x00820000  /* LSI R4010                       */
+#define EF_MIPS_MACH_4100     0x00830000  /* NEC VR4100                      */
+#define EF_MIPS_MACH_4650     0x00850000  /* MIPS R4650                      */
+#define EF_MIPS_MACH_4120     0x00870000  /* NEC VR4120                      */
+#define EF_MIPS_MACH_4111     0x00880000  /* NEC VR4111/VR4181               */
+#define EF_MIPS_MACH_SB1      0x008a0000  /* Broadcom SB-1                   */
+#define EF_MIPS_MACH_OCTEON   0x008b0000  /* Cavium Networks Octeon          */
+#define EF_MIPS_MACH_XLR      0x008c0000  /* RMI Xlr                         */
+#define EF_MIPS_MACH_OCTEON2  0x008d0000  /* Cavium Networks Octeon2         */
+#define EF_MIPS_MACH_OCTEON3  0x008e0000  /* Cavium Networks Octeon3         */
+#define EF_MIPS_MACH_5400     0x00910000  /* NEC VR5400                      */
+#define EF_MIPS_MACH_5900     0x00920000  /* MIPS R5900                      */
+#define EF_MIPS_MACH_5500     0x00980000  /* NEC VR5500                      */
+#define EF_MIPS_MACH_9000     0x00990000  /* PMC-Sierra's RM9000             */
+#define EF_MIPS_MACH_LS2E     0x00a00000  /* ST Microelectronics Loongson 2E */
+#define EF_MIPS_MACH_LS2F     0x00a10000  /* ST Microelectronics Loongson 2F */
+#define EF_MIPS_MACH_LS3A     0x00a20000  /* ST Microelectronics Loongson 3A */
+#define EF_MIPS_MACH          0x00ff0000  /* EF_MIPS_MACH_xxx selection mask */
+
 
 /* These constants define the different elf file types */
 #define ET_NONE   0
@@ -112,6 +141,10 @@ typedef int64_t  Elf64_Sxword;
 
 #define EM_UNICORE32    110     /* UniCore32 */
 
+#define EM_RISCV        243     /* RISC-V */
+
+#define EM_NANOMIPS     249     /* Wave Computing nanoMIPS */
+
 /*
  * This is an interim value that we will use until the committee comes
  * up with a final number.
@@ -126,12 +159,19 @@ typedef int64_t  Elf64_Sxword;
  */
 #define EM_S390_OLD     0xA390
 
+#define EM_ALTERA_NIOS2 113     /* Altera Nios II soft-core processor */
+
 #define EM_MICROBLAZE      189
 #define EM_MICROBLAZE_OLD  0xBAAB
 
 #define EM_XTENSA   94      /* Tensilica Xtensa */
 
 #define EM_AARCH64  183
+
+#define EM_TILEGX   191 /* TILE-Gx */
+
+#define EM_MOXIE           223     /* Moxie processor family */
+#define EM_MOXIE_OLD       0xFEED
 
 /* This is the info that is needed to parse the dynamic section of the file */
 #define DT_NULL		0
@@ -473,6 +513,19 @@ typedef struct {
 #define PPC_FEATURE_TRUE_LE             0x00000002
 #define PPC_FEATURE_PPC_LE              0x00000001
 
+/* Bits present in AT_HWCAP2 for PowerPC.  */
+
+#define PPC_FEATURE2_ARCH_2_07          0x80000000
+#define PPC_FEATURE2_HAS_HTM            0x40000000
+#define PPC_FEATURE2_HAS_DSCR           0x20000000
+#define PPC_FEATURE2_HAS_EBB            0x10000000
+#define PPC_FEATURE2_HAS_ISEL           0x08000000
+#define PPC_FEATURE2_HAS_TAR            0x04000000
+#define PPC_FEATURE2_HAS_VEC_CRYPTO     0x02000000
+#define PPC_FEATURE2_HTM_NOSC           0x01000000
+#define PPC_FEATURE2_ARCH_3_00          0x00800000
+#define PPC_FEATURE2_HAS_IEEE128        0x00400000
+
 /* Bits present in AT_HWCAP for Sparc.  */
 
 #define HWCAP_SPARC_FLUSH               0x00000001
@@ -516,6 +569,34 @@ typedef struct {
 #define HWCAP_S390_ETF3EH       256
 #define HWCAP_S390_HIGH_GPRS    512
 #define HWCAP_S390_TE           1024
+
+/* M68K specific definitions. */
+/* We use the top 24 bits to encode information about the
+   architecture variant.  */
+#define EF_M68K_CPU32    0x00810000
+#define EF_M68K_M68000   0x01000000
+#define EF_M68K_CFV4E    0x00008000
+#define EF_M68K_FIDO     0x02000000
+#define EF_M68K_ARCH_MASK                                               \
+  (EF_M68K_M68000 | EF_M68K_CPU32 | EF_M68K_CFV4E | EF_M68K_FIDO)
+
+/* We use the bottom 8 bits to encode information about the
+   coldfire variant.  If we use any of these bits, the top 24 bits are
+   either 0 or EF_M68K_CFV4E.  */
+#define EF_M68K_CF_ISA_MASK     0x0F  /* Which ISA */
+#define EF_M68K_CF_ISA_A_NODIV  0x01  /* ISA A except for div */
+#define EF_M68K_CF_ISA_A        0x02
+#define EF_M68K_CF_ISA_A_PLUS   0x03
+#define EF_M68K_CF_ISA_B_NOUSP  0x04  /* ISA_B except for USP */
+#define EF_M68K_CF_ISA_B        0x05
+#define EF_M68K_CF_ISA_C        0x06
+#define EF_M68K_CF_ISA_C_NODIV  0x07  /* ISA C except for div */
+#define EF_M68K_CF_MAC_MASK     0x30
+#define EF_M68K_CF_MAC          0x10  /* MAC */
+#define EF_M68K_CF_EMAC         0x20  /* EMAC */
+#define EF_M68K_CF_EMAC_B       0x30  /* EMAC_B */
+#define EF_M68K_CF_FLOAT        0x40  /* Has float insns */
+#define EF_M68K_CF_MASK         0xFF
 
 /*
  * 68k ELF relocation types
@@ -922,8 +1003,9 @@ typedef struct {
 #define R_390_TLS_DTPOFF	55	/* Offset in TLS block.  */
 #define R_390_TLS_TPOFF		56	/* Negate offset in static TLS
                                            block.  */
+#define R_390_20                57
 /* Keep this the last entry.  */
-#define R_390_NUM	57
+#define R_390_NUM               58
 
 /* x86-64 relocation types */
 #define R_X86_64_NONE		0	/* No reloc */
@@ -1425,6 +1507,7 @@ typedef struct elf64_shdr {
 #define ELFOSABI_TRU64          10      /* Compaq TRU64 UNIX.  */
 #define ELFOSABI_MODESTO        11      /* Novell Modesto.  */
 #define ELFOSABI_OPENBSD        12      /* OpenBSD.  */
+#define ELFOSABI_ARM_FDPIC      65      /* ARM FDPIC */
 #define ELFOSABI_ARM            97      /* ARM */
 #define ELFOSABI_STANDALONE     255     /* Standalone (embedded) application */
 
@@ -1456,6 +1539,9 @@ typedef struct elf64_shdr {
 #define NT_TASKSTRUCT	4
 #define NT_AUXV		6
 #define NT_PRXFPREG     0x46e62b7f      /* copied from gdb5.1/include/elf/common.h */
+#define NT_S390_GS_CB   0x30b           /* s390 guarded storage registers */
+#define NT_S390_VXRS_HIGH 0x30a         /* s390 vector registers 16-31 */
+#define NT_S390_VXRS_LOW  0x309         /* s390 vector registers 0-15 (lower half) */
 #define NT_S390_PREFIX  0x305           /* s390 prefix register */
 #define NT_S390_CTRS    0x304           /* s390 control registers */
 #define NT_S390_TODPREG 0x303           /* s390 TOD programmable register */
@@ -1464,6 +1550,11 @@ typedef struct elf64_shdr {
 #define NT_PPC_VMX       0x100          /* PowerPC Altivec/VMX registers */
 #define NT_PPC_SPE       0x101          /* PowerPC SPE/EVR registers */
 #define NT_PPC_VSX       0x102          /* PowerPC VSX registers */
+#define NT_ARM_VFP      0x400           /* ARM VFP/NEON registers */
+#define NT_ARM_TLS      0x401           /* ARM TLS register */
+#define NT_ARM_HW_BREAK 0x402           /* ARM hardware breakpoint registers */
+#define NT_ARM_HW_WATCH 0x403           /* ARM hardware watchpoint registers */
+#define NT_ARM_SYSTEM_CALL      0x404   /* ARM system call number */
 
 
 /* Note header in a PT_NOTE section */
@@ -1508,6 +1599,7 @@ struct elf32_fdpic_loadmap {
 #define elf_shdr	elf32_shdr
 #define elf_sym		elf32_sym
 #define elf_addr_t	Elf32_Off
+#define elf_rela  elf32_rela
 
 #ifdef ELF_USES_RELOCA
 # define ELF_RELOC      Elf32_Rela
@@ -1523,6 +1615,7 @@ struct elf32_fdpic_loadmap {
 #define elf_shdr	elf64_shdr
 #define elf_sym		elf64_sym
 #define elf_addr_t	Elf64_Off
+#define elf_rela  elf64_rela
 
 #ifdef ELF_USES_RELOCA
 # define ELF_RELOC      Elf64_Rela
@@ -1545,4 +1638,4 @@ struct elf32_fdpic_loadmap {
 #endif /* ELF_CLASS */
 
 
-#endif /* _QEMU_ELF_H */
+#endif /* QEMU_ELF_H */

@@ -15,7 +15,7 @@
 #include "virtio.h"
 
 typedef uint64_t block_number_t;
-#define NULL_BLOCK_NR 0xffffffffffffffff
+#define NULL_BLOCK_NR 0xffffffffffffffffULL
 
 #define FREE_SPACE_FILLER '\xAA'
 
@@ -32,10 +32,14 @@ typedef struct FbaBlockPtr {
     uint16_t blockct;
 } __attribute__ ((packed)) FbaBlockPtr;
 
-typedef struct EckdBlockPtr {
-    uint16_t cylinder; /* cylinder/head/sector is an address of the block */
+typedef struct EckdCHS {
+    uint16_t cylinder;
     uint16_t head;
     uint8_t sector;
+} __attribute__ ((packed)) EckdCHS;
+
+typedef struct EckdBlockPtr {
+    EckdCHS chs; /* cylinder/head/sector is an address of the block */
     uint16_t size;
     uint8_t count; /* (size_in_blocks-1);
                     * it's 0 for TablePtr, ScriptPtr, and SectionPtr */
@@ -52,6 +56,13 @@ typedef union BootMapPointer {
     EckdBlockPtr eckd;
     ExtEckdBlockPtr xeckd;
 } __attribute__ ((packed)) BootMapPointer;
+
+/* aka Program Table */
+typedef struct BootMapTable {
+    uint8_t magic[4];
+    uint8_t reserved[12];
+    BootMapPointer entry[];
+} __attribute__ ((packed)) BootMapTable;
 
 typedef struct ComponentEntry {
     ScsiBlockPtr data;
@@ -70,10 +81,11 @@ typedef struct ScsiMbr {
     uint8_t magic[4];
     uint32_t version_id;
     uint8_t reserved[8];
-    ScsiBlockPtr blockptr;
+    ScsiBlockPtr pt;   /* block pointer to program table */
 } __attribute__ ((packed)) ScsiMbr;
 
 #define ZIPL_MAGIC              "zIPL"
+#define ZIPL_MAGIC_EBCDIC       "\xa9\xc9\xd7\xd3"
 #define IPL1_MAGIC "\xc9\xd7\xd3\xf1" /* == "IPL1" in EBCDIC */
 #define IPL2_MAGIC "\xc9\xd7\xd3\xf2" /* == "IPL2" in EBCDIC */
 #define VOL1_MAGIC "\xe5\xd6\xd3\xf1" /* == "VOL1" in EBCDIC */
@@ -226,22 +238,45 @@ typedef struct BootInfo {          /* @ 0x70, record #0    */
     } bp;
 } __attribute__ ((packed)) BootInfo; /* see also XEckdMbr   */
 
-typedef struct Ipl1 {
-    unsigned char key[4]; /* == "IPL1" */
-    unsigned char data[24];
-} __attribute__((packed)) Ipl1;
+/*
+ * Structs for IPL
+ */
+#define STAGE2_BLK_CNT_MAX  24 /* Stage 1b can load up to 24 blocks */
 
-typedef struct Ipl2 {
-    unsigned char key[4]; /* == "IPL2" */
-    union {
-        unsigned char data[144];
-        struct {
-            unsigned char reserved1[92-4];
-            XEckdMbr mbr;
-            unsigned char reserved2[144-(92-4)-sizeof(XEckdMbr)];
-        } x;
-    } u;
-} __attribute__((packed)) Ipl2;
+typedef struct EckdCdlIpl1 {
+    uint8_t key[4]; /* == "IPL1" */
+    uint8_t data[24];
+} __attribute__((packed)) EckdCdlIpl1;
+
+typedef struct EckdSeekArg {
+    uint16_t pad;
+    EckdCHS chs;
+    uint8_t pad2;
+} __attribute__ ((packed)) EckdSeekArg;
+
+typedef struct EckdStage1b {
+    uint8_t reserved[32 * STAGE2_BLK_CNT_MAX];
+    struct EckdSeekArg seek[STAGE2_BLK_CNT_MAX];
+    uint8_t unused[64];
+} __attribute__ ((packed)) EckdStage1b;
+
+typedef struct EckdStage1 {
+    uint8_t reserved[72];
+    struct EckdSeekArg seek[2];
+} __attribute__ ((packed)) EckdStage1;
+
+typedef struct EckdCdlIpl2 {
+    uint8_t key[4]; /* == "IPL2" */
+    struct EckdStage1 stage1;
+    XEckdMbr mbr;
+    uint8_t reserved[24];
+} __attribute__((packed)) EckdCdlIpl2;
+
+typedef struct EckdLdlIpl1 {
+    uint8_t reserved[24];
+    struct EckdStage1 stage1;
+    BootInfo bip; /* BootInfo is MBR for LDL */
+} __attribute__((packed)) EckdLdlIpl1;
 
 typedef struct IplVolumeLabel {
     unsigned char key[4]; /* == "VOL1" */
@@ -263,37 +298,6 @@ typedef enum {
 } ECKD_IPL_mode_t;
 
 /* utility code below */
-
-static inline void IPL_assert(bool term, const char *message)
-{
-    if (!term) {
-        sclp_print("\n! ");
-        sclp_print(message);
-        virtio_panic(" !\n"); /* no return */
-    }
-}
-
-static const unsigned char ebc2asc[256] =
-      /* 0123456789abcdef0123456789abcdef */
-        "................................" /* 1F */
-        "................................" /* 3F */
-        " ...........<(+|&.........!$*);." /* 5F first.chr.here.is.real.space */
-        "-/.........,%_>?.........`:#@'=\""/* 7F */
-        ".abcdefghi.......jklmnopqr......" /* 9F */
-        "..stuvwxyz......................" /* BF */
-        ".ABCDEFGHI.......JKLMNOPQR......" /* DF */
-        "..STUVWXYZ......0123456789......";/* FF */
-
-static inline void ebcdic_to_ascii(const char *src,
-                                   char *dst,
-                                   unsigned int size)
-{
-    unsigned int i;
-    for (i = 0; i < size; i++) {
-        unsigned c = src[i];
-        dst[i] = ebc2asc[c];
-    }
-}
 
 static inline void print_volser(const void *volser)
 {
@@ -339,6 +343,149 @@ static inline bool block_size_ok(uint32_t block_size)
 static inline bool magic_match(const void *data, const void *magic)
 {
     return *((uint32_t *)data) == *((uint32_t *)magic);
+}
+
+static inline uint32_t iso_733_to_u32(uint64_t x)
+{
+    return (uint32_t)x;
+}
+
+#define ISO_SECTOR_SIZE 2048
+/* El Torito specifies boot image size in 512 byte blocks */
+#define ET_SECTOR_SHIFT 2
+
+#define ISO_PRIMARY_VD_SECTOR 16
+
+static inline void read_iso_sector(uint32_t block_offset, void *buf,
+                                   const char *errmsg)
+{
+    IPL_assert(virtio_read_many(block_offset, buf, 1) == 0, errmsg);
+}
+
+static inline void read_iso_boot_image(uint32_t block_offset, void *load_addr,
+                                       uint32_t blks_to_load)
+{
+    IPL_assert(virtio_read_many(block_offset, load_addr, blks_to_load) == 0,
+               "Failed to read boot image!");
+}
+
+#define ISO9660_MAX_DIR_DEPTH 8
+
+typedef struct IsoDirHdr {
+    uint8_t dr_len;
+    uint8_t ear_len;
+    uint64_t ext_loc;
+    uint64_t data_len;
+    uint8_t recording_datetime[7];
+    uint8_t file_flags;
+    uint8_t file_unit_size;
+    uint8_t gap_size;
+    uint32_t vol_seqnum;
+    uint8_t fileid_len;
+} __attribute__((packed)) IsoDirHdr;
+
+typedef struct IsoVdElTorito {
+    uint8_t el_torito[32]; /* must contain el_torito_magic value */
+    uint8_t unused0[32];
+    uint32_t bc_offset;
+    uint8_t unused1[1974];
+} __attribute__((packed)) IsoVdElTorito;
+
+typedef struct IsoVdPrimary {
+    uint8_t unused1;
+    uint8_t sys_id[32];
+    uint8_t vol_id[32];
+    uint8_t unused2[8];
+    uint64_t vol_space_size;
+    uint8_t unused3[32];
+    uint32_t vol_set_size;
+    uint32_t vol_seqnum;
+    uint32_t log_block_size;
+    uint64_t path_table_size;
+    uint32_t l_path_table;
+    uint32_t opt_l_path_table;
+    uint32_t m_path_table;
+    uint32_t opt_m_path_table;
+    IsoDirHdr rootdir;
+    uint8_t root_null;
+    uint8_t reserved2[1858];
+} __attribute__((packed)) IsoVdPrimary;
+
+typedef struct IsoVolDesc {
+    uint8_t type;
+    uint8_t ident[5];
+    uint8_t version;
+    union {
+        IsoVdElTorito boot;
+        IsoVdPrimary primary;
+    } vd;
+} __attribute__((packed)) IsoVolDesc;
+
+#define VOL_DESC_TYPE_BOOT 0
+#define VOL_DESC_TYPE_PRIMARY 1
+#define VOL_DESC_TYPE_SUPPLEMENT 2
+#define VOL_DESC_TYPE_PARTITION 3
+#define VOL_DESC_TERMINATOR 255
+
+typedef struct IsoBcValid {
+    uint8_t platform_id;
+    uint16_t reserved;
+    uint8_t id[24];
+    uint16_t checksum;
+    uint8_t key[2];
+} __attribute__((packed)) IsoBcValid;
+
+typedef struct IsoBcSection {
+    uint8_t boot_type;
+    uint16_t load_segment;
+    uint8_t sys_type;
+    uint8_t unused;
+    uint16_t sector_count;
+    uint32_t load_rba;
+    uint8_t selection[20];
+} __attribute__((packed)) IsoBcSection;
+
+typedef struct IsoBcHdr {
+    uint8_t platform_id;
+    uint16_t sect_num;
+    uint8_t id[28];
+} __attribute__((packed)) IsoBcHdr;
+
+typedef struct IsoBcEntry {
+    uint8_t id;
+    union {
+        IsoBcValid valid; /* id == 0x01 */
+        IsoBcSection sect; /* id == 0x88 || id == 0x0 */
+        IsoBcHdr hdr; /* id == 0x90 || id == 0x91 */
+    } body;
+} __attribute__((packed)) IsoBcEntry;
+
+#define ISO_BC_ENTRY_PER_SECTOR (ISO_SECTOR_SIZE / sizeof(IsoBcEntry))
+#define ISO_BC_HDR_VALIDATION 0x01
+#define ISO_BC_BOOTABLE_SECTION 0x88
+#define ISO_BC_MAGIC_55 0x55
+#define ISO_BC_MAGIC_AA 0xaa
+#define ISO_BC_PLATFORM_X86 0x0
+#define ISO_BC_PLATFORM_PPC 0x1
+#define ISO_BC_PLATFORM_MAC 0x2
+
+static inline bool is_iso_bc_valid(IsoBcEntry *e)
+{
+    IsoBcValid *v = &e->body.valid;
+
+    if (e->id != ISO_BC_HDR_VALIDATION) {
+        return false;
+    }
+
+    if (v->platform_id != ISO_BC_PLATFORM_X86 &&
+        v->platform_id != ISO_BC_PLATFORM_PPC &&
+        v->platform_id != ISO_BC_PLATFORM_MAC) {
+        return false;
+    }
+
+    return v->key[0] == ISO_BC_MAGIC_55 &&
+           v->key[1] == ISO_BC_MAGIC_AA &&
+           v->reserved == 0x0;
 }
 
 #endif /* _PC_BIOS_S390_CCW_BOOTMAP_H */

@@ -11,23 +11,24 @@
  * See the COPYING file in the top-level directory.
  */
 
-#include <glib.h>
-#include <sys/types.h>
+#include "qemu/osdep.h"
 #include <sys/ioctl.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
-#include <unistd.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <dirent.h>
-#include <stdio.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <inttypes.h>
-#include "qga/guest-agent-core.h"
-#include "qga-qmp-commands.h"
+#include "guest-agent-core.h"
+#include "qga-qapi-commands.h"
+#include "qapi/error.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/queue.h"
 #include "qemu/host-utils.h"
+#include "qemu/sockets.h"
+#include "qemu/base64.h"
+#include "qemu/cutils.h"
+
+#ifdef HAVE_UTMPX
+#include <utmpx.h>
+#endif
 
 #ifndef CONFIG_HAS_ENVIRON
 #ifdef __APPLE__
@@ -45,6 +46,7 @@ extern char **environ;
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <net/if.h>
+#include <sys/statvfs.h>
 
 #ifdef FIFREEZE
 #define CONFIG_FSFREEZE
@@ -132,7 +134,6 @@ int64_t qmp_guest_get_time(Error **errp)
 {
    int ret;
    qemu_timeval tq;
-   int64_t time_ns;
 
    ret = qemu_gettimeofday(&tq);
    if (ret < 0) {
@@ -140,8 +141,7 @@ int64_t qmp_guest_get_time(Error **errp)
        return -1;
    }
 
-   time_ns = tq.tv_sec * 1000000000LL + tq.tv_usec * 1000;
-   return time_ns;
+   return tq.tv_sec * 1000000000LL + tq.tv_usec * 1000;
 }
 
 void qmp_guest_set_time(bool has_time, int64_t time_ns, Error **errp)
@@ -154,6 +154,8 @@ void qmp_guest_set_time(bool has_time, int64_t time_ns, Error **errp)
 
     /* If user has passed a time, validate and set it. */
     if (has_time) {
+        GDate date = { 0, };
+
         /* year-2038 will overflow in case time_t is 32bit */
         if (time_ns / 1000000000 != (time_t)(time_ns / 1000000000)) {
             error_setg(errp, "Time %" PRId64 " is too large", time_ns);
@@ -162,6 +164,11 @@ void qmp_guest_set_time(bool has_time, int64_t time_ns, Error **errp)
 
         tv.tv_sec = time_ns / 1000000000;
         tv.tv_usec = (time_ns % 1000000000) / 1000;
+        g_date_set_time_t(&date, tv.tv_sec);
+        if (date.year < 1970 || date.year >= 2070) {
+            error_setg_errno(errp, errno, "Invalid time");
+            return;
+        }
 
         ret = settimeofday(&tv, NULL);
         if (ret < 0) {
@@ -208,15 +215,24 @@ void qmp_guest_set_time(bool has_time, int64_t time_ns, Error **errp)
     }
 }
 
+typedef enum {
+    RW_STATE_NEW,
+    RW_STATE_READING,
+    RW_STATE_WRITING,
+} RwState;
+
 typedef struct GuestFileHandle {
     uint64_t id;
     FILE *fh;
+    RwState state;
     QTAILQ_ENTRY(GuestFileHandle) next;
 } GuestFileHandle;
 
 static struct {
     QTAILQ_HEAD(, GuestFileHandle) filehandles;
-} guest_file_state;
+} guest_file_state = {
+    .filehandles = QTAILQ_HEAD_INITIALIZER(guest_file_state.filehandles),
+};
 
 static int64_t guest_file_handle_add(FILE *fh, Error **errp)
 {
@@ -228,7 +244,7 @@ static int64_t guest_file_handle_add(FILE *fh, Error **errp)
         return -1;
     }
 
-    gfh = g_malloc0(sizeof(GuestFileHandle));
+    gfh = g_new0(GuestFileHandle, 1);
     gfh->id = handle;
     gfh->fh = fh;
     QTAILQ_INSERT_TAIL(&guest_file_state.filehandles, gfh, next);
@@ -381,8 +397,7 @@ int64_t qmp_guest_file_open(const char *path, bool has_mode, const char *mode,
 {
     FILE *fh;
     Error *local_err = NULL;
-    int fd;
-    int64_t ret = -1, handle;
+    int64_t handle;
 
     if (!has_mode) {
         mode = "r";
@@ -397,15 +412,7 @@ int64_t qmp_guest_file_open(const char *path, bool has_mode, const char *mode,
     /* set fd non-blocking to avoid common use cases (like reading from a
      * named pipe) from hanging the agent
      */
-    fd = fileno(fh);
-    ret = fcntl(fd, F_GETFL);
-    ret = fcntl(fd, F_SETFL, ret | O_NONBLOCK);
-    if (ret == -1) {
-        error_setg_errno(errp, errno, "failed to make file '%s' non-blocking",
-                         path);
-        fclose(fh);
-        return -1;
-    }
+    qemu_set_nonblock(fileno(fh));
 
     handle = guest_file_handle_add(fh, errp);
     if (handle < 0) {
@@ -452,13 +459,24 @@ struct GuestFileRead *qmp_guest_file_read(int64_t handle, bool has_count,
 
     if (!has_count) {
         count = QGA_READ_COUNT_DEFAULT;
-    } else if (count < 0) {
+    } else if (count < 0 || count >= UINT32_MAX) {
         error_setg(errp, "value '%" PRId64 "' is invalid for argument count",
                    count);
         return NULL;
     }
 
     fh = gfh->fh;
+
+    /* explicitly flush when switching from writing to reading */
+    if (gfh->state == RW_STATE_WRITING) {
+        int ret = fflush(fh);
+        if (ret == EOF) {
+            error_setg_errno(errp, errno, "failed to flush file");
+            return NULL;
+        }
+        gfh->state = RW_STATE_NEW;
+    }
+
     buf = g_malloc0(count+1);
     read_count = fread(buf, 1, count, fh);
     if (ferror(fh)) {
@@ -466,12 +484,13 @@ struct GuestFileRead *qmp_guest_file_read(int64_t handle, bool has_count,
         slog("guest-file-read failed, handle: %" PRId64, handle);
     } else {
         buf[read_count] = 0;
-        read_data = g_malloc0(sizeof(GuestFileRead));
+        read_data = g_new0(GuestFileRead, 1);
         read_data->count = read_count;
         read_data->eof = feof(fh);
         if (read_count) {
             read_data->buf_b64 = g_base64_encode(buf, read_count);
         }
+        gfh->state = RW_STATE_READING;
     }
     g_free(buf);
     clearerr(fh);
@@ -495,7 +514,20 @@ GuestFileWrite *qmp_guest_file_write(int64_t handle, const char *buf_b64,
     }
 
     fh = gfh->fh;
-    buf = g_base64_decode(buf_b64, &buf_len);
+
+    if (gfh->state == RW_STATE_READING) {
+        int ret = fseek(fh, 0, SEEK_CUR);
+        if (ret == -1) {
+            error_setg_errno(errp, errno, "failed to seek file");
+            return NULL;
+        }
+        gfh->state = RW_STATE_NEW;
+    }
+
+    buf = qbase64_decode(buf_b64, -1, &buf_len, errp);
+    if (!buf) {
+        return NULL;
+    }
 
     if (!has_count) {
         count = buf_len;
@@ -511,9 +543,10 @@ GuestFileWrite *qmp_guest_file_write(int64_t handle, const char *buf_b64,
         error_setg_errno(errp, errno, "failed to write to file");
         slog("guest-file-write failed, handle: %" PRId64, handle);
     } else {
-        write_data = g_malloc0(sizeof(GuestFileWrite));
+        write_data = g_new0(GuestFileWrite, 1);
         write_data->count = write_count;
         write_data->eof = feof(fh);
+        gfh->state = RW_STATE_WRITING;
     }
     g_free(buf);
     clearerr(fh);
@@ -522,14 +555,24 @@ GuestFileWrite *qmp_guest_file_write(int64_t handle, const char *buf_b64,
 }
 
 struct GuestFileSeek *qmp_guest_file_seek(int64_t handle, int64_t offset,
-                                          int64_t whence, Error **errp)
+                                          GuestFileWhence *whence_code,
+                                          Error **errp)
 {
     GuestFileHandle *gfh = guest_file_handle_find(handle, errp);
     GuestFileSeek *seek_data = NULL;
     FILE *fh;
     int ret;
+    int whence;
+    Error *err = NULL;
 
     if (!gfh) {
+        return NULL;
+    }
+
+    /* We stupidly exposed 'whence':'int' in our qapi */
+    whence = ga_parse_whence(whence_code, &err);
+    if (err) {
+        error_propagate(errp, err);
         return NULL;
     }
 
@@ -537,10 +580,15 @@ struct GuestFileSeek *qmp_guest_file_seek(int64_t handle, int64_t offset,
     ret = fseek(fh, offset, whence);
     if (ret == -1) {
         error_setg_errno(errp, errno, "failed to seek file");
+        if (errno == ESPIPE) {
+            /* file is non-seekable, stdio shouldn't be buffering anyways */
+            gfh->state = RW_STATE_NEW;
+        }
     } else {
         seek_data = g_new0(GuestFileSeek, 1);
         seek_data->position = ftell(fh);
         seek_data->eof = feof(fh);
+        gfh->state = RW_STATE_NEW;
     }
     clearerr(fh);
 
@@ -561,12 +609,9 @@ void qmp_guest_file_flush(int64_t handle, Error **errp)
     ret = fflush(fh);
     if (ret == EOF) {
         error_setg_errno(errp, errno, "failed to flush file");
+    } else {
+        gfh->state = RW_STATE_NEW;
     }
-}
-
-static void guest_file_init(void)
-{
-    QTAILQ_INIT(&guest_file_state.filehandles);
 }
 
 /* linux-specific implementations. avoid this if at all possible. */
@@ -656,7 +701,7 @@ static void build_fs_mount_list_from_mtab(FsMountList *mounts, Error **errp)
             continue;
         }
 
-        mount = g_malloc0(sizeof(FsMount));
+        mount = g_new0(FsMount, 1);
         mount->dirname = g_strdup(ment->mnt_dir);
         mount->devtype = g_strdup(ment->mnt_type);
         mount->devmajor = devmajor;
@@ -735,7 +780,7 @@ static void build_fs_mount_list(FsMountList *mounts, Error **errp)
             }
         }
 
-        mount = g_malloc0(sizeof(FsMount));
+        mount = g_new0(FsMount, 1);
         mount->dirname = g_strdup(line + dir_s);
         mount->devtype = g_strdup(dash + type_s);
         mount->devmajor = devmajor;
@@ -764,7 +809,7 @@ static char *get_pci_driver(char const *syspath, int pathlen, Error **errp)
     len = readlink(dpath, buf, sizeof(buf) - 1);
     if (len != -1) {
         buf[len] = 0;
-        driver = g_strdup(basename(buf));
+        driver = g_path_get_basename(buf);
     }
     g_free(dpath);
     g_free(path);
@@ -831,13 +876,29 @@ static void build_guest_fsinfo_for_real_device(char const *syspath,
     p = strstr(syspath, "/devices/pci");
     if (!p || sscanf(p + 12, "%*x:%*x/%x:%x:%x.%x%n",
                      pci, pci + 1, pci + 2, pci + 3, &pcilen) < 4) {
-        g_debug("only pci device is supported: sysfs path \"%s\"", syspath);
+        g_debug("only pci device is supported: sysfs path '%s'", syspath);
         return;
     }
 
-    driver = get_pci_driver(syspath, (p + 12 + pcilen) - syspath, errp);
-    if (!driver) {
-        goto cleanup;
+    p += 12 + pcilen;
+    while (true) {
+        driver = get_pci_driver(syspath, p - syspath, errp);
+        if (driver && (g_str_equal(driver, "ata_piix") ||
+                       g_str_equal(driver, "sym53c8xx") ||
+                       g_str_equal(driver, "virtio-pci") ||
+                       g_str_equal(driver, "ahci"))) {
+            break;
+        }
+
+        g_free(driver);
+        if (sscanf(p, "/%x:%x:%x.%x%n",
+                          pci, pci + 1, pci + 2, pci + 3, &pcilen) == 4) {
+            p += pcilen;
+            continue;
+        }
+
+        g_debug("unsupported driver or sysfs path '%s'", syspath);
+        return;
     }
 
     p = strstr(syspath, "/target");
@@ -857,7 +918,7 @@ static void build_guest_fsinfo_for_real_device(char const *syspath,
     if (p && sscanf(q, "%u", &host) == 1) {
         has_host = true;
         nhosts = build_hosts(syspath, p, has_ata, hosts,
-                             sizeof(hosts) / sizeof(hosts[0]), errp);
+                             ARRAY_SIZE(hosts), errp);
         if (nhosts < 0) {
             goto cleanup;
         }
@@ -961,7 +1022,9 @@ static void build_guest_fsinfo_for_virtual_device(char const *syspath,
     dirpath = g_strdup_printf("%s/slaves", syspath);
     dir = opendir(dirpath);
     if (!dir) {
-        error_setg_errno(errp, errno, "opendir(\"%s\")", dirpath);
+        if (errno != ENOENT) {
+            error_setg_errno(errp, errno, "opendir(\"%s\")", dirpath);
+        }
         g_free(dirpath);
         return;
     }
@@ -1007,7 +1070,7 @@ static void build_guest_fsinfo_for_device(char const *devpath,
     }
 
     if (!fs->name) {
-        fs->name = g_strdup(basename(syspath));
+        fs->name = g_path_get_basename(syspath);
     }
 
     g_debug("  parse sysfs path '%s'", syspath);
@@ -1026,6 +1089,8 @@ static GuestFilesystemInfo *build_guest_fsinfo(struct FsMount *mount,
                                                Error **errp)
 {
     GuestFilesystemInfo *fs = g_malloc0(sizeof(*fs));
+    struct statvfs buf;
+    unsigned long used, nonroot_total, fr_size;
     char *devpath = g_strdup_printf("/sys/dev/block/%u:%u",
                                     mount->devmajor, mount->devminor);
 
@@ -1033,7 +1098,19 @@ static GuestFilesystemInfo *build_guest_fsinfo(struct FsMount *mount,
     fs->type = g_strdup(mount->devtype);
     build_guest_fsinfo_for_device(devpath, fs, errp);
 
+    if (statvfs(fs->mountpoint, &buf) == 0) {
+        fr_size = buf.f_frsize;
+        used = buf.f_blocks - buf.f_bfree;
+        nonroot_total = used + buf.f_bavail;
+        fs->used_bytes = used * fr_size;
+        fs->total_bytes = nonroot_total * fr_size;
+
+        fs->has_total_bytes = true;
+        fs->has_used_bytes = true;
+    }
+
     g_free(devpath);
+
     return fs;
 }
 
@@ -1201,10 +1278,13 @@ int64_t qmp_guest_fsfreeze_freeze_list(bool has_mountpoints,
             goto error;
         }
 
-        /* we try to cull filesytems we know won't work in advance, but other
-         * filesytems may not implement fsfreeze for less obvious reasons.
+        /* we try to cull filesystems we know won't work in advance, but other
+         * filesystems may not implement fsfreeze for less obvious reasons.
          * these will report EOPNOTSUPP. we simply ignore these when tallying
          * the number of frozen filesystems.
+         * if a filesystem is mounted more than once (aka bind mount) a
+         * consecutive attempt to freeze an already frozen filesystem will
+         * return EBUSY.
          *
          * any other error means a failure to freeze a filesystem we
          * expect to be freezable, so return an error in those cases
@@ -1212,7 +1292,7 @@ int64_t qmp_guest_fsfreeze_freeze_list(bool has_mountpoints,
          */
         ret = ioctl(fd, FIFREEZE);
         if (ret == -1) {
-            if (errno != EOPNOTSUPP) {
+            if (errno != EOPNOTSUPP && errno != EBUSY) {
                 error_setg_errno(errp, errno, "failed to freeze %s",
                                  mount->dirname);
                 close(fd);
@@ -1225,6 +1305,12 @@ int64_t qmp_guest_fsfreeze_freeze_list(bool has_mountpoints,
     }
 
     free_fs_mount_list(&mounts);
+    /* We may not issue any FIFREEZE here.
+     * Just unset ga_state here and ready for the next call.
+     */
+    if (i == 0) {
+        ga_unset_frozen(ga_state);
+    }
     return i;
 
 error:
@@ -1310,18 +1396,18 @@ static void guest_fsfreeze_cleanup(void)
 /*
  * Walk list of mounted file systems in the guest, and trim them.
  */
-void qmp_guest_fstrim(bool has_minimum, int64_t minimum, Error **errp)
+GuestFilesystemTrimResponse *
+qmp_guest_fstrim(bool has_minimum, int64_t minimum, Error **errp)
 {
+    GuestFilesystemTrimResponse *response;
+    GuestFilesystemTrimResultList *list;
+    GuestFilesystemTrimResult *result;
     int ret = 0;
     FsMountList mounts;
     struct FsMount *mount;
     int fd;
     Error *local_err = NULL;
-    struct fstrim_range r = {
-        .start = 0,
-        .len = -1,
-        .minlen = has_minimum ? minimum : 0,
-    };
+    struct fstrim_range r;
 
     slog("guest-fstrim called");
 
@@ -1329,36 +1415,59 @@ void qmp_guest_fstrim(bool has_minimum, int64_t minimum, Error **errp)
     build_fs_mount_list(&mounts, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
-        return;
+        return NULL;
     }
 
+    response = g_malloc0(sizeof(*response));
+
     QTAILQ_FOREACH(mount, &mounts, next) {
+        result = g_malloc0(sizeof(*result));
+        result->path = g_strdup(mount->dirname);
+
+        list = g_malloc0(sizeof(*list));
+        list->value = result;
+        list->next = response->paths;
+        response->paths = list;
+
         fd = qemu_open(mount->dirname, O_RDONLY);
         if (fd == -1) {
-            error_setg_errno(errp, errno, "failed to open %s", mount->dirname);
-            goto error;
+            result->error = g_strdup_printf("failed to open: %s",
+                                            strerror(errno));
+            result->has_error = true;
+            continue;
         }
 
-        /* We try to cull filesytems we know won't work in advance, but other
-         * filesytems may not implement fstrim for less obvious reasons.  These
-         * will report EOPNOTSUPP; we simply ignore these errors.  Any other
-         * error means an unexpected error, so return it in those cases.  In
-         * some other cases ENOTTY will be reported (e.g. CD-ROMs).
+        /* We try to cull filesystems we know won't work in advance, but other
+         * filesystems may not implement fstrim for less obvious reasons.
+         * These will report EOPNOTSUPP; while in some other cases ENOTTY
+         * will be reported (e.g. CD-ROMs).
+         * Any other error means an unexpected error.
          */
+        r.start = 0;
+        r.len = -1;
+        r.minlen = has_minimum ? minimum : 0;
         ret = ioctl(fd, FITRIM, &r);
         if (ret == -1) {
-            if (errno != ENOTTY && errno != EOPNOTSUPP) {
-                error_setg_errno(errp, errno, "failed to trim %s",
-                                 mount->dirname);
-                close(fd);
-                goto error;
+            result->has_error = true;
+            if (errno == ENOTTY || errno == EOPNOTSUPP) {
+                result->error = g_strdup("trim not supported");
+            } else {
+                result->error = g_strdup_printf("failed to trim: %s",
+                                                strerror(errno));
             }
+            close(fd);
+            continue;
         }
+
+        result->has_minimum = true;
+        result->minimum = r.minlen;
+        result->has_trimmed = true;
+        result->trimmed = r.len;
         close(fd);
     }
 
-error:
     free_fs_mount_list(&mounts);
+    return response;
 }
 #endif /* CONFIG_FSTRIM */
 
@@ -1367,102 +1476,209 @@ error:
 #define SUSPEND_SUPPORTED 0
 #define SUSPEND_NOT_SUPPORTED 1
 
-static void bios_supports_mode(const char *pmutils_bin, const char *pmutils_arg,
-                               const char *sysfile_str, Error **errp)
+typedef enum {
+    SUSPEND_MODE_DISK = 0,
+    SUSPEND_MODE_RAM = 1,
+    SUSPEND_MODE_HYBRID = 2,
+} SuspendMode;
+
+/*
+ * Executes a command in a child process using g_spawn_sync,
+ * returning an int >= 0 representing the exit status of the
+ * process.
+ *
+ * If the program wasn't found in path, returns -1.
+ *
+ * If a problem happened when creating the child process,
+ * returns -1 and errp is set.
+ */
+static int run_process_child(const char *command[], Error **errp)
+{
+    int exit_status, spawn_flag;
+    GError *g_err = NULL;
+    bool success;
+
+    spawn_flag = G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL |
+                 G_SPAWN_STDERR_TO_DEV_NULL;
+
+    success =  g_spawn_sync(NULL, (char **)command, environ, spawn_flag,
+                            NULL, NULL, NULL, NULL,
+                            &exit_status, &g_err);
+
+    if (success) {
+        return WEXITSTATUS(exit_status);
+    }
+
+    if (g_err && (g_err->code != G_SPAWN_ERROR_NOENT)) {
+        error_setg(errp, "failed to create child process, error '%s'",
+                   g_err->message);
+    }
+
+    g_error_free(g_err);
+    return -1;
+}
+
+static bool systemd_supports_mode(SuspendMode mode, Error **errp)
 {
     Error *local_err = NULL;
-    char *pmutils_path;
+    const char *systemctl_args[3] = {"systemd-hibernate", "systemd-suspend",
+                                     "systemd-hybrid-sleep"};
+    const char *cmd[4] = {"systemctl", "status", systemctl_args[mode], NULL};
+    int status;
+
+    status = run_process_child(cmd, &local_err);
+
+    /*
+     * systemctl status uses LSB return codes so we can expect
+     * status > 0 and be ok. To assert if the guest has support
+     * for the selected suspend mode, status should be < 4. 4 is
+     * the code for unknown service status, the return value when
+     * the service does not exist. A common value is status = 3
+     * (program is not running).
+     */
+    if (status > 0 && status < 4) {
+        return true;
+    }
+
+    if (local_err) {
+        error_propagate(errp, local_err);
+    }
+
+    return false;
+}
+
+static void systemd_suspend(SuspendMode mode, Error **errp)
+{
+    Error *local_err = NULL;
+    const char *systemctl_args[3] = {"hibernate", "suspend", "hybrid-sleep"};
+    const char *cmd[3] = {"systemctl", systemctl_args[mode], NULL};
+    int status;
+
+    status = run_process_child(cmd, &local_err);
+
+    if (status == 0) {
+        return;
+    }
+
+    if ((status == -1) && !local_err) {
+        error_setg(errp, "the helper program 'systemctl %s' was not found",
+                   systemctl_args[mode]);
+        return;
+    }
+
+    if (local_err) {
+        error_propagate(errp, local_err);
+    } else {
+        error_setg(errp, "the helper program 'systemctl %s' returned an "
+                   "unexpected exit status code (%d)",
+                   systemctl_args[mode], status);
+    }
+}
+
+static bool pmutils_supports_mode(SuspendMode mode, Error **errp)
+{
+    Error *local_err = NULL;
+    const char *pmutils_args[3] = {"--hibernate", "--suspend",
+                                   "--suspend-hybrid"};
+    const char *cmd[3] = {"pm-is-supported", pmutils_args[mode], NULL};
+    int status;
+
+    status = run_process_child(cmd, &local_err);
+
+    if (status == SUSPEND_SUPPORTED) {
+        return true;
+    }
+
+    if ((status == -1) && !local_err) {
+        return false;
+    }
+
+    if (local_err) {
+        error_propagate(errp, local_err);
+    } else {
+        error_setg(errp,
+                   "the helper program '%s' returned an unexpected exit"
+                   " status code (%d)", "pm-is-supported", status);
+    }
+
+    return false;
+}
+
+static void pmutils_suspend(SuspendMode mode, Error **errp)
+{
+    Error *local_err = NULL;
+    const char *pmutils_binaries[3] = {"pm-hibernate", "pm-suspend",
+                                       "pm-suspend-hybrid"};
+    const char *cmd[2] = {pmutils_binaries[mode], NULL};
+    int status;
+
+    status = run_process_child(cmd, &local_err);
+
+    if (status == 0) {
+        return;
+    }
+
+    if ((status == -1) && !local_err) {
+        error_setg(errp, "the helper program '%s' was not found",
+                   pmutils_binaries[mode]);
+        return;
+    }
+
+    if (local_err) {
+        error_propagate(errp, local_err);
+    } else {
+        error_setg(errp,
+                   "the helper program '%s' returned an unexpected exit"
+                   " status code (%d)", pmutils_binaries[mode], status);
+    }
+}
+
+static bool linux_sys_state_supports_mode(SuspendMode mode, Error **errp)
+{
+    const char *sysfile_strs[3] = {"disk", "mem", NULL};
+    const char *sysfile_str = sysfile_strs[mode];
+    char buf[32]; /* hopefully big enough */
+    int fd;
+    ssize_t ret;
+
+    if (!sysfile_str) {
+        error_setg(errp, "unknown guest suspend mode");
+        return false;
+    }
+
+    fd = open(LINUX_SYS_STATE_FILE, O_RDONLY);
+    if (fd < 0) {
+        return false;
+    }
+
+    ret = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (ret <= 0) {
+        return false;
+    }
+    buf[ret] = '\0';
+
+    if (strstr(buf, sysfile_str)) {
+        return true;
+    }
+    return false;
+}
+
+static void linux_sys_state_suspend(SuspendMode mode, Error **errp)
+{
+    Error *local_err = NULL;
+    const char *sysfile_strs[3] = {"disk", "mem", NULL};
+    const char *sysfile_str = sysfile_strs[mode];
     pid_t pid;
     int status;
 
-    pmutils_path = g_find_program_in_path(pmutils_bin);
+    if (!sysfile_str) {
+        error_setg(errp, "unknown guest suspend mode");
+        return;
+    }
 
     pid = fork();
     if (!pid) {
-        char buf[32]; /* hopefully big enough */
-        ssize_t ret;
-        int fd;
-
-        setsid();
-        reopen_fd_to_null(0);
-        reopen_fd_to_null(1);
-        reopen_fd_to_null(2);
-
-        if (pmutils_path) {
-            execle(pmutils_path, pmutils_bin, pmutils_arg, NULL, environ);
-        }
-
-        /*
-         * If we get here either pm-utils is not installed or execle() has
-         * failed. Let's try the manual method if the caller wants it.
-         */
-
-        if (!sysfile_str) {
-            _exit(SUSPEND_NOT_SUPPORTED);
-        }
-
-        fd = open(LINUX_SYS_STATE_FILE, O_RDONLY);
-        if (fd < 0) {
-            _exit(SUSPEND_NOT_SUPPORTED);
-        }
-
-        ret = read(fd, buf, sizeof(buf)-1);
-        if (ret <= 0) {
-            _exit(SUSPEND_NOT_SUPPORTED);
-        }
-        buf[ret] = '\0';
-
-        if (strstr(buf, sysfile_str)) {
-            _exit(SUSPEND_SUPPORTED);
-        }
-
-        _exit(SUSPEND_NOT_SUPPORTED);
-    } else if (pid < 0) {
-        error_setg_errno(errp, errno, "failed to create child process");
-        goto out;
-    }
-
-    ga_wait_child(pid, &status, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
-        goto out;
-    }
-
-    if (!WIFEXITED(status)) {
-        error_setg(errp, "child process has terminated abnormally");
-        goto out;
-    }
-
-    switch (WEXITSTATUS(status)) {
-    case SUSPEND_SUPPORTED:
-        goto out;
-    case SUSPEND_NOT_SUPPORTED:
-        error_setg(errp,
-                   "the requested suspend mode is not supported by the guest");
-        goto out;
-    default:
-        error_setg(errp,
-                   "the helper program '%s' returned an unexpected exit status"
-                   " code (%d)", pmutils_path, WEXITSTATUS(status));
-        goto out;
-    }
-
-out:
-    g_free(pmutils_path);
-}
-
-static void guest_suspend(const char *pmutils_bin, const char *sysfile_str,
-                          Error **errp)
-{
-    Error *local_err = NULL;
-    char *pmutils_path;
-    pid_t pid;
-    int status;
-
-    pmutils_path = g_find_program_in_path(pmutils_bin);
-
-    pid = fork();
-    if (pid == 0) {
         /* child */
         int fd;
 
@@ -1470,19 +1686,6 @@ static void guest_suspend(const char *pmutils_bin, const char *sysfile_str,
         reopen_fd_to_null(0);
         reopen_fd_to_null(1);
         reopen_fd_to_null(2);
-
-        if (pmutils_path) {
-            execle(pmutils_path, pmutils_bin, NULL, environ);
-        }
-
-        /*
-         * If we get here either pm-utils is not installed or execle() has
-         * failed. Let's try the manual method if the caller wants it.
-         */
-
-        if (!sysfile_str) {
-            _exit(EXIT_FAILURE);
-        }
 
         fd = open(LINUX_SYS_STATE_FILE, O_WRONLY);
         if (fd < 0) {
@@ -1496,67 +1699,74 @@ static void guest_suspend(const char *pmutils_bin, const char *sysfile_str,
         _exit(EXIT_SUCCESS);
     } else if (pid < 0) {
         error_setg_errno(errp, errno, "failed to create child process");
-        goto out;
+        return;
     }
 
     ga_wait_child(pid, &status, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
-        goto out;
-    }
-
-    if (!WIFEXITED(status)) {
-        error_setg(errp, "child process has terminated abnormally");
-        goto out;
+        return;
     }
 
     if (WEXITSTATUS(status)) {
         error_setg(errp, "child process has failed to suspend");
-        goto out;
     }
 
-out:
-    g_free(pmutils_path);
+}
+
+static void guest_suspend(SuspendMode mode, Error **errp)
+{
+    Error *local_err = NULL;
+    bool mode_supported = false;
+
+    if (systemd_supports_mode(mode, &local_err)) {
+        mode_supported = true;
+        systemd_suspend(mode, &local_err);
+    }
+
+    if (!local_err) {
+        return;
+    }
+
+    error_free(local_err);
+
+    if (pmutils_supports_mode(mode, &local_err)) {
+        mode_supported = true;
+        pmutils_suspend(mode, &local_err);
+    }
+
+    if (!local_err) {
+        return;
+    }
+
+    error_free(local_err);
+
+    if (linux_sys_state_supports_mode(mode, &local_err)) {
+        mode_supported = true;
+        linux_sys_state_suspend(mode, &local_err);
+    }
+
+    if (!mode_supported) {
+        error_setg(errp,
+                   "the requested suspend mode is not supported by the guest");
+    } else if (local_err) {
+        error_propagate(errp, local_err);
+    }
 }
 
 void qmp_guest_suspend_disk(Error **errp)
 {
-    Error *local_err = NULL;
-
-    bios_supports_mode("pm-is-supported", "--hibernate", "disk", &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
-        return;
-    }
-
-    guest_suspend("pm-hibernate", "disk", errp);
+    guest_suspend(SUSPEND_MODE_DISK, errp);
 }
 
 void qmp_guest_suspend_ram(Error **errp)
 {
-    Error *local_err = NULL;
-
-    bios_supports_mode("pm-is-supported", "--suspend", "mem", &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
-        return;
-    }
-
-    guest_suspend("pm-suspend", "mem", errp);
+    guest_suspend(SUSPEND_MODE_RAM, errp);
 }
 
 void qmp_guest_suspend_hybrid(Error **errp)
 {
-    Error *local_err = NULL;
-
-    bios_supports_mode("pm-is-supported", "--suspend-hybrid", NULL,
-                       &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
-        return;
-    }
-
-    guest_suspend("pm-suspend-hybrid", NULL, errp);
+    guest_suspend(SUSPEND_MODE_HYBRID, errp);
 }
 
 static GuestNetworkInterfaceList *
@@ -1570,6 +1780,67 @@ guest_find_interface(GuestNetworkInterfaceList *head,
     }
 
     return head;
+}
+
+static int guest_get_network_stats(const char *name,
+                       GuestNetworkInterfaceStat *stats)
+{
+    int name_len;
+    char const *devinfo = "/proc/net/dev";
+    FILE *fp;
+    char *line = NULL, *colon;
+    size_t n = 0;
+    fp = fopen(devinfo, "r");
+    if (!fp) {
+        return -1;
+    }
+    name_len = strlen(name);
+    while (getline(&line, &n, fp) != -1) {
+        long long dummy;
+        long long rx_bytes;
+        long long rx_packets;
+        long long rx_errs;
+        long long rx_dropped;
+        long long tx_bytes;
+        long long tx_packets;
+        long long tx_errs;
+        long long tx_dropped;
+        char *trim_line;
+        trim_line = g_strchug(line);
+        if (trim_line[0] == '\0') {
+            continue;
+        }
+        colon = strchr(trim_line, ':');
+        if (!colon) {
+            continue;
+        }
+        if (colon - name_len  == trim_line &&
+           strncmp(trim_line, name, name_len) == 0) {
+            if (sscanf(colon + 1,
+                "%lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld",
+                  &rx_bytes, &rx_packets, &rx_errs, &rx_dropped,
+                  &dummy, &dummy, &dummy, &dummy,
+                  &tx_bytes, &tx_packets, &tx_errs, &tx_dropped,
+                  &dummy, &dummy, &dummy, &dummy) != 16) {
+                continue;
+            }
+            stats->rx_bytes = rx_bytes;
+            stats->rx_packets = rx_packets;
+            stats->rx_errs = rx_errs;
+            stats->rx_dropped = rx_dropped;
+            stats->tx_bytes = tx_bytes;
+            stats->tx_packets = tx_packets;
+            stats->tx_errs = tx_errs;
+            stats->tx_dropped = tx_dropped;
+            fclose(fp);
+            g_free(line);
+            return 0;
+        }
+    }
+    fclose(fp);
+    g_free(line);
+    g_debug("/proc/net/dev: Interface '%s' not found", name);
+    return -1;
 }
 
 /*
@@ -1588,6 +1859,7 @@ GuestNetworkInterfaceList *qmp_guest_network_get_interfaces(Error **errp)
     for (ifa = ifap; ifa; ifa = ifa->ifa_next) {
         GuestNetworkInterfaceList *info;
         GuestIpAddressList **address_list = NULL, *address_item = NULL;
+        GuestNetworkInterfaceStat  *interface_stat = NULL;
         char addr4[INET_ADDRSTRLEN];
         char addr6[INET6_ADDRSTRLEN];
         int sock;
@@ -1707,7 +1979,17 @@ GuestNetworkInterfaceList *qmp_guest_network_get_interfaces(Error **errp)
 
         info->value->has_ip_addresses = true;
 
-
+        if (!info->value->has_statistics) {
+            interface_stat = g_malloc0(sizeof(*interface_stat));
+            if (guest_get_network_stats(info->value->name,
+                interface_stat) == -1) {
+                info->value->has_statistics = false;
+                g_free(interface_stat);
+            } else {
+                info->value->statistics = interface_stat;
+                info->value->has_statistics = true;
+            }
+        }
     }
 
     freeifaddrs(ifap);
@@ -1875,39 +2157,483 @@ int64_t qmp_guest_set_vcpus(GuestLogicalProcessorList *vcpus, Error **errp)
     return processed;
 }
 
+void qmp_guest_set_user_password(const char *username,
+                                 const char *password,
+                                 bool crypted,
+                                 Error **errp)
+{
+    Error *local_err = NULL;
+    char *passwd_path = NULL;
+    pid_t pid;
+    int status;
+    int datafd[2] = { -1, -1 };
+    char *rawpasswddata = NULL;
+    size_t rawpasswdlen;
+    char *chpasswddata = NULL;
+    size_t chpasswdlen;
+
+    rawpasswddata = (char *)qbase64_decode(password, -1, &rawpasswdlen, errp);
+    if (!rawpasswddata) {
+        return;
+    }
+    rawpasswddata = g_renew(char, rawpasswddata, rawpasswdlen + 1);
+    rawpasswddata[rawpasswdlen] = '\0';
+
+    if (strchr(rawpasswddata, '\n')) {
+        error_setg(errp, "forbidden characters in raw password");
+        goto out;
+    }
+
+    if (strchr(username, '\n') ||
+        strchr(username, ':')) {
+        error_setg(errp, "forbidden characters in username");
+        goto out;
+    }
+
+    chpasswddata = g_strdup_printf("%s:%s\n", username, rawpasswddata);
+    chpasswdlen = strlen(chpasswddata);
+
+    passwd_path = g_find_program_in_path("chpasswd");
+
+    if (!passwd_path) {
+        error_setg(errp, "cannot find 'passwd' program in PATH");
+        goto out;
+    }
+
+    if (pipe(datafd) < 0) {
+        error_setg(errp, "cannot create pipe FDs");
+        goto out;
+    }
+
+    pid = fork();
+    if (pid == 0) {
+        close(datafd[1]);
+        /* child */
+        setsid();
+        dup2(datafd[0], 0);
+        reopen_fd_to_null(1);
+        reopen_fd_to_null(2);
+
+        if (crypted) {
+            execle(passwd_path, "chpasswd", "-e", NULL, environ);
+        } else {
+            execle(passwd_path, "chpasswd", NULL, environ);
+        }
+        _exit(EXIT_FAILURE);
+    } else if (pid < 0) {
+        error_setg_errno(errp, errno, "failed to create child process");
+        goto out;
+    }
+    close(datafd[0]);
+    datafd[0] = -1;
+
+    if (qemu_write_full(datafd[1], chpasswddata, chpasswdlen) != chpasswdlen) {
+        error_setg_errno(errp, errno, "cannot write new account password");
+        goto out;
+    }
+    close(datafd[1]);
+    datafd[1] = -1;
+
+    ga_wait_child(pid, &status, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        goto out;
+    }
+
+    if (!WIFEXITED(status)) {
+        error_setg(errp, "child process has terminated abnormally");
+        goto out;
+    }
+
+    if (WEXITSTATUS(status)) {
+        error_setg(errp, "child process has failed to set user password");
+        goto out;
+    }
+
+out:
+    g_free(chpasswddata);
+    g_free(rawpasswddata);
+    g_free(passwd_path);
+    if (datafd[0] != -1) {
+        close(datafd[0]);
+    }
+    if (datafd[1] != -1) {
+        close(datafd[1]);
+    }
+}
+
+static void ga_read_sysfs_file(int dirfd, const char *pathname, char *buf,
+                               int size, Error **errp)
+{
+    int fd;
+    int res;
+
+    errno = 0;
+    fd = openat(dirfd, pathname, O_RDONLY);
+    if (fd == -1) {
+        error_setg_errno(errp, errno, "open sysfs file \"%s\"", pathname);
+        return;
+    }
+
+    res = pread(fd, buf, size, 0);
+    if (res == -1) {
+        error_setg_errno(errp, errno, "pread sysfs file \"%s\"", pathname);
+    } else if (res == 0) {
+        error_setg(errp, "pread sysfs file \"%s\": unexpected EOF", pathname);
+    }
+    close(fd);
+}
+
+static void ga_write_sysfs_file(int dirfd, const char *pathname,
+                                const char *buf, int size, Error **errp)
+{
+    int fd;
+
+    errno = 0;
+    fd = openat(dirfd, pathname, O_WRONLY);
+    if (fd == -1) {
+        error_setg_errno(errp, errno, "open sysfs file \"%s\"", pathname);
+        return;
+    }
+
+    if (pwrite(fd, buf, size, 0) == -1) {
+        error_setg_errno(errp, errno, "pwrite sysfs file \"%s\"", pathname);
+    }
+
+    close(fd);
+}
+
+/* Transfer online/offline status between @mem_blk and the guest system.
+ *
+ * On input either @errp or *@errp must be NULL.
+ *
+ * In system-to-@mem_blk direction, the following @mem_blk fields are accessed:
+ * - R: mem_blk->phys_index
+ * - W: mem_blk->online
+ * - W: mem_blk->can_offline
+ *
+ * In @mem_blk-to-system direction, the following @mem_blk fields are accessed:
+ * - R: mem_blk->phys_index
+ * - R: mem_blk->online
+ *-  R: mem_blk->can_offline
+ * Written members remain unmodified on error.
+ */
+static void transfer_memory_block(GuestMemoryBlock *mem_blk, bool sys2memblk,
+                                  GuestMemoryBlockResponse *result,
+                                  Error **errp)
+{
+    char *dirpath;
+    int dirfd;
+    char *status;
+    Error *local_err = NULL;
+
+    if (!sys2memblk) {
+        DIR *dp;
+
+        if (!result) {
+            error_setg(errp, "Internal error, 'result' should not be NULL");
+            return;
+        }
+        errno = 0;
+        dp = opendir("/sys/devices/system/memory/");
+         /* if there is no 'memory' directory in sysfs,
+         * we think this VM does not support online/offline memory block,
+         * any other solution?
+         */
+        if (!dp) {
+            if (errno == ENOENT) {
+                result->response =
+                    GUEST_MEMORY_BLOCK_RESPONSE_TYPE_OPERATION_NOT_SUPPORTED;
+            }
+            goto out1;
+        }
+        closedir(dp);
+    }
+
+    dirpath = g_strdup_printf("/sys/devices/system/memory/memory%" PRId64 "/",
+                              mem_blk->phys_index);
+    dirfd = open(dirpath, O_RDONLY | O_DIRECTORY);
+    if (dirfd == -1) {
+        if (sys2memblk) {
+            error_setg_errno(errp, errno, "open(\"%s\")", dirpath);
+        } else {
+            if (errno == ENOENT) {
+                result->response = GUEST_MEMORY_BLOCK_RESPONSE_TYPE_NOT_FOUND;
+            } else {
+                result->response =
+                    GUEST_MEMORY_BLOCK_RESPONSE_TYPE_OPERATION_FAILED;
+            }
+        }
+        g_free(dirpath);
+        goto out1;
+    }
+    g_free(dirpath);
+
+    status = g_malloc0(10);
+    ga_read_sysfs_file(dirfd, "state", status, 10, &local_err);
+    if (local_err) {
+        /* treat with sysfs file that not exist in old kernel */
+        if (errno == ENOENT) {
+            error_free(local_err);
+            if (sys2memblk) {
+                mem_blk->online = true;
+                mem_blk->can_offline = false;
+            } else if (!mem_blk->online) {
+                result->response =
+                    GUEST_MEMORY_BLOCK_RESPONSE_TYPE_OPERATION_NOT_SUPPORTED;
+            }
+        } else {
+            if (sys2memblk) {
+                error_propagate(errp, local_err);
+            } else {
+                result->response =
+                    GUEST_MEMORY_BLOCK_RESPONSE_TYPE_OPERATION_FAILED;
+            }
+        }
+        goto out2;
+    }
+
+    if (sys2memblk) {
+        char removable = '0';
+
+        mem_blk->online = (strncmp(status, "online", 6) == 0);
+
+        ga_read_sysfs_file(dirfd, "removable", &removable, 1, &local_err);
+        if (local_err) {
+            /* if no 'removable' file, it doesn't support offline mem blk */
+            if (errno == ENOENT) {
+                error_free(local_err);
+                mem_blk->can_offline = false;
+            } else {
+                error_propagate(errp, local_err);
+            }
+        } else {
+            mem_blk->can_offline = (removable != '0');
+        }
+    } else {
+        if (mem_blk->online != (strncmp(status, "online", 6) == 0)) {
+            const char *new_state = mem_blk->online ? "online" : "offline";
+
+            ga_write_sysfs_file(dirfd, "state", new_state, strlen(new_state),
+                                &local_err);
+            if (local_err) {
+                error_free(local_err);
+                result->response =
+                    GUEST_MEMORY_BLOCK_RESPONSE_TYPE_OPERATION_FAILED;
+                goto out2;
+            }
+
+            result->response = GUEST_MEMORY_BLOCK_RESPONSE_TYPE_SUCCESS;
+            result->has_error_code = false;
+        } /* otherwise pretend successful re-(on|off)-lining */
+    }
+    g_free(status);
+    close(dirfd);
+    return;
+
+out2:
+    g_free(status);
+    close(dirfd);
+out1:
+    if (!sys2memblk) {
+        result->has_error_code = true;
+        result->error_code = errno;
+    }
+}
+
+GuestMemoryBlockList *qmp_guest_get_memory_blocks(Error **errp)
+{
+    GuestMemoryBlockList *head, **link;
+    Error *local_err = NULL;
+    struct dirent *de;
+    DIR *dp;
+
+    head = NULL;
+    link = &head;
+
+    dp = opendir("/sys/devices/system/memory/");
+    if (!dp) {
+        /* it's ok if this happens to be a system that doesn't expose
+         * memory blocks via sysfs, but otherwise we should report
+         * an error
+         */
+        if (errno != ENOENT) {
+            error_setg_errno(errp, errno, "Can't open directory"
+                             "\"/sys/devices/system/memory/\"");
+        }
+        return NULL;
+    }
+
+    /* Note: the phys_index of memory block may be discontinuous,
+     * this is because a memblk is the unit of the Sparse Memory design, which
+     * allows discontinuous memory ranges (ex. NUMA), so here we should
+     * traverse the memory block directory.
+     */
+    while ((de = readdir(dp)) != NULL) {
+        GuestMemoryBlock *mem_blk;
+        GuestMemoryBlockList *entry;
+
+        if ((strncmp(de->d_name, "memory", 6) != 0) ||
+            !(de->d_type & DT_DIR)) {
+            continue;
+        }
+
+        mem_blk = g_malloc0(sizeof *mem_blk);
+        /* The d_name is "memoryXXX",  phys_index is block id, same as XXX */
+        mem_blk->phys_index = strtoul(&de->d_name[6], NULL, 10);
+        mem_blk->has_can_offline = true; /* lolspeak ftw */
+        transfer_memory_block(mem_blk, true, NULL, &local_err);
+
+        entry = g_malloc0(sizeof *entry);
+        entry->value = mem_blk;
+
+        *link = entry;
+        link = &entry->next;
+    }
+
+    closedir(dp);
+    if (local_err == NULL) {
+        /* there's no guest with zero memory blocks */
+        if (head == NULL) {
+            error_setg(errp, "guest reported zero memory blocks!");
+        }
+        return head;
+    }
+
+    qapi_free_GuestMemoryBlockList(head);
+    error_propagate(errp, local_err);
+    return NULL;
+}
+
+GuestMemoryBlockResponseList *
+qmp_guest_set_memory_blocks(GuestMemoryBlockList *mem_blks, Error **errp)
+{
+    GuestMemoryBlockResponseList *head, **link;
+    Error *local_err = NULL;
+
+    head = NULL;
+    link = &head;
+
+    while (mem_blks != NULL) {
+        GuestMemoryBlockResponse *result;
+        GuestMemoryBlockResponseList *entry;
+        GuestMemoryBlock *current_mem_blk = mem_blks->value;
+
+        result = g_malloc0(sizeof(*result));
+        result->phys_index = current_mem_blk->phys_index;
+        transfer_memory_block(current_mem_blk, false, result, &local_err);
+        if (local_err) { /* should never happen */
+            goto err;
+        }
+        entry = g_malloc0(sizeof *entry);
+        entry->value = result;
+
+        *link = entry;
+        link = &entry->next;
+        mem_blks = mem_blks->next;
+    }
+
+    return head;
+err:
+    qapi_free_GuestMemoryBlockResponseList(head);
+    error_propagate(errp, local_err);
+    return NULL;
+}
+
+GuestMemoryBlockInfo *qmp_guest_get_memory_block_info(Error **errp)
+{
+    Error *local_err = NULL;
+    char *dirpath;
+    int dirfd;
+    char *buf;
+    GuestMemoryBlockInfo *info;
+
+    dirpath = g_strdup_printf("/sys/devices/system/memory/");
+    dirfd = open(dirpath, O_RDONLY | O_DIRECTORY);
+    if (dirfd == -1) {
+        error_setg_errno(errp, errno, "open(\"%s\")", dirpath);
+        g_free(dirpath);
+        return NULL;
+    }
+    g_free(dirpath);
+
+    buf = g_malloc0(20);
+    ga_read_sysfs_file(dirfd, "block_size_bytes", buf, 20, &local_err);
+    close(dirfd);
+    if (local_err) {
+        g_free(buf);
+        error_propagate(errp, local_err);
+        return NULL;
+    }
+
+    info = g_new0(GuestMemoryBlockInfo, 1);
+    info->size = strtol(buf, NULL, 16); /* the unit is bytes */
+
+    g_free(buf);
+
+    return info;
+}
+
 #else /* defined(__linux__) */
 
 void qmp_guest_suspend_disk(Error **errp)
 {
-    error_set(errp, QERR_UNSUPPORTED);
+    error_setg(errp, QERR_UNSUPPORTED);
 }
 
 void qmp_guest_suspend_ram(Error **errp)
 {
-    error_set(errp, QERR_UNSUPPORTED);
+    error_setg(errp, QERR_UNSUPPORTED);
 }
 
 void qmp_guest_suspend_hybrid(Error **errp)
 {
-    error_set(errp, QERR_UNSUPPORTED);
+    error_setg(errp, QERR_UNSUPPORTED);
 }
 
 GuestNetworkInterfaceList *qmp_guest_network_get_interfaces(Error **errp)
 {
-    error_set(errp, QERR_UNSUPPORTED);
+    error_setg(errp, QERR_UNSUPPORTED);
     return NULL;
 }
 
 GuestLogicalProcessorList *qmp_guest_get_vcpus(Error **errp)
 {
-    error_set(errp, QERR_UNSUPPORTED);
+    error_setg(errp, QERR_UNSUPPORTED);
     return NULL;
 }
 
 int64_t qmp_guest_set_vcpus(GuestLogicalProcessorList *vcpus, Error **errp)
 {
-    error_set(errp, QERR_UNSUPPORTED);
+    error_setg(errp, QERR_UNSUPPORTED);
     return -1;
+}
+
+void qmp_guest_set_user_password(const char *username,
+                                 const char *password,
+                                 bool crypted,
+                                 Error **errp)
+{
+    error_setg(errp, QERR_UNSUPPORTED);
+}
+
+GuestMemoryBlockList *qmp_guest_get_memory_blocks(Error **errp)
+{
+    error_setg(errp, QERR_UNSUPPORTED);
+    return NULL;
+}
+
+GuestMemoryBlockResponseList *
+qmp_guest_set_memory_blocks(GuestMemoryBlockList *mem_blks, Error **errp)
+{
+    error_setg(errp, QERR_UNSUPPORTED);
+    return NULL;
+}
+
+GuestMemoryBlockInfo *qmp_guest_get_memory_block_info(Error **errp)
+{
+    error_setg(errp, QERR_UNSUPPORTED);
+    return NULL;
 }
 
 #endif
@@ -1916,20 +2642,20 @@ int64_t qmp_guest_set_vcpus(GuestLogicalProcessorList *vcpus, Error **errp)
 
 GuestFilesystemInfoList *qmp_guest_get_fsinfo(Error **errp)
 {
-    error_set(errp, QERR_UNSUPPORTED);
+    error_setg(errp, QERR_UNSUPPORTED);
     return NULL;
 }
 
 GuestFsfreezeStatus qmp_guest_fsfreeze_status(Error **errp)
 {
-    error_set(errp, QERR_UNSUPPORTED);
+    error_setg(errp, QERR_UNSUPPORTED);
 
     return 0;
 }
 
 int64_t qmp_guest_fsfreeze_freeze(Error **errp)
 {
-    error_set(errp, QERR_UNSUPPORTED);
+    error_setg(errp, QERR_UNSUPPORTED);
 
     return 0;
 }
@@ -1938,23 +2664,25 @@ int64_t qmp_guest_fsfreeze_freeze_list(bool has_mountpoints,
                                        strList *mountpoints,
                                        Error **errp)
 {
-    error_set(errp, QERR_UNSUPPORTED);
+    error_setg(errp, QERR_UNSUPPORTED);
 
     return 0;
 }
 
 int64_t qmp_guest_fsfreeze_thaw(Error **errp)
 {
-    error_set(errp, QERR_UNSUPPORTED);
+    error_setg(errp, QERR_UNSUPPORTED);
 
     return 0;
 }
 #endif /* CONFIG_FSFREEZE */
 
 #if !defined(CONFIG_FSTRIM)
-void qmp_guest_fstrim(bool has_minimum, int64_t minimum, Error **errp)
+GuestFilesystemTrimResponse *
+qmp_guest_fstrim(bool has_minimum, int64_t minimum, Error **errp)
 {
-    error_set(errp, QERR_UNSUPPORTED);
+    error_setg(errp, QERR_UNSUPPORTED);
+    return NULL;
 }
 #endif
 
@@ -1966,11 +2694,13 @@ GList *ga_command_blacklist_init(GList *blacklist)
         const char *list[] = {
             "guest-suspend-disk", "guest-suspend-ram",
             "guest-suspend-hybrid", "guest-network-get-interfaces",
-            "guest-get-vcpus", "guest-set-vcpus", NULL};
+            "guest-get-vcpus", "guest-set-vcpus",
+            "guest-get-memory-blocks", "guest-set-memory-blocks",
+            "guest-get-memory-block-size", NULL};
         char **p = (char **)list;
 
         while (*p) {
-            blacklist = g_list_append(blacklist, *p++);
+            blacklist = g_list_append(blacklist, g_strdup(*p++));
         }
     }
 #endif
@@ -1984,13 +2714,13 @@ GList *ga_command_blacklist_init(GList *blacklist)
         char **p = (char **)list;
 
         while (*p) {
-            blacklist = g_list_append(blacklist, *p++);
+            blacklist = g_list_append(blacklist, g_strdup(*p++));
         }
     }
 #endif
 
 #if !defined(CONFIG_FSTRIM)
-    blacklist = g_list_append(blacklist, (char *)"guest-fstrim");
+    blacklist = g_list_append(blacklist, g_strdup("guest-fstrim"));
 #endif
 
     return blacklist;
@@ -2002,5 +2732,214 @@ void ga_command_state_init(GAState *s, GACommandState *cs)
 #if defined(CONFIG_FSFREEZE)
     ga_command_state_add(cs, NULL, guest_fsfreeze_cleanup);
 #endif
-    ga_command_state_add(cs, guest_file_init, NULL);
+}
+
+#ifdef HAVE_UTMPX
+
+#define QGA_MICRO_SECOND_TO_SECOND 1000000
+
+static double ga_get_login_time(struct utmpx *user_info)
+{
+    double seconds = (double)user_info->ut_tv.tv_sec;
+    double useconds = (double)user_info->ut_tv.tv_usec;
+    useconds /= QGA_MICRO_SECOND_TO_SECOND;
+    return seconds + useconds;
+}
+
+GuestUserList *qmp_guest_get_users(Error **err)
+{
+    GHashTable *cache = NULL;
+    GuestUserList *head = NULL, *cur_item = NULL;
+    struct utmpx *user_info = NULL;
+    gpointer value = NULL;
+    GuestUser *user = NULL;
+    GuestUserList *item = NULL;
+    double login_time = 0;
+
+    cache = g_hash_table_new(g_str_hash, g_str_equal);
+    setutxent();
+
+    for (;;) {
+        user_info = getutxent();
+        if (user_info == NULL) {
+            break;
+        } else if (user_info->ut_type != USER_PROCESS) {
+            continue;
+        } else if (g_hash_table_contains(cache, user_info->ut_user)) {
+            value = g_hash_table_lookup(cache, user_info->ut_user);
+            user = (GuestUser *)value;
+            login_time = ga_get_login_time(user_info);
+            /* We're ensuring the earliest login time to be sent */
+            if (login_time < user->login_time) {
+                user->login_time = login_time;
+            }
+            continue;
+        }
+
+        item = g_new0(GuestUserList, 1);
+        item->value = g_new0(GuestUser, 1);
+        item->value->user = g_strdup(user_info->ut_user);
+        item->value->login_time = ga_get_login_time(user_info);
+
+        g_hash_table_insert(cache, item->value->user, item->value);
+
+        if (!cur_item) {
+            head = cur_item = item;
+        } else {
+            cur_item->next = item;
+            cur_item = item;
+        }
+    }
+    endutxent();
+    g_hash_table_destroy(cache);
+    return head;
+}
+
+#else
+
+GuestUserList *qmp_guest_get_users(Error **errp)
+{
+    error_setg(errp, QERR_UNSUPPORTED);
+    return NULL;
+}
+
+#endif
+
+/* Replace escaped special characters with theire real values. The replacement
+ * is done in place -- returned value is in the original string.
+ */
+static void ga_osrelease_replace_special(gchar *value)
+{
+    gchar *p, *p2, quote;
+
+    /* Trim the string at first space or semicolon if it is not enclosed in
+     * single or double quotes. */
+    if ((value[0] != '"') || (value[0] == '\'')) {
+        p = strchr(value, ' ');
+        if (p != NULL) {
+            *p = 0;
+        }
+        p = strchr(value, ';');
+        if (p != NULL) {
+            *p = 0;
+        }
+        return;
+    }
+
+    quote = value[0];
+    p2 = value;
+    p = value + 1;
+    while (*p != 0) {
+        if (*p == '\\') {
+            p++;
+            switch (*p) {
+            case '$':
+            case '\'':
+            case '"':
+            case '\\':
+            case '`':
+                break;
+            default:
+                /* Keep literal backslash followed by whatever is there */
+                p--;
+                break;
+            }
+        } else if (*p == quote) {
+            *p2 = 0;
+            break;
+        }
+        *(p2++) = *(p++);
+    }
+}
+
+static GKeyFile *ga_parse_osrelease(const char *fname)
+{
+    gchar *content = NULL;
+    gchar *content2 = NULL;
+    GError *err = NULL;
+    GKeyFile *keys = g_key_file_new();
+    const char *group = "[os-release]\n";
+
+    if (!g_file_get_contents(fname, &content, NULL, &err)) {
+        slog("failed to read '%s', error: %s", fname, err->message);
+        goto fail;
+    }
+
+    if (!g_utf8_validate(content, -1, NULL)) {
+        slog("file is not utf-8 encoded: %s", fname);
+        goto fail;
+    }
+    content2 = g_strdup_printf("%s%s", group, content);
+
+    if (!g_key_file_load_from_data(keys, content2, -1, G_KEY_FILE_NONE,
+                                   &err)) {
+        slog("failed to parse file '%s', error: %s", fname, err->message);
+        goto fail;
+    }
+
+    g_free(content);
+    g_free(content2);
+    return keys;
+
+fail:
+    g_error_free(err);
+    g_free(content);
+    g_free(content2);
+    g_key_file_free(keys);
+    return NULL;
+}
+
+GuestOSInfo *qmp_guest_get_osinfo(Error **errp)
+{
+    GuestOSInfo *info = NULL;
+    struct utsname kinfo;
+    GKeyFile *osrelease = NULL;
+    const char *qga_os_release = g_getenv("QGA_OS_RELEASE");
+
+    info = g_new0(GuestOSInfo, 1);
+
+    if (uname(&kinfo) != 0) {
+        error_setg_errno(errp, errno, "uname failed");
+    } else {
+        info->has_kernel_version = true;
+        info->kernel_version = g_strdup(kinfo.version);
+        info->has_kernel_release = true;
+        info->kernel_release = g_strdup(kinfo.release);
+        info->has_machine = true;
+        info->machine = g_strdup(kinfo.machine);
+    }
+
+    if (qga_os_release != NULL) {
+        osrelease = ga_parse_osrelease(qga_os_release);
+    } else {
+        osrelease = ga_parse_osrelease("/etc/os-release");
+        if (osrelease == NULL) {
+            osrelease = ga_parse_osrelease("/usr/lib/os-release");
+        }
+    }
+
+    if (osrelease != NULL) {
+        char *value;
+
+#define GET_FIELD(field, osfield) do { \
+    value = g_key_file_get_value(osrelease, "os-release", osfield, NULL); \
+    if (value != NULL) { \
+        ga_osrelease_replace_special(value); \
+        info->has_ ## field = true; \
+        info->field = value; \
+    } \
+} while (0)
+        GET_FIELD(id, "ID");
+        GET_FIELD(name, "NAME");
+        GET_FIELD(pretty_name, "PRETTY_NAME");
+        GET_FIELD(version, "VERSION");
+        GET_FIELD(version_id, "VERSION_ID");
+        GET_FIELD(variant, "VARIANT");
+        GET_FIELD(variant_id, "VARIANT_ID");
+#undef GET_FIELD
+
+        g_key_file_free(osrelease);
+    }
+
+    return info;
 }

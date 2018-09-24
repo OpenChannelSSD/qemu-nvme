@@ -17,15 +17,12 @@
 #ifndef QEMU_H
 #define QEMU_H
 
-#include <signal.h>
-#include <string.h>
 
 #include "cpu.h"
 #include "exec/cpu_ldst.h"
 
 #undef DEBUG_REMAP
 #ifdef DEBUG_REMAP
-#include <stdlib.h>
 #endif /* DEBUG_REMAP */
 
 #include "exec/user/abitypes.h"
@@ -38,7 +35,7 @@ enum BSDType {
 extern enum BSDType bsd_type;
 
 #include "syscall_defs.h"
-#include "syscall.h"
+#include "target_syscall.h"
 #include "target_signal.h"
 #include "exec/gdbstub.h"
 
@@ -87,6 +84,8 @@ struct emulated_sigtable {
 /* NOTE: we force a big alignment so that the stack stored after is
    aligned too */
 typedef struct TaskState {
+    pid_t ts_tid;     /* tid (or pid) of this task */
+
     struct TaskState *next;
     int used; /* non zero if used */
     struct image_info *info;
@@ -101,9 +100,7 @@ typedef struct TaskState {
 
 void init_task_state(TaskState *ts);
 extern const char *qemu_uname_release;
-#if defined(CONFIG_USE_GUEST_BASE)
 extern unsigned long mmap_min_addr;
-#endif
 
 /* ??? See if we can avoid exposing so much of the loader internals.  */
 /*
@@ -213,14 +210,8 @@ abi_long target_mremap(abi_ulong old_addr, abi_ulong old_size,
                        abi_ulong new_addr);
 int target_msync(abi_ulong start, abi_ulong len, int flags);
 extern unsigned long last_brk;
-void mmap_lock(void);
-void mmap_unlock(void);
-void cpu_list_lock(void);
-void cpu_list_unlock(void);
-#if defined(CONFIG_USE_NPTL)
 void mmap_fork_start(void);
 void mmap_fork_end(int child);
-#endif
 
 /* main.c */
 extern unsigned long x86_stack_size;
@@ -364,7 +355,7 @@ static inline void *lock_user(int type, abi_ulong guest_addr, long len, int copy
 #ifdef DEBUG_REMAP
     {
         void *addr;
-        addr = malloc(len);
+        addr = g_malloc(len);
         if (copy)
             memcpy(addr, g2h(guest_addr), len);
         else
@@ -390,7 +381,7 @@ static inline void unlock_user(void *host_ptr, abi_ulong guest_addr,
         return;
     if (len > 0)
         memcpy(g2h(guest_addr), host_ptr, len);
-    free(host_ptr);
+    g_free(host_ptr);
 #endif
 }
 

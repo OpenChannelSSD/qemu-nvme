@@ -9,7 +9,7 @@
  * This work is licensed under the terms of the GNU LGPL, version 2.1 or later.
  * See the COPYING.LIB file in the top-level directory.
  */
-#include <glib.h>
+#include "qemu/osdep.h"
 
 #include "qom/object.h"
 #include "qemu/module.h"
@@ -76,6 +76,7 @@ static void test_interface_impl(const char *type)
 
     g_assert(iobj);
     g_assert(ioc->test == PATTERN);
+    object_unref(obj);
 }
 
 static void interface_direct_test(void)

@@ -18,14 +18,19 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "sysemu/block-backend.h"
-#include "sysemu/blockdev.h"
+#include "qemu/osdep.h"
+#include "qemu/error-report.h"
+#include "qapi/error.h"
+#include "qemu-common.h"
+#include "cpu.h"
+#include "sysemu/qtest.h"
+#include "hw/boards.h"
 #include "hw/hw.h"
 #include "hw/arm/arm.h"
 #include "hw/arm/omap.h"
 #include "sysemu/sysemu.h"
 #include "qemu/timer.h"
-#include "sysemu/char.h"
+#include "chardev/char-fe.h"
 #include "hw/block/flash.h"
 #include "hw/arm/soc_dma.h"
 #include "hw/sysbus.h"
@@ -447,7 +452,8 @@ static void omap_eac_write(void *opaque, hwaddr addr,
     struct omap_eac_s *s = (struct omap_eac_s *) opaque;
 
     if (size != 2) {
-        return omap_badwidth_write16(opaque, addr, value);
+        omap_badwidth_write16(opaque, addr, value);
+        return;
     }
 
     switch (addr) {
@@ -594,8 +600,7 @@ static const MemoryRegionOps omap_eac_ops = {
 static struct omap_eac_s *omap_eac_init(struct omap_target_agent_s *ta,
                 qemu_irq irq, qemu_irq *drq, omap_clk fclk, omap_clk iclk)
 {
-    struct omap_eac_s *s = (struct omap_eac_s *)
-            g_malloc0(sizeof(struct omap_eac_s));
+    struct omap_eac_s *s = g_new0(struct omap_eac_s, 1);
 
     s->irq = irq;
     s->codec.rxdrq = *drq ++;
@@ -616,7 +621,7 @@ struct omap_sti_s {
     qemu_irq irq;
     MemoryRegion iomem;
     MemoryRegion iomem_fifo;
-    CharDriverState *chr;
+    CharBackend chr;
 
     uint32_t sysconfig;
     uint32_t systest;
@@ -692,7 +697,8 @@ static void omap_sti_write(void *opaque, hwaddr addr,
     struct omap_sti_s *s = (struct omap_sti_s *) opaque;
 
     if (size != 4) {
-        return omap_badwidth_write32(opaque, addr, value);
+        omap_badwidth_write32(opaque, addr, value);
+        return;
     }
 
     switch (addr) {
@@ -757,19 +763,23 @@ static void omap_sti_fifo_write(void *opaque, hwaddr addr,
     uint8_t byte = value;
 
     if (size != 1) {
-        return omap_badwidth_write8(opaque, addr, size);
+        omap_badwidth_write8(opaque, addr, size);
+        return;
     }
 
     if (ch == STI_TRACE_CONTROL_CHANNEL) {
         /* Flush channel <i>value</i>.  */
-        qemu_chr_fe_write(s->chr, (const uint8_t *) "\r", 1);
+        /* XXX this blocks entire thread. Rewrite to use
+         * qemu_chr_fe_write and background I/O callbacks */
+        qemu_chr_fe_write_all(&s->chr, (const uint8_t *) "\r", 1);
     } else if (ch == STI_TRACE_CONSOLE_CHANNEL || 1) {
         if (value == 0xc0 || value == 0xc3) {
             /* Open channel <i>ch</i>.  */
-        } else if (value == 0x00)
-            qemu_chr_fe_write(s->chr, (const uint8_t *) "\n", 1);
-        else
-            qemu_chr_fe_write(s->chr, &byte, 1);
+        } else if (value == 0x00) {
+            qemu_chr_fe_write_all(&s->chr, (const uint8_t *) "\n", 1);
+        } else {
+            qemu_chr_fe_write_all(&s->chr, &byte, 1);
+        }
     }
 }
 
@@ -782,15 +792,15 @@ static const MemoryRegionOps omap_sti_fifo_ops = {
 static struct omap_sti_s *omap_sti_init(struct omap_target_agent_s *ta,
                 MemoryRegion *sysmem,
                 hwaddr channel_base, qemu_irq irq, omap_clk clk,
-                CharDriverState *chr)
+                Chardev *chr)
 {
-    struct omap_sti_s *s = (struct omap_sti_s *)
-            g_malloc0(sizeof(struct omap_sti_s));
+    struct omap_sti_s *s = g_new0(struct omap_sti_s, 1);
 
     s->irq = irq;
     omap_sti_reset(s);
 
-    s->chr = chr ?: qemu_chr_new("null", "null", NULL);
+    qemu_chr_fe_init(&s->chr, chr ?: qemu_chr_new("null", "null"),
+                     &error_abort);
 
     memory_region_init_io(&s->iomem, NULL, &omap_sti_ops, s, "omap.sti",
                           omap_l4_region_size(ta, 0));
@@ -1302,7 +1312,7 @@ static void omap_prcm_apll_update(struct omap_prcm_s *s)
 
     if (mode[0] == 1 || mode[0] == 2 || mode[1] == 1 || mode[1] == 2)
         fprintf(stderr, "%s: bad EN_54M_PLL or bad EN_96M_PLL\n",
-                        __FUNCTION__);
+                        __func__);
 }
 
 static void omap_prcm_dpll_update(struct omap_prcm_s *s)
@@ -1321,7 +1331,7 @@ static void omap_prcm_dpll_update(struct omap_prcm_s *s)
     s->dpll_lock = 0;
     switch (mode) {
     case 0:
-        fprintf(stderr, "%s: bad EN_DPLL\n", __FUNCTION__);
+        fprintf(stderr, "%s: bad EN_DPLL\n", __func__);
         break;
     case 1:	/* Low-power bypass mode (Default) */
     case 2:	/* Fast-relock bypass mode */
@@ -1348,7 +1358,7 @@ static void omap_prcm_dpll_update(struct omap_prcm_s *s)
         omap_clk_reparent(core, dpll_x2);
         break;
     case 3:
-        fprintf(stderr, "%s: bad CORE_CLK_SRC\n", __FUNCTION__);
+        fprintf(stderr, "%s: bad CORE_CLK_SRC\n", __func__);
         break;
     }
 }
@@ -1359,7 +1369,8 @@ static void omap_prcm_write(void *opaque, hwaddr addr,
     struct omap_prcm_s *s = (struct omap_prcm_s *) opaque;
 
     if (size != 4) {
-        return omap_badwidth_write32(opaque, addr, value);
+        omap_badwidth_write32(opaque, addr, value);
+        return;
     }
 
     switch (addr) {
@@ -1599,7 +1610,7 @@ static void omap_prcm_write(void *opaque, hwaddr addr,
     case 0x450:	/* RM_RSTCTRL_WKUP */
         /* TODO: reset */
         if (value & 2)
-            qemu_system_reset_request();
+            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
         break;
     case 0x454:	/* RM_RSTTIME_WKUP */
         s->rsttime_wkup = value & 0x1fff;
@@ -1617,7 +1628,7 @@ static void omap_prcm_write(void *opaque, hwaddr addr,
     case 0x500:	/* CM_CLKEN_PLL */
         if (value & 0xffffff30)
             fprintf(stderr, "%s: write 0s in CM_CLKEN_PLL for "
-                            "future compatibility\n", __FUNCTION__);
+                            "future compatibility\n", __func__);
         if ((s->clken[9] ^ value) & 0xcc) {
             s->clken[9] &= ~0xcc;
             s->clken[9] |= value & 0xcc;
@@ -1636,7 +1647,7 @@ static void omap_prcm_write(void *opaque, hwaddr addr,
     case 0x540:	/* CM_CLKSEL1_PLL */
         if (value & 0xfc4000d7)
             fprintf(stderr, "%s: write 0s in CM_CLKSEL1_PLL for "
-                            "future compatibility\n", __FUNCTION__);
+                            "future compatibility\n", __func__);
         if ((s->clksel[5] ^ value) & 0x003fff00) {
             s->clksel[5] = value & 0x03bfff28;
             omap_prcm_dpll_update(s);
@@ -1648,7 +1659,7 @@ static void omap_prcm_write(void *opaque, hwaddr addr,
     case 0x544:	/* CM_CLKSEL2_PLL */
         if (value & ~3)
             fprintf(stderr, "%s: write 0s in CM_CLKSEL2_PLL[31:2] for "
-                            "future compatibility\n", __FUNCTION__);
+                            "future compatibility\n", __func__);
         if (s->clksel[6] != (value & 3)) {
             s->clksel[6] = value & 3;
             omap_prcm_dpll_update(s);
@@ -1801,8 +1812,7 @@ static struct omap_prcm_s *omap_prcm_init(struct omap_target_agent_s *ta,
                 qemu_irq mpu_int, qemu_irq dsp_int, qemu_irq iva_int,
                 struct omap_mpu_state_s *mpu)
 {
-    struct omap_prcm_s *s = (struct omap_prcm_s *)
-            g_malloc0(sizeof(struct omap_prcm_s));
+    struct omap_prcm_s *s = g_new0(struct omap_prcm_s, 1);
 
     s->irq[0] = mpu_int;
     s->irq[1] = dsp_int;
@@ -2077,19 +2087,44 @@ static void omap_sysctl_write(void *opaque, hwaddr addr,
     }
 }
 
+static uint64_t omap_sysctl_readfn(void *opaque, hwaddr addr,
+                                   unsigned size)
+{
+    switch (size) {
+    case 1:
+        return omap_sysctl_read8(opaque, addr);
+    case 2:
+        return omap_badwidth_read32(opaque, addr); /* TODO */
+    case 4:
+        return omap_sysctl_read(opaque, addr);
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void omap_sysctl_writefn(void *opaque, hwaddr addr,
+                                uint64_t value, unsigned size)
+{
+    switch (size) {
+    case 1:
+        omap_sysctl_write8(opaque, addr, value);
+        break;
+    case 2:
+        omap_badwidth_write32(opaque, addr, value); /* TODO */
+        break;
+    case 4:
+        omap_sysctl_write(opaque, addr, value);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
 static const MemoryRegionOps omap_sysctl_ops = {
-    .old_mmio = {
-        .read = {
-            omap_sysctl_read8,
-            omap_badwidth_read32,	/* TODO */
-            omap_sysctl_read,
-        },
-        .write = {
-            omap_sysctl_write8,
-            omap_badwidth_write32,	/* TODO */
-            omap_sysctl_write,
-        },
-    },
+    .read = omap_sysctl_readfn,
+    .write = omap_sysctl_writefn,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
@@ -2180,8 +2215,7 @@ static void omap_sysctl_reset(struct omap_sysctl_s *s)
 static struct omap_sysctl_s *omap_sysctl_init(struct omap_target_agent_s *ta,
                 omap_clk iclk, struct omap_mpu_state_s *mpu)
 {
-    struct omap_sysctl_s *s = (struct omap_sysctl_s *)
-            g_malloc0(sizeof(struct omap_sysctl_s));
+    struct omap_sysctl_s *s = g_new0(struct omap_sysctl_s, 1);
 
     s->mpu = mpu;
     omap_sysctl_reset(s);
@@ -2241,10 +2275,9 @@ static const struct dma_irq_map omap2_dma_irq_map[] = {
 
 struct omap_mpu_state_s *omap2420_mpu_init(MemoryRegion *sysmem,
                 unsigned long sdram_size,
-                const char *core)
+                const char *cpu_type)
 {
-    struct omap_mpu_state_s *s = (struct omap_mpu_state_s *)
-            g_malloc0(sizeof(struct omap_mpu_state_s));
+    struct omap_mpu_state_s *s = g_new0(struct omap_mpu_state_s, 1);
     qemu_irq dma_irqs[4];
     DriveInfo *dinfo;
     int i;
@@ -2253,11 +2286,7 @@ struct omap_mpu_state_s *omap2420_mpu_init(MemoryRegion *sysmem,
 
     /* Core */
     s->mpu_model = omap2420;
-    s->cpu = cpu_arm_init(core ?: "arm1136-r2");
-    if (s->cpu == NULL) {
-        fprintf(stderr, "Unable to find CPU definition\n");
-        exit(1);
-    }
+    s->cpu = ARM_CPU(cpu_create(cpu_type));
     s->sdram_size = sdram_size;
     s->sram_size = OMAP242X_SRAM_SIZE;
 
@@ -2267,13 +2296,11 @@ struct omap_mpu_state_s *omap2420_mpu_init(MemoryRegion *sysmem,
     omap_clk_init(s);
 
     /* Memory-mapped stuff */
-    memory_region_init_ram(&s->sdram, NULL, "omap2.dram", s->sdram_size,
-                           &error_abort);
-    vmstate_register_ram_global(&s->sdram);
+    memory_region_allocate_system_memory(&s->sdram, NULL, "omap2.dram",
+                                         s->sdram_size);
     memory_region_add_subregion(sysmem, OMAP2_Q2_BASE, &s->sdram);
     memory_region_init_ram(&s->sram, NULL, "omap2.sram", s->sram_size,
-                           &error_abort);
-    vmstate_register_ram_global(&s->sram);
+                           &error_fatal);
     memory_region_add_subregion(sysmem, OMAP2_SRAM_BASE, &s->sram);
 
     s->l4 = omap_l4_init(sysmem, OMAP2_L4_BASE, 54);
@@ -2321,7 +2348,7 @@ struct omap_mpu_state_s *omap2420_mpu_init(MemoryRegion *sysmem,
                     s->drq[OMAP24XX_DMA_UART1_TX],
                     s->drq[OMAP24XX_DMA_UART1_RX],
                     "uart1",
-                    serial_hds[0]);
+                    serial_hd(0));
     s->uart[1] = omap2_uart_init(sysmem, omap_l4ta(s->l4, 20),
                                  qdev_get_gpio_in(s->ih[0],
                                                   OMAP_INT_24XX_UART2_IRQ),
@@ -2330,7 +2357,7 @@ struct omap_mpu_state_s *omap2420_mpu_init(MemoryRegion *sysmem,
                     s->drq[OMAP24XX_DMA_UART2_TX],
                     s->drq[OMAP24XX_DMA_UART2_RX],
                     "uart2",
-                    serial_hds[0] ? serial_hds[1] : NULL);
+                    serial_hd(0) ? serial_hd(1) : NULL);
     s->uart[2] = omap2_uart_init(sysmem, omap_l4ta(s->l4, 21),
                                  qdev_get_gpio_in(s->ih[0],
                                                   OMAP_INT_24XX_UART3_IRQ),
@@ -2339,7 +2366,7 @@ struct omap_mpu_state_s *omap2420_mpu_init(MemoryRegion *sysmem,
                     s->drq[OMAP24XX_DMA_UART3_TX],
                     s->drq[OMAP24XX_DMA_UART3_RX],
                     "uart3",
-                    serial_hds[0] && serial_hds[1] ? serial_hds[2] : NULL);
+                    serial_hd(0) && serial_hd(1) ? serial_hd(2) : NULL);
 
     s->gptimer[0] = omap_gp_timer_init(omap_l4ta(s->l4, 7),
                     qdev_get_gpio_in(s->ih[0], OMAP_INT_24XX_GPTIMER1),
@@ -2458,12 +2485,11 @@ struct omap_mpu_state_s *omap2420_mpu_init(MemoryRegion *sysmem,
                              s->drq[OMAP24XX_DMA_GPMC]);
 
     dinfo = drive_get(IF_SD, 0, 0);
-    if (!dinfo) {
-        fprintf(stderr, "qemu: missing SecureDigital device\n");
-        exit(1);
+    if (!dinfo && !qtest_enabled()) {
+        warn_report("missing SecureDigital device");
     }
     s->mmc = omap2_mmc_init(omap_l4tao(s->l4, 9),
-                    blk_by_legacy_dinfo(dinfo),
+                    dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
                     qdev_get_gpio_in(s->ih[0], OMAP_INT_24XX_MMC_IRQ),
                     &s->drq[OMAP24XX_DMA_MMC1_TX],
                     omap_findclk(s, "mmc_fclk"), omap_findclk(s, "mmc_iclk"));
@@ -2491,8 +2517,8 @@ struct omap_mpu_state_s *omap2420_mpu_init(MemoryRegion *sysmem,
     omap_sti_init(omap_l4ta(s->l4, 18), sysmem, 0x54000000,
                   qdev_get_gpio_in(s->ih[0], OMAP_INT_24XX_STI),
                   omap_findclk(s, "emul_ck"),
-                    serial_hds[0] && serial_hds[1] && serial_hds[2] ?
-                    serial_hds[3] : NULL);
+                    serial_hd(0) && serial_hd(1) && serial_hd(2) ?
+                    serial_hd(3) : NULL);
 
     s->eac = omap_eac_init(omap_l4ta(s->l4, 32),
                            qdev_get_gpio_in(s->ih[0], OMAP_INT_24XX_EAC_IRQ),

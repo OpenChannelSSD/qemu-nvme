@@ -18,10 +18,11 @@
  *
  *
  * Specification available at:
- *   http://www.milkymist.org/socdoc/pfpu.pdf
+ *   http://milkymist.walle.cc/socdoc/pfpu.pdf
  *
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "trace.h"
@@ -124,7 +125,7 @@ struct MilkymistPFPUState {
     SysBusDevice parent_obj;
 
     MemoryRegion regs_region;
-    CharDriverState *chr;
+    Chardev *chr;
     qemu_irq irq;
 
     uint32_t regs[R_MAX];
@@ -136,7 +137,7 @@ struct MilkymistPFPUState {
 };
 typedef struct MilkymistPFPUState MilkymistPFPUState;
 
-static inline hwaddr
+static inline uint32_t
 get_dma_address(uint32_t base, uint32_t x, uint32_t y)
 {
     return base + 8 * (128 * y + x);
@@ -362,7 +363,7 @@ static void pfpu_start(MilkymistPFPUState *s)
             i = 0;
             while (pfpu_decode_insn(s)) {
                 /* decode at most MICROCODE_WORDS instructions */
-                if (i++ >= MICROCODE_WORDS) {
+                if (++i >= MICROCODE_WORDS) {
                     error_report("milkymist_pfpu: too many instructions "
                             "executed in microcode. No VECTOUT?");
                     break;

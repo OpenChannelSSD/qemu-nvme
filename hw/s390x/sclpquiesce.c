@@ -11,7 +11,8 @@
  * option) any later version.  See the COPYING file in the top-level directory.
  *
  */
-#include <hw/qdev.h>
+#include "qemu/osdep.h"
+#include "hw/qdev.h"
 #include "sysemu/sysemu.h"
 #include "hw/s390x/sclp.h"
 #include "hw/s390x/event-facility.h"
@@ -27,12 +28,12 @@ static bool can_handle_event(uint8_t type)
     return type == SCLP_EVENT_SIGNAL_QUIESCE;
 }
 
-static unsigned int send_mask(void)
+static sccb_mask_t send_mask(void)
 {
     return SCLP_EVENT_MASK_SIGNAL_QUIESCE;
 }
 
-static unsigned int receive_mask(void)
+static sccb_mask_t receive_mask(void)
 {
     return 0;
 }
@@ -66,7 +67,7 @@ static int read_event_data(SCLPEvent *event, EventBufferHeader *evt_buf_hdr,
 }
 
 static const VMStateDescription vmstate_sclpquiesce = {
-    .name = "sclpquiesce",
+    .name = TYPE_SCLP_QUIESCE,
     .version_id = 0,
     .minimum_version_id = 0,
     .fields = (VMStateField[]) {
@@ -116,8 +117,14 @@ static void quiesce_class_init(ObjectClass *klass, void *data)
 
     dc->reset = quiesce_reset;
     dc->vmsd = &vmstate_sclpquiesce;
-    k->init = quiesce_init;
+    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
+    /*
+     * Reason: This is just an internal device - the notifier should
+     * not be registered multiple times in quiesce_init()
+     */
+    dc->user_creatable = false;
 
+    k->init = quiesce_init;
     k->get_send_mask = send_mask;
     k->get_receive_mask = receive_mask;
     k->can_handle_event = can_handle_event;
@@ -126,7 +133,7 @@ static void quiesce_class_init(ObjectClass *klass, void *data)
 }
 
 static const TypeInfo sclp_quiesce_info = {
-    .name          = "sclpquiesce",
+    .name          = TYPE_SCLP_QUIESCE,
     .parent        = TYPE_SCLP_EVENT,
     .instance_size = sizeof(SCLPEvent),
     .class_init    = quiesce_class_init,

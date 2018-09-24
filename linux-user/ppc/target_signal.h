@@ -1,7 +1,5 @@
-#ifndef TARGET_SIGNAL_H
-#define TARGET_SIGNAL_H
-
-#include "cpu.h"
+#ifndef PPC_TARGET_SIGNAL_H
+#define PPC_TARGET_SIGNAL_H
 
 /* this struct defines a stack used during syscall handling */
 
@@ -21,9 +19,9 @@ typedef struct target_sigaltstack {
 #define TARGET_MINSIGSTKSZ    2048
 #define TARGET_SIGSTKSZ       8192
 
-static inline abi_ulong get_sp_from_cpustate(CPUPPCState *state)
-{
-    return state->gpr[1];
-}
+#include "../generic/signal.h"
 
-#endif /* TARGET_SIGNAL_H */
+#if !defined(TARGET_PPC64)
+#define TARGET_ARCH_HAS_SETUP_FRAME
+#endif
+#endif /* PPC_TARGET_SIGNAL_H */

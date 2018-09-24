@@ -14,8 +14,9 @@
 #ifndef HW_S390_SCLP_H
 #define HW_S390_SCLP_H
 
-#include <hw/sysbus.h>
-#include <hw/qdev.h>
+#include "hw/sysbus.h"
+#include "hw/qdev.h"
+#include "target/s390x/cpu-qom.h"
 
 #define SCLP_CMD_CODE_MASK                      0xffff00ff
 
@@ -34,7 +35,6 @@
 #define SCLP_FC_ASSIGN_ATTACH_READ_STOR         0xE00000000000ULL
 #define SCLP_STARTING_SUBINCREMENT_ID           0x10001
 #define SCLP_INCREMENT_UNIT                     0x10000
-#define MAX_AVAIL_SLOTS                         32
 #define MAX_STORAGE_INCREMENTS                  1020
 
 /* CPU hotplug SCLP codes */
@@ -43,14 +43,24 @@
 #define SCLP_CMDW_CONFIGURE_CPU                 0x00110001
 #define SCLP_CMDW_DECONFIGURE_CPU               0x00100001
 
+/* SCLP PCI codes */
+#define SCLP_HAS_IOA_RECONFIG                   0x0000000040000000ULL
+#define SCLP_CMDW_CONFIGURE_IOA                 0x001a0001
+#define SCLP_CMDW_DECONFIGURE_IOA               0x001b0001
+#define SCLP_RECONFIG_PCI_ATYPE                 2
+
 /* SCLP response codes */
 #define SCLP_RC_NORMAL_READ_COMPLETION          0x0010
 #define SCLP_RC_NORMAL_COMPLETION               0x0020
 #define SCLP_RC_SCCB_BOUNDARY_VIOLATION         0x0100
+#define SCLP_RC_NO_ACTION_REQUIRED              0x0120
 #define SCLP_RC_INVALID_SCLP_COMMAND            0x01f0
 #define SCLP_RC_CONTAINED_EQUIPMENT_CHECK       0x0340
 #define SCLP_RC_INSUFFICIENT_SCCB_LENGTH        0x0300
 #define SCLP_RC_STANDBY_READ_COMPLETION         0x0410
+#define SCLP_RC_ADAPTER_IN_RESERVED_STATE       0x05f0
+#define SCLP_RC_ADAPTER_TYPE_NOT_RECOGNIZED     0x06f0
+#define SCLP_RC_ADAPTER_ID_NOT_RECOGNIZED       0x09f0
 #define SCLP_RC_INVALID_FUNCTION                0x40f0
 #define SCLP_RC_NO_EVENT_BUFFERS_STORED         0x60f0
 #define SCLP_RC_INVALID_SELECTION_MASK          0x70f0
@@ -89,11 +99,14 @@ typedef struct SCCBHeader {
 } QEMU_PACKED SCCBHeader;
 
 #define SCCB_DATA_LEN (SCCB_SIZE - sizeof(SCCBHeader))
+#define SCCB_CPU_FEATURE_LEN 6
 
 /* CPU information */
 typedef struct CPUEntry {
     uint8_t address;
-    uint8_t reserved0[13];
+    uint8_t reserved0;
+    uint8_t features[SCCB_CPU_FEATURE_LEN];
+    uint8_t reserved2[6];
     uint8_t type;
     uint8_t reserved1;
 } QEMU_PACKED CPUEntry;
@@ -109,12 +122,17 @@ typedef struct ReadInfo {
     uint8_t  loadparm[8];               /* 24-31 */
     uint8_t  _reserved3[48 - 32];       /* 32-47 */
     uint64_t facilities;                /* 48-55 */
-    uint8_t  _reserved0[100 - 56];
+    uint8_t  _reserved0[76 - 56];       /* 56-75 */
+    uint32_t ibc_val;
+    uint8_t  conf_char[99 - 80];        /* 80-98 */
+    uint8_t mha_pow;
     uint32_t rnsize2;
     uint64_t rnmax2;
-    uint8_t  _reserved4[120-112];       /* 112-119 */
+    uint8_t  _reserved6[116 - 112];     /* 112-115 */
+    uint8_t  conf_char_ext[120 - 116];   /* 116-119 */
     uint16_t highest_cpu;
-    uint8_t  _reserved5[128 - 122];     /* 122-127 */
+    uint8_t  _reserved5[124 - 122];     /* 122-123 */
+    uint32_t hmfai;
     struct CPUEntry entries[0];
 } QEMU_PACKED ReadInfo;
 
@@ -150,27 +168,45 @@ typedef struct AssignStorage {
     uint16_t rn;
 } QEMU_PACKED AssignStorage;
 
+typedef struct IoaCfgSccb {
+    SCCBHeader header;
+    uint8_t atype;
+    uint8_t reserved1;
+    uint16_t reserved2;
+    uint32_t aid;
+} QEMU_PACKED IoaCfgSccb;
+
 typedef struct SCCB {
     SCCBHeader h;
     char data[SCCB_DATA_LEN];
  } QEMU_PACKED SCCB;
 
-typedef struct sclpMemoryHotplugDev sclpMemoryHotplugDev;
+#define TYPE_SCLP "sclp"
+#define SCLP(obj) OBJECT_CHECK(SCLPDevice, (obj), TYPE_SCLP)
+#define SCLP_CLASS(oc) OBJECT_CLASS_CHECK(SCLPDeviceClass, (oc), TYPE_SCLP)
+#define SCLP_GET_CLASS(obj) OBJECT_GET_CLASS(SCLPDeviceClass, (obj), TYPE_SCLP)
 
-#define TYPE_SCLP_MEMORY_HOTPLUG_DEV "sclp-memory-hotplug-dev"
-#define SCLP_MEMORY_HOTPLUG_DEV(obj) \
-  OBJECT_CHECK(sclpMemoryHotplugDev, (obj), TYPE_SCLP_MEMORY_HOTPLUG_DEV)
+typedef struct SCLPEventFacility SCLPEventFacility;
 
-struct sclpMemoryHotplugDev {
-    SysBusDevice parent;
-    ram_addr_t standby_mem_size;
-    ram_addr_t padded_ram_size;
-    ram_addr_t pad_size;
-    ram_addr_t standby_subregion_size;
-    ram_addr_t rzm;
+typedef struct SCLPDevice {
+    /* private */
+    DeviceState parent_obj;
+    SCLPEventFacility *event_facility;
     int increment_size;
-    char *standby_state_map;
-};
+
+    /* public */
+} SCLPDevice;
+
+typedef struct SCLPDeviceClass {
+    /* private */
+    DeviceClass parent_class;
+    void (*read_SCP_info)(SCLPDevice *sclp, SCCB *sccb);
+    void (*read_cpu_info)(SCLPDevice *sclp, SCCB *sccb);
+
+    /* public */
+    void (*execute)(SCLPDevice *sclp, SCCB *sccb, uint32_t code);
+    void (*service_interrupt)(SCLPDevice *sclp, uint32_t sccb);
+} SCLPDeviceClass;
 
 static inline int sccb_data_len(SCCB *sccb)
 {
@@ -179,9 +215,8 @@ static inline int sccb_data_len(SCCB *sccb)
 
 
 void s390_sclp_init(void);
-sclpMemoryHotplugDev *init_sclp_memory_hotplug_dev(void);
-sclpMemoryHotplugDev *get_sclp_memory_hotplug_dev(void);
 void sclp_service_interrupt(uint32_t sccb);
 void raise_irq_cpu_hotplug(void);
+int sclp_service_call(CPUS390XState *env, uint64_t sccb, uint32_t code);
 
 #endif

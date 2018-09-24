@@ -10,6 +10,8 @@
  * See the COPYING file in the top-level directory.
  */
 
+#include "qemu/osdep.h"
+#include "monitor/monitor.h"
 #include "hw/i386/pc.h"
 #include "hw/i386/ioapic_internal.h"
 #include "hw/i386/apic_internal.h"
@@ -121,8 +123,10 @@ static void kvm_ioapic_reset(DeviceState *dev)
 static void kvm_ioapic_set_irq(void *opaque, int irq, int level)
 {
     KVMIOAPICState *s = opaque;
+    IOAPICCommonState *common = IOAPIC_COMMON(s);
     int delivered;
 
+    ioapic_stat_update_irq(common, irq, level);
     delivered = kvm_set_irq(kvm_state, s->kvm_gsi_base + irq, level);
     apic_report_irq_delivered(delivered);
 }
@@ -131,7 +135,12 @@ static void kvm_ioapic_realize(DeviceState *dev, Error **errp)
 {
     IOAPICCommonState *s = IOAPIC_COMMON(dev);
 
-    memory_region_init_reservation(&s->io_memory, NULL, "kvm-ioapic", 0x1000);
+    memory_region_init_io(&s->io_memory, OBJECT(dev), NULL, NULL, "kvm-ioapic", 0x1000);
+    /*
+     * KVM ioapic only supports 0x11 now. This will only be used when
+     * we want to dump ioapic version.
+     */
+    s->version = 0x11;
 
     qdev_init_gpio_in(dev, kvm_ioapic_set_irq, IOAPIC_NUM_PINS);
 }

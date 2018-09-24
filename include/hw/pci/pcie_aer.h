@@ -44,14 +44,13 @@ struct PCIEAERLog {
      */
 #define PCIE_AER_LOG_MAX_DEFAULT        8
 #define PCIE_AER_LOG_MAX_LIMIT          128
-#define PCIE_AER_LOG_MAX_UNSET          0xffff
     uint16_t log_max;
 
     /* Error log. log_max-sized array */
     PCIEAERErr *log;
 };
 
-/* aer error message: error signaling message has only error sevirity and
+/* aer error message: error signaling message has only error severity and
    source id. See 2.2.8.3 error signaling messages */
 struct PCIEAERMsg {
     /*
@@ -87,7 +86,8 @@ struct PCIEAERErr {
 
 extern const VMStateDescription vmstate_pcie_aer_log;
 
-int pcie_aer_init(PCIDevice *dev, uint16_t offset);
+int pcie_aer_init(PCIDevice *dev, uint8_t cap_ver, uint16_t offset,
+                  uint16_t size, Error **errp);
 void pcie_aer_exit(PCIDevice *dev);
 void pcie_aer_write_config(PCIDevice *dev,
                            uint32_t addr, uint32_t val, int len);
@@ -99,8 +99,5 @@ void pcie_aer_root_reset(PCIDevice *dev);
 void pcie_aer_root_write_config(PCIDevice *dev,
                                 uint32_t addr, uint32_t val, int len,
                                 uint32_t root_cmd_prev);
-
-/* error injection */
-int pcie_aer_inject_error(PCIDevice *dev, const PCIEAERErr *err);
 
 #endif /* QEMU_PCIE_AER_H */

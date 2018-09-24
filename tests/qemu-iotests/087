@@ -25,7 +25,6 @@ seq=`basename $0`
 echo "QA output created by $seq"
 
 here=`pwd`
-tmp=/tmp/$$
 status=1	# failure is the default!
 
 # get standard environment, filters and checks
@@ -45,7 +44,9 @@ function do_run_qemu()
 
 function run_qemu()
 {
-    do_run_qemu "$@" 2>&1 | _filter_testdir | _filter_qmp | sed -e 's/\("actual-size":\s*\)[0-9]\+/\1SIZE/g'
+    do_run_qemu "$@" 2>&1 | _filter_testdir | _filter_qmp \
+                          | _filter_qemu | _filter_imgfmt \
+                          | _filter_actual_image_size
 }
 
 size=128M
@@ -53,19 +54,17 @@ size=128M
 _make_test_img $size
 
 echo
-echo === Missing ID ===
+echo === Missing ID and node-name ===
 echo
 
 run_qemu <<EOF
 { "execute": "qmp_capabilities" }
 { "execute": "blockdev-add",
   "arguments": {
-      "options": {
-        "driver": "$IMGFMT",
-        "file": {
-            "driver": "file",
-            "filename": "$TEST_IMG"
-        }
+      "driver": "$IMGFMT",
+      "file": {
+          "driver": "file",
+          "filename": "$TEST_IMG"
       }
     }
   }
@@ -76,81 +75,23 @@ echo
 echo === Duplicate ID ===
 echo
 
-run_qemu <<EOF
+run_qemu -drive driver=$IMGFMT,id=disk,node-name=test-node,file="$TEST_IMG" <<EOF
 { "execute": "qmp_capabilities" }
 { "execute": "blockdev-add",
   "arguments": {
-      "options": {
-        "driver": "$IMGFMT",
-        "id": "disk",
-        "node-name": "test-node",
-        "file": {
-            "driver": "file",
-            "filename": "$TEST_IMG"
-        }
+      "driver": "$IMGFMT",
+      "node-name": "disk",
+      "file": {
+          "driver": "null-co"
       }
     }
   }
 { "execute": "blockdev-add",
   "arguments": {
-      "options": {
-        "driver": "$IMGFMT",
-        "id": "disk",
-        "file": {
-            "driver": "file",
-            "filename": "$TEST_IMG"
-        }
-      }
-    }
-  }
-{ "execute": "blockdev-add",
-  "arguments": {
-      "options": {
-        "driver": "$IMGFMT",
-        "id": "test-node",
-        "file": {
-            "driver": "file",
-            "filename": "$TEST_IMG"
-        }
-      }
-    }
-  }
-{ "execute": "blockdev-add",
-  "arguments": {
-      "options": {
-        "driver": "$IMGFMT",
-        "id": "disk2",
-        "node-name": "disk",
-        "file": {
-            "driver": "file",
-            "filename": "$TEST_IMG"
-        }
-      }
-    }
-  }
-{ "execute": "blockdev-add",
-  "arguments": {
-      "options": {
-        "driver": "$IMGFMT",
-        "id": "disk2",
-        "node-name": "test-node",
-        "file": {
-            "driver": "file",
-            "filename": "$TEST_IMG"
-        }
-      }
-    }
-  }
-{ "execute": "blockdev-add",
-  "arguments": {
-      "options": {
-        "driver": "$IMGFMT",
-        "id": "disk3",
-        "node-name": "disk3",
-        "file": {
-            "driver": "file",
-            "filename": "$TEST_IMG"
-        }
+      "driver": "$IMGFMT",
+      "node-name": "test-node",
+      "file": {
+          "driver": "null-co"
       }
     }
   }
@@ -161,18 +102,23 @@ echo
 echo === aio=native without O_DIRECT ===
 echo
 
-run_qemu <<EOF
+# Skip this test if AIO is not enabled in this build
+function run_qemu_filter_aio()
+{
+    run_qemu "$@" | \
+        sed -e 's/is not supported in this build/it requires cache.direct=on, which was not specified/'
+}
+
+run_qemu_filter_aio <<EOF
 { "execute": "qmp_capabilities" }
 { "execute": "blockdev-add",
   "arguments": {
-      "options": {
-        "driver": "$IMGFMT",
-        "id": "disk",
-        "aio": "native",
-        "file": {
-            "driver": "file",
-            "filename": "$TEST_IMG"
-        }
+      "driver": "$IMGFMT",
+      "node-name": "disk",
+      "file": {
+          "driver": "file",
+          "filename": "$TEST_IMG",
+          "aio": "native"
       }
     }
   }
@@ -180,38 +126,65 @@ run_qemu <<EOF
 EOF
 
 echo
-echo === Encrypted image ===
+echo === Encrypted image QCow ===
 echo
 
-_make_test_img -o encryption=on $size
-run_qemu -S <<EOF
+_make_test_img --object secret,id=sec0,data=123456 -o encryption=on,encrypt.key-secret=sec0 $size
+run_qemu <<EOF
 { "execute": "qmp_capabilities" }
+{ "execute": "object-add",
+  "arguments": {
+      "qom-type": "secret",
+      "id": "sec0",
+      "props": {
+          "data": "123456"
+      }
+  }
+}
 { "execute": "blockdev-add",
   "arguments": {
-      "options": {
-        "driver": "$IMGFMT",
-        "id": "disk",
-        "file": {
-            "driver": "file",
-            "filename": "$TEST_IMG"
-        }
+      "driver": "$IMGFMT",
+      "node-name": "disk",
+      "file": {
+          "driver": "file",
+          "filename": "$TEST_IMG"
+      },
+      "encrypt": {
+          "format": "aes",
+          "key-secret": "sec0"
       }
     }
   }
 { "execute": "quit" }
 EOF
 
+echo
+echo === Encrypted image LUKS ===
+echo
+
+_make_test_img --object secret,id=sec0,data=123456 -o encrypt.format=luks,encrypt.key-secret=sec0 $size
 run_qemu <<EOF
 { "execute": "qmp_capabilities" }
+{ "execute": "object-add",
+  "arguments": {
+      "qom-type": "secret",
+      "id": "sec0",
+      "props": {
+          "data": "123456"
+      }
+  }
+}
 { "execute": "blockdev-add",
   "arguments": {
-      "options": {
-        "driver": "$IMGFMT",
-        "id": "disk",
-        "file": {
-            "driver": "file",
-            "filename": "$TEST_IMG"
-        }
+      "driver": "$IMGFMT",
+      "node-name": "disk",
+      "file": {
+          "driver": "file",
+          "filename": "$TEST_IMG"
+      },
+      "encrypt": {
+        "format": "luks",
+        "key-secret": "sec0"
       }
     }
   }
@@ -222,14 +195,12 @@ echo
 echo === Missing driver ===
 echo
 
-_make_test_img -o encryption=on $size
+_make_test_img --object secret,id=sec0,data=123456 -o encryption=on,encrypt.key-secret=sec0 $size
 run_qemu -S <<EOF
 { "execute": "qmp_capabilities" }
 { "execute": "blockdev-add",
   "arguments": {
-      "options": {
-        "id": "disk"
-      }
+      "node-name": "disk"
     }
   }
 { "execute": "quit" }

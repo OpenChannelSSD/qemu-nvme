@@ -30,7 +30,8 @@
  * tcp_timer.c,v 1.2 1994/08/02 07:49:10 davidg Exp
  */
 
-#include <slirp.h>
+#include "qemu/osdep.h"
+#include "slirp.h"
 
 static struct tcpcb *tcp_timers(register struct tcpcb *tp, int timer);
 
@@ -232,7 +233,7 @@ tcp_timers(register struct tcpcb *tp, int timer)
 		 * to go below this.)
 		 */
 		{
-		u_int win = min(tp->snd_wnd, tp->snd_cwnd) / 2 / tp->t_maxseg;
+                u_int win = MIN(tp->snd_wnd, tp->snd_cwnd) / 2 / tp->t_maxseg;
 		if (win < 2)
 			win = 2;
 		tp->snd_cwnd = tp->t_maxseg;
@@ -277,7 +278,8 @@ tcp_timers(register struct tcpcb *tp, int timer)
 			 * correspondent TCP to respond.
 			 */
 			tcp_respond(tp, &tp->t_template, (struct mbuf *)NULL,
-			    tp->rcv_nxt, tp->snd_una - 1, 0);
+			    tp->rcv_nxt, tp->snd_una - 1, 0,
+			    tp->t_socket->so_ffamily);
 			tp->t_timer[TCPT_KEEP] = TCPTV_KEEPINTVL;
 		} else
 			tp->t_timer[TCPT_KEEP] = TCPTV_KEEP_IDLE;

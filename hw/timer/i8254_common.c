@@ -22,8 +22,8 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
 #include "hw/hw.h"
-#include "hw/i386/pc.h"
 #include "hw/isa/isa.h"
 #include "qemu/timer.h"
 #include "hw/timer/i8254.h"
@@ -46,7 +46,7 @@ int pit_get_out(PITChannelState *s, int64_t current_time)
     int out;
 
     d = muldiv64(current_time - s->count_load_time, PIT_FREQ,
-                 get_ticks_per_sec());
+                 NANOSECONDS_PER_SECOND);
     switch (s->mode) {
     default:
     case 0:
@@ -80,7 +80,7 @@ int64_t pit_get_next_transition_time(PITChannelState *s, int64_t current_time)
     int period2;
 
     d = muldiv64(current_time - s->count_load_time, PIT_FREQ,
-                 get_ticks_per_sec());
+                 NANOSECONDS_PER_SECOND);
     switch (s->mode) {
     default:
     case 0:
@@ -92,7 +92,7 @@ int64_t pit_get_next_transition_time(PITChannelState *s, int64_t current_time)
         }
         break;
     case 2:
-        base = (d / s->count) * s->count;
+        base = QEMU_ALIGN_DOWN(d, s->count);
         if ((d - base) == 0 && d != 0) {
             next_time = base + s->count;
         } else {
@@ -100,7 +100,7 @@ int64_t pit_get_next_transition_time(PITChannelState *s, int64_t current_time)
         }
         break;
     case 3:
-        base = (d / s->count) * s->count;
+        base = QEMU_ALIGN_DOWN(d, s->count);
         period2 = ((s->count + 1) >> 1);
         if ((d - base) < period2) {
             next_time = base + period2;
@@ -120,7 +120,7 @@ int64_t pit_get_next_transition_time(PITChannelState *s, int64_t current_time)
         break;
     }
     /* convert to timer units */
-    next_time = s->count_load_time + muldiv64(next_time, get_ticks_per_sec(),
+    next_time = s->count_load_time + muldiv64(next_time, NANOSECONDS_PER_SECOND,
                                               PIT_FREQ);
     /* fix potential rounding problems */
     /* XXX: better solution: use a clock at PIT_FREQ Hz */
@@ -236,7 +236,7 @@ static int pit_load_old(QEMUFile *f, void *opaque, int version_id)
     return 0;
 }
 
-static void pit_dispatch_pre_save(void *opaque)
+static int pit_dispatch_pre_save(void *opaque)
 {
     PITCommonState *s = opaque;
     PITCommonClass *c = PIT_COMMON_GET_CLASS(s);
@@ -244,6 +244,8 @@ static void pit_dispatch_pre_save(void *opaque)
     if (c->pre_save) {
         c->pre_save(s);
     }
+
+    return 0;
 }
 
 static int pit_dispatch_post_load(void *opaque, int version_id)
@@ -286,7 +288,7 @@ static void pit_common_class_init(ObjectClass *klass, void *data)
      * wired to the HPET, and because of that, some wiring is always
      * done by board code.
      */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
 }
 
 static const TypeInfo pit_common_type = {

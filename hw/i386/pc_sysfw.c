@@ -23,8 +23,12 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "sysemu/block-backend.h"
 #include "qemu/error-report.h"
+#include "qemu/option.h"
+#include "qemu/units.h"
 #include "hw/sysbus.h"
 #include "hw/hw.h"
 #include "hw/i386/pc.h"
@@ -53,11 +57,10 @@ static void pc_isa_bios_init(MemoryRegion *rom_memory,
     flash_size = memory_region_size(flash_mem);
 
     /* map the last 128KB of the BIOS in ISA space */
-    isa_bios_size = MIN(flash_size, 128 * 1024);
+    isa_bios_size = MIN(flash_size, 128 * KiB);
     isa_bios = g_malloc(sizeof(*isa_bios));
     memory_region_init_ram(isa_bios, NULL, "isa-bios", isa_bios_size,
-                           &error_abort);
-    vmstate_register_ram_global(isa_bios);
+                           &error_fatal);
     memory_region_add_subregion_overlap(rom_memory,
                                         0x100000 - isa_bios_size,
                                         isa_bios,
@@ -81,7 +84,7 @@ static void pc_isa_bios_init(MemoryRegion *rom_memory,
  * only 18MB-4KB below 4G. For now, restrict the cumulative mapping to 8MB in
  * size.
  */
-#define FLASH_MAP_BASE_MIN ((hwaddr)(0x100000000ULL - 8*1024*1024))
+#define FLASH_MAP_BASE_MIN ((hwaddr)(4 * GiB - 8 * MiB))
 
 /* This function maps flash drives from 4G downward, in order of their unit
  * numbers. The mapping starts at unit#0, with unit number increments of 1, and
@@ -111,6 +114,8 @@ static void pc_system_flash_init(MemoryRegion *rom_memory)
     pflash_t *system_flash;
     MemoryRegion *flash_mem;
     char name[64];
+    void *flash_ptr;
+    int ret, flash_size;
 
     sector_bits = 12;
     sector_size = 1 << sector_bits;
@@ -167,6 +172,17 @@ static void pc_system_flash_init(MemoryRegion *rom_memory)
         if (unit == 0) {
             flash_mem = pflash_cfi01_get_memory(system_flash);
             pc_isa_bios_init(rom_memory, flash_mem, size);
+
+            /* Encrypt the pflash boot ROM */
+            if (kvm_memcrypt_enabled()) {
+                flash_ptr = memory_region_get_ram_ptr(flash_mem);
+                flash_size = memory_region_size(flash_mem);
+                ret = kvm_memcrypt_encrypt_data(flash_ptr, flash_size);
+                if (ret) {
+                    error_report("failed to encrypt pflash rom");
+                    exit(1);
+                }
+            }
         }
     }
 }
@@ -193,8 +209,7 @@ static void old_pc_system_rom_init(MemoryRegion *rom_memory, bool isapc_ram_fw)
         goto bios_error;
     }
     bios = g_malloc(sizeof(*bios));
-    memory_region_init_ram(bios, NULL, "pc.bios", bios_size, &error_abort);
-    vmstate_register_ram_global(bios);
+    memory_region_init_ram(bios, NULL, "pc.bios", bios_size, &error_fatal);
     if (!isapc_ram_fw) {
         memory_region_set_readonly(bios, true);
     }
@@ -204,15 +219,10 @@ static void old_pc_system_rom_init(MemoryRegion *rom_memory, bool isapc_ram_fw)
         fprintf(stderr, "qemu: could not load PC BIOS '%s'\n", bios_name);
         exit(1);
     }
-    if (filename) {
-        g_free(filename);
-    }
+    g_free(filename);
 
     /* map the last 128KB of the BIOS in ISA space */
-    isa_bios_size = bios_size;
-    if (isa_bios_size > (128 * 1024)) {
-        isa_bios_size = 128 * 1024;
-    }
+    isa_bios_size = MIN(bios_size, 128 * KiB);
     isa_bios = g_malloc(sizeof(*isa_bios));
     memory_region_init_alias(isa_bios, NULL, "isa-bios", bios,
                              bios_size - isa_bios_size, isa_bios_size);

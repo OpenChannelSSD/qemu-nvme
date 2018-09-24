@@ -18,11 +18,10 @@
    You should have received a copy of the GNU General Public License
    along with this program; if not, see <http://www.gnu.org/licenses/>. */
 
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "disas/bfd.h"
-//#include "sysdep.h"
-#include "target-cris/opcode-cris.h"
-//#include "libiberty.h"
+#include "target/cris/opcode-cris.h"
 
 #define CONST_STRNEQ(STR1,STR2) (strncmp ((STR1), (STR2), sizeof (STR2) - 1) == 0)
 
@@ -1210,20 +1209,9 @@ cris_cc_strings[] =
   "le",
   "a",
   /* This is a placeholder.  In v0, this would be "ext".  In v32, this
-     is "sb".  See cris_conds15.  */
+     is "sb". */
   "wf"
 };
-
-/* Different names and semantics for condition 1111 (0xf).  */
-const struct cris_cond15 cris_cond15s[] =
-{
-  /* FIXME: In what version did condition "ext" disappear?  */
-  {"ext", cris_ver_v0_3},
-  {"wf", cris_ver_v10},
-  {"sb", cris_ver_v32p},
-  {NULL, 0}
-};
-
 
 /*
  * Local variables:
@@ -2021,7 +2009,7 @@ print_with_operands (const struct cris_opcode *opcodep,
       case 'n':
 	{
 	  /* Like N but pc-relative to the start of the insn.  */
-	  unsigned long number
+	  uint32_t number
 	    = (buffer[2] + buffer[3] * 256 + buffer[4] * 65536
 	       + buffer[5] * 0x1000000 + addr);
 
@@ -2060,7 +2048,7 @@ print_with_operands (const struct cris_opcode *opcodep,
 	  {
 	    /* We're looking at [pc+], i.e. we need to output an immediate
 	       number, where the size can depend on different things.  */
-	    long number;
+	    int32_t number;
 	    int signedp
 	      = ((*cs == 'z' && (insn & 0x20))
 		 || opcodep->match == BDAP_QUICK_OPCODE);
@@ -2213,7 +2201,7 @@ print_with_operands (const struct cris_opcode *opcodep,
 		      {
 			/* It's [pc+].  This cannot possibly be anything
 			   but an address.  */
-			unsigned long number
+			uint32_t number
 			  = prefix_buffer[2] + prefix_buffer[3] * 256
 			  + prefix_buffer[4] * 65536
 			  + prefix_buffer[5] * 0x1000000;
@@ -2302,7 +2290,7 @@ print_with_operands (const struct cris_opcode *opcodep,
 
 		    if ((prefix_insn & 0x400) && (prefix_insn & 15) == 15)
 		      {
-			long number;
+			int32_t number;
 			unsigned int nbytes;
 
 			/* It's a value.  Get its size.  */
@@ -2502,8 +2490,8 @@ print_with_operands (const struct cris_opcode *opcodep,
 	const struct cris_spec_reg *sregp
 	  = spec_reg_info ((insn >> 12) & 15, disdata->distype);
 
-	if (sregp->name == NULL)
-	  /* Should have been caught as a non-match eariler.  */
+	if (sregp == NULL || sregp->name == NULL)
+	  /* Should have been caught as a non-match earlier.  */
 	  *tp++ = '?';
 	else
 	  {
@@ -2586,9 +2574,9 @@ print_insn_cris_generic (bfd_vma memaddr,
      If we can't get any data, or we do not get enough data, we print
      the error message.  */
 
-  nbytes = info->buffer_length;
-  if (nbytes > MAX_BYTES_PER_CRIS_INSN)
-	  nbytes = MAX_BYTES_PER_CRIS_INSN;
+  nbytes = info->buffer_length ? info->buffer_length
+                               : MAX_BYTES_PER_CRIS_INSN;
+  nbytes = MIN(nbytes, MAX_BYTES_PER_CRIS_INSN);
   status = (*info->read_memory_func) (memaddr, buffer, nbytes, info);  
 
   /* If we did not get all we asked for, then clear the rest.

@@ -7,10 +7,12 @@
  * This code is licensed under the GPL.
  */
 
-#include "sysemu/block-backend.h"
+#include "qemu/osdep.h"
 #include "sysemu/blockdev.h"
 #include "hw/sysbus.h"
-#include "hw/sd.h"
+#include "hw/sd/sd.h"
+#include "qemu/log.h"
+#include "qapi/error.h"
 
 //#define DEBUG_PL181 1
 
@@ -46,7 +48,7 @@ typedef struct PL181State {
     int32_t fifo_pos;
     int32_t fifo_len;
     /* The linux 2.6.21 driver is buggy, and misbehaves if new data arrives
-       while it is reading the FIFO.  We hack around this be defering
+       while it is reading the FIFO.  We hack around this by deferring
        subsequent transfers until after the driver polls the status word.
        http://www.arm.linux.org.uk/developer/patches/viewpatch.php?id=4446/1
      */
@@ -180,23 +182,20 @@ static void pl181_send_command(PL181State *s)
     if (rlen < 0)
         goto error;
     if (s->cmd & PL181_CMD_RESPONSE) {
-#define RWORD(n) (((uint32_t)response[n] << 24) | (response[n + 1] << 16) \
-                  | (response[n + 2] << 8) | response[n + 3])
         if (rlen == 0 || (rlen == 4 && (s->cmd & PL181_CMD_LONGRESP)))
             goto error;
         if (rlen != 4 && rlen != 16)
             goto error;
-        s->response[0] = RWORD(0);
+        s->response[0] = ldl_be_p(&response[0]);
         if (rlen == 4) {
             s->response[1] = s->response[2] = s->response[3] = 0;
         } else {
-            s->response[1] = RWORD(4);
-            s->response[2] = RWORD(8);
-            s->response[3] = RWORD(12) & ~1;
+            s->response[1] = ldl_be_p(&response[4]);
+            s->response[2] = ldl_be_p(&response[8]);
+            s->response[3] = ldl_be_p(&response[12]) & ~1;
         }
         DPRINTF("Response received\n");
         s->status |= PL181_STATUS_CMDRESPEND;
-#undef RWORD
     } else {
         DPRINTF("Command sent\n");
         s->status |= PL181_STATUS_CMDSENT;
@@ -477,42 +476,54 @@ static void pl181_reset(DeviceState *d)
 
     /* We can assume our GPIO outputs have been wired up now */
     sd_set_cb(s->card, s->cardstatus[0], s->cardstatus[1]);
+    /* Since we're still using the legacy SD API the card is not plugged
+     * into any bus, and we must reset it manually.
+     */
+    device_reset(DEVICE(s->card));
 }
 
-static int pl181_init(SysBusDevice *sbd)
+static void pl181_init(Object *obj)
 {
-    DeviceState *dev = DEVICE(sbd);
-    PL181State *s = PL181(dev);
-    DriveInfo *dinfo;
+    DeviceState *dev = DEVICE(obj);
+    PL181State *s = PL181(obj);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
-    memory_region_init_io(&s->iomem, OBJECT(s), &pl181_ops, s, "pl181", 0x1000);
+    memory_region_init_io(&s->iomem, obj, &pl181_ops, s, "pl181", 0x1000);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq[0]);
     sysbus_init_irq(sbd, &s->irq[1]);
     qdev_init_gpio_out(dev, s->cardstatus, 2);
+}
+
+static void pl181_realize(DeviceState *dev, Error **errp)
+{
+    PL181State *s = PL181(dev);
+    DriveInfo *dinfo;
+
+    /* FIXME use a qdev drive property instead of drive_get_next() */
     dinfo = drive_get_next(IF_SD);
     s->card = sd_init(dinfo ? blk_by_legacy_dinfo(dinfo) : NULL, false);
     if (s->card == NULL) {
-        return -1;
+        error_setg(errp, "sd_init failed");
     }
-
-    return 0;
 }
 
 static void pl181_class_init(ObjectClass *klass, void *data)
 {
-    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
     DeviceClass *k = DEVICE_CLASS(klass);
 
-    sdc->init = pl181_init;
     k->vmsd = &vmstate_pl181;
     k->reset = pl181_reset;
+    /* Reason: init() method uses drive_get_next() */
+    k->user_creatable = false;
+    k->realize = pl181_realize;
 }
 
 static const TypeInfo pl181_info = {
     .name          = TYPE_PL181,
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(PL181State),
+    .instance_init = pl181_init,
     .class_init    = pl181_class_init,
 };
 

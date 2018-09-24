@@ -13,7 +13,7 @@
  * GNU GPL, version 2 or (at your option) any later version.
  */
 
-#include <stdlib.h>
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #ifdef CONFIG_MODULES
 #include <gmodule.h>
@@ -55,13 +55,9 @@ static void init_lists(void)
 
 static ModuleTypeList *find_type(module_init_type type)
 {
-    ModuleTypeList *l;
-
     init_lists();
 
-    l = &init_type_list[type];
-
-    return l;
+    return &init_type_list[type];
 }
 
 void register_module_init(void (*fn)(void), module_init_type type)
@@ -91,14 +87,11 @@ void register_dso_module_init(void (*fn)(void), module_init_type type)
     QTAILQ_INSERT_TAIL(&dso_init_list, e, node);
 }
 
-static void module_load(module_init_type type);
-
 void module_call_init(module_init_type type)
 {
     ModuleTypeList *l;
     ModuleEntry *e;
 
-    module_load(type);
     l = find_type(type);
 
     QTAILQ_FOREACH(e, l, node) {
@@ -149,6 +142,7 @@ static int module_load_file(const char *fname)
         ret = -EINVAL;
     } else {
         QTAILQ_FOREACH(e, &dso_init_list, node) {
+            e->init();
             register_module_init(e->init, e->type);
         }
         ret = 0;
@@ -163,55 +157,61 @@ out:
 }
 #endif
 
-static void module_load(module_init_type type)
+void module_load_one(const char *prefix, const char *lib_name)
 {
 #ifdef CONFIG_MODULES
     char *fname = NULL;
-    const char **mp;
-    static const char *block_modules[] = {
-        CONFIG_BLOCK_MODULES
-    };
     char *exec_dir;
-    char *dirs[3];
-    int i = 0;
+    const char *search_dir;
+    char *dirs[4];
+    char *module_name;
+    int i = 0, n_dirs = 0;
     int ret;
+    static GHashTable *loaded_modules;
 
     if (!g_module_supported()) {
         fprintf(stderr, "Module is not supported by system.\n");
         return;
     }
 
-    switch (type) {
-    case MODULE_INIT_BLOCK:
-        mp = block_modules;
-        break;
-    default:
-        /* no other types have dynamic modules for now*/
-        return;
+    if (!loaded_modules) {
+        loaded_modules = g_hash_table_new(g_str_hash, g_str_equal);
     }
 
+    module_name = g_strdup_printf("%s%s", prefix, lib_name);
+
+    if (g_hash_table_lookup(loaded_modules, module_name)) {
+        g_free(module_name);
+        return;
+    }
+    g_hash_table_insert(loaded_modules, module_name, module_name);
+
     exec_dir = qemu_get_exec_dir();
-    dirs[i++] = g_strdup_printf("%s", CONFIG_QEMU_MODDIR);
-    dirs[i++] = g_strdup_printf("%s/..", exec_dir ? : "");
-    dirs[i++] = g_strdup_printf("%s", exec_dir ? : "");
-    assert(i == ARRAY_SIZE(dirs));
+    search_dir = getenv("QEMU_MODULE_DIR");
+    if (search_dir != NULL) {
+        dirs[n_dirs++] = g_strdup_printf("%s", search_dir);
+    }
+    dirs[n_dirs++] = g_strdup_printf("%s", CONFIG_QEMU_MODDIR);
+    dirs[n_dirs++] = g_strdup_printf("%s/..", exec_dir ? : "");
+    dirs[n_dirs++] = g_strdup_printf("%s", exec_dir ? : "");
+    assert(n_dirs <= ARRAY_SIZE(dirs));
+
     g_free(exec_dir);
     exec_dir = NULL;
 
-    for ( ; *mp; mp++) {
-        for (i = 0; i < ARRAY_SIZE(dirs); i++) {
-            fname = g_strdup_printf("%s/%s%s", dirs[i], *mp, HOST_DSOSUF);
-            ret = module_load_file(fname);
-            g_free(fname);
-            fname = NULL;
-            /* Try loading until loaded a module file */
-            if (!ret) {
-                break;
-            }
+    for (i = 0; i < n_dirs; i++) {
+        fname = g_strdup_printf("%s/%s%s",
+                dirs[i], module_name, HOST_DSOSUF);
+        ret = module_load_file(fname);
+        g_free(fname);
+        fname = NULL;
+        /* Try loading until loaded a module file */
+        if (!ret) {
+            break;
         }
     }
 
-    for (i = 0; i < ARRAY_SIZE(dirs); i++) {
+    for (i = 0; i < n_dirs; i++) {
         g_free(dirs[i]);
     }
 

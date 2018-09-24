@@ -5,11 +5,19 @@
  *
  * This code is licensed under the GPL
  */
+#include "qemu/osdep.h"
+#include "qemu-common.h"
+#include "cpu.h"
 #include "hw/hw.h"
+#include "hw/sysbus.h"
 #include "hw/m68k/mcf.h"
-#include "exec/address-spaces.h"
+
+#define TYPE_MCF_INTC "mcf-intc"
+#define MCF_INTC(obj) OBJECT_CHECK(mcf_intc_state, (obj), TYPE_MCF_INTC)
 
 typedef struct {
+    SysBusDevice parent_obj;
+
     MemoryRegion iomem;
     uint64_t ipr;
     uint64_t imr;
@@ -102,6 +110,20 @@ static void mcf_intc_write(void *opaque, hwaddr addr,
     case 0x0c:
         s->imr = (s->imr & 0xffffffff00000000ull) | (uint32_t)val;
         break;
+    case 0x1c:
+        if (val & 0x40) {
+            s->imr = ~0ull;
+        } else {
+            s->imr |= (0x1ull << (val & 0x3f));
+        }
+        break;
+    case 0x1d:
+        if (val & 0x40) {
+            s->imr = 0ull;
+        } else {
+            s->imr &= ~(0x1ull << (val & 0x3f));
+        }
+        break;
     default:
         hw_error("mcf_intc_write: Bad write offset %d\n", offset);
         break;
@@ -121,8 +143,10 @@ static void mcf_intc_set_irq(void *opaque, int irq, int level)
     mcf_intc_update(s);
 }
 
-static void mcf_intc_reset(mcf_intc_state *s)
+static void mcf_intc_reset(DeviceState *dev)
 {
+    mcf_intc_state *s = MCF_INTC(dev);
+
     s->imr = ~0ull;
     s->ipr = 0;
     s->ifr = 0;
@@ -137,17 +161,49 @@ static const MemoryRegionOps mcf_intc_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
+static void mcf_intc_instance_init(Object *obj)
+{
+    mcf_intc_state *s = MCF_INTC(obj);
+
+    memory_region_init_io(&s->iomem, obj, &mcf_intc_ops, s, "mcf", 0x100);
+}
+
+static void mcf_intc_class_init(ObjectClass *oc, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(oc);
+
+    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
+    dc->reset = mcf_intc_reset;
+}
+
+static const TypeInfo mcf_intc_gate_info = {
+    .name          = TYPE_MCF_INTC,
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(mcf_intc_state),
+    .instance_init = mcf_intc_instance_init,
+    .class_init    = mcf_intc_class_init,
+};
+
+static void mcf_intc_register_types(void)
+{
+    type_register_static(&mcf_intc_gate_info);
+}
+
+type_init(mcf_intc_register_types)
+
 qemu_irq *mcf_intc_init(MemoryRegion *sysmem,
                         hwaddr base,
                         M68kCPU *cpu)
 {
+    DeviceState  *dev;
     mcf_intc_state *s;
 
-    s = g_malloc0(sizeof(mcf_intc_state));
-    s->cpu = cpu;
-    mcf_intc_reset(s);
+    dev = qdev_create(NULL, TYPE_MCF_INTC);
+    qdev_init_nofail(dev);
 
-    memory_region_init_io(&s->iomem, NULL, &mcf_intc_ops, s, "mcf", 0x100);
+    s = MCF_INTC(dev);
+    s->cpu = cpu;
+
     memory_region_add_subregion(sysmem, base, &s->iomem);
 
     return qemu_allocate_irqs(mcf_intc_set_irq, s, 64);

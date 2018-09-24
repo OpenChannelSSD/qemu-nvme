@@ -10,12 +10,10 @@
  * See the COPYING file in the top-level directory.
  */
 
-#include <string.h>
-#include <glib.h>
+#include "qemu/osdep.h"
 
 #include "libqtest.h"
-#define NO_QEMU_PROTOS
-#include "hw/nvram/fw_cfg.h"
+#include "standard-headers/linux/qemu_fw_cfg.h"
 #include "libqos/fw_cfg.h"
 
 static uint64_t ram_size = 128 << 20;
@@ -37,7 +35,9 @@ static void test_fw_cfg_signature(void)
 
 static void test_fw_cfg_id(void)
 {
-    g_assert_cmpint(qfw_cfg_get_u32(fw_cfg, FW_CFG_ID), ==, 1);
+    uint32_t id = qfw_cfg_get_u32(fw_cfg, FW_CFG_ID);
+    g_assert((id == 1) ||
+             (id == 3));
 }
 
 static void test_fw_cfg_uuid(void)
@@ -79,8 +79,8 @@ static void test_fw_cfg_numa(void)
 
     g_assert_cmpint(qfw_cfg_get_u64(fw_cfg, FW_CFG_NUMA), ==, nb_nodes);
 
-    cpu_mask = g_malloc0(sizeof(uint64_t) * max_cpus);
-    node_mask = g_malloc0(sizeof(uint64_t) * nb_nodes);
+    cpu_mask = g_new0(uint64_t, max_cpus);
+    node_mask = g_new0(uint64_t, nb_nodes);
 
     qfw_cfg_read_data(fw_cfg, cpu_mask, sizeof(uint64_t) * max_cpus);
     qfw_cfg_read_data(fw_cfg, node_mask, sizeof(uint64_t) * nb_nodes);
@@ -102,38 +102,33 @@ static void test_fw_cfg_boot_menu(void)
 int main(int argc, char **argv)
 {
     QTestState *s;
-    char *cmdline;
     int ret;
 
     g_test_init(&argc, &argv, NULL);
 
-    fw_cfg = pc_fw_cfg_init();
+    s = qtest_init("-uuid 4600cb32-38ec-4b2f-8acb-81c6ea54f2d8");
 
-    g_test_add_func("/fw_cfg/signature", test_fw_cfg_signature);
-    g_test_add_func("/fw_cfg/id", test_fw_cfg_id);
-    g_test_add_func("/fw_cfg/uuid", test_fw_cfg_uuid);
-    g_test_add_func("/fw_cfg/ram_size", test_fw_cfg_ram_size);
-    g_test_add_func("/fw_cfg/nographic", test_fw_cfg_nographic);
-    g_test_add_func("/fw_cfg/nb_cpus", test_fw_cfg_nb_cpus);
+    fw_cfg = pc_fw_cfg_init(s);
+
+    qtest_add_func("fw_cfg/signature", test_fw_cfg_signature);
+    qtest_add_func("fw_cfg/id", test_fw_cfg_id);
+    qtest_add_func("fw_cfg/uuid", test_fw_cfg_uuid);
+    qtest_add_func("fw_cfg/ram_size", test_fw_cfg_ram_size);
+    qtest_add_func("fw_cfg/nographic", test_fw_cfg_nographic);
+    qtest_add_func("fw_cfg/nb_cpus", test_fw_cfg_nb_cpus);
 #if 0
-    g_test_add_func("/fw_cfg/machine_id", test_fw_cfg_machine_id);
-    g_test_add_func("/fw_cfg/kernel", test_fw_cfg_kernel);
-    g_test_add_func("/fw_cfg/initrd", test_fw_cfg_initrd);
-    g_test_add_func("/fw_cfg/boot_device", test_fw_cfg_boot_device);
+    qtest_add_func("fw_cfg/machine_id", test_fw_cfg_machine_id);
+    qtest_add_func("fw_cfg/kernel", test_fw_cfg_kernel);
+    qtest_add_func("fw_cfg/initrd", test_fw_cfg_initrd);
+    qtest_add_func("fw_cfg/boot_device", test_fw_cfg_boot_device);
 #endif
-    g_test_add_func("/fw_cfg/max_cpus", test_fw_cfg_max_cpus);
-    g_test_add_func("/fw_cfg/numa", test_fw_cfg_numa);
-    g_test_add_func("/fw_cfg/boot_menu", test_fw_cfg_boot_menu);
-
-    cmdline = g_strdup_printf("-uuid 4600cb32-38ec-4b2f-8acb-81c6ea54f2d8 ");
-    s = qtest_start(cmdline);
-    g_free(cmdline);
+    qtest_add_func("fw_cfg/max_cpus", test_fw_cfg_max_cpus);
+    qtest_add_func("fw_cfg/numa", test_fw_cfg_numa);
+    qtest_add_func("fw_cfg/boot_menu", test_fw_cfg_boot_menu);
 
     ret = g_test_run();
 
-    if (s) {
-        qtest_quit(s);
-    }
+    qtest_quit(s);
 
     return ret;
 }

@@ -27,10 +27,11 @@
 #ifndef HW_ACPI_PCIHP_H
 #define HW_ACPI_PCIHP_H
 
-#include <inttypes.h>
-#include <qemu/typedefs.h>
 #include "hw/acpi/acpi.h"
-#include "migration/vmstate.h"
+#include "hw/hotplug.h"
+
+#define ACPI_PCIHP_IO_BASE_PROP "acpi-pcihp-io-base"
+#define ACPI_PCIHP_IO_LEN_PROP "acpi-pcihp-io-len"
 
 typedef struct AcpiPciHpPciStatus {
     uint32_t up;
@@ -48,14 +49,16 @@ typedef struct AcpiPciHpState {
     PCIBus *root;
     MemoryRegion io;
     bool legacy_piix;
+    uint16_t io_base;
+    uint16_t io_len;
 } AcpiPciHpState;
 
-void acpi_pcihp_init(AcpiPciHpState *, PCIBus *root,
+void acpi_pcihp_init(Object *owner, AcpiPciHpState *, PCIBus *root,
                      MemoryRegion *address_space_io, bool bridges_enabled);
 
-void acpi_pcihp_device_plug_cb(ACPIREGS *ar, qemu_irq irq, AcpiPciHpState *s,
+void acpi_pcihp_device_plug_cb(HotplugHandler *hotplug_dev, AcpiPciHpState *s,
                                DeviceState *dev, Error **errp);
-void acpi_pcihp_device_unplug_cb(ACPIREGS *ar, qemu_irq irq, AcpiPciHpState *s,
+void acpi_pcihp_device_unplug_cb(HotplugHandler *hotplug_dev, AcpiPciHpState *s,
                                  DeviceState *dev, Error **errp);
 
 /* Called on reset */

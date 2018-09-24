@@ -10,9 +10,9 @@
  * See the COPYING file in the top-level directory.
  */
 
+#include "qemu/osdep.h"
 #include "qom/object.h"
 #include "qemu/module.h"
-#include <assert.h>
 
 static const TypeInfo container_info = {
     .name          = "container",
@@ -40,6 +40,7 @@ Object *container_get(Object *root, const char *path)
         if (!child) {
             child = object_new("container");
             object_property_add_child(obj, parts[i], child, NULL);
+            object_unref(child);
         }
     }
 

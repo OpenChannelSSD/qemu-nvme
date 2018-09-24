@@ -15,7 +15,7 @@
    You should have received a copy of the GNU General Public License
    along with this program; if not, see <http://www.gnu.org/licenses/>.  */
 
-#include <stdio.h>
+#include "qemu/osdep.h"
 #include "disas/bfd.h"
 
 #define DEFINE_TABLE
@@ -264,12 +264,6 @@ sh_dsp_reg_nums;
    be some confusion between DSP and FPU etc.  */
 #define SH_ARCH_UNKNOWN_ARCH 0xffffffff
 
-/* These are defined in bfd/cpu-sh.c .  */
-unsigned int sh_get_arch_from_bfd_mach (unsigned long mach);
-unsigned int sh_get_arch_up_from_bfd_mach (unsigned long mach);
-unsigned long sh_get_bfd_mach_from_arch_set (unsigned int arch_set);
-/* bfd_boolean sh_merge_bfd_arch (bfd *ibfd, bfd *obfd); */
-
 /* Below are the 'architecture sets'.
    They describe the following inheritance graph:
 
@@ -332,7 +326,7 @@ typedef struct
 
 #ifdef DEFINE_TABLE
 
-const sh_opcode_info sh_table[] =
+static const sh_opcode_info sh_table[] =
   {
 /* 0111nnnni8*1.... add #<imm>,<REG_N>  */{"add",{A_IMM,A_REG_N},{HEX_7,REG_N,IMM0_8}, arch_sh1_up},
 

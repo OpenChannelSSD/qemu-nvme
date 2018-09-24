@@ -110,9 +110,12 @@
 /* Interrupt Address Range */
 #define VTD_INTERRUPT_ADDR_FIRST    0xfee00000ULL
 #define VTD_INTERRUPT_ADDR_LAST     0xfeefffffULL
+#define VTD_INTERRUPT_ADDR_SIZE     (VTD_INTERRUPT_ADDR_LAST - \
+                                     VTD_INTERRUPT_ADDR_FIRST + 1)
 
 /* The shift of source_id in the key of IOTLB hash table */
 #define VTD_IOTLB_SID_SHIFT         36
+#define VTD_IOTLB_LVL_SHIFT         52
 #define VTD_IOTLB_MAX_SIZE          1024    /* Max size of the hash table */
 
 /* IOTLB_REG */
@@ -128,7 +131,7 @@
 #define VTD_TLB_DID(val)            (((val) >> 32) & VTD_DOMAIN_ID_MASK)
 
 /* IVA_REG */
-#define VTD_IVA_ADDR(val)       ((val) & ~0xfffULL & ((1ULL << VTD_MGAW) - 1))
+#define VTD_IVA_ADDR(val)       ((val) & ~0xfffULL)
 #define VTD_IVA_AM(val)         ((val) & 0x3fULL)
 
 /* GCMD_REG */
@@ -169,12 +172,23 @@
 
 /* RTADDR_REG */
 #define VTD_RTADDR_RTT              (1ULL << 11)
-#define VTD_RTADDR_ADDR_MASK        (VTD_HAW_MASK ^ 0xfffULL)
+#define VTD_RTADDR_ADDR_MASK(aw)    (VTD_HAW_MASK(aw) ^ 0xfffULL)
+
+/* IRTA_REG */
+#define VTD_IRTA_ADDR_MASK(aw)      (VTD_HAW_MASK(aw) ^ 0xfffULL)
+#define VTD_IRTA_EIME               (1ULL << 11)
+#define VTD_IRTA_SIZE_MASK          (0xfULL)
 
 /* ECAP_REG */
 /* (offset >> 4) << 8 */
 #define VTD_ECAP_IRO                (DMAR_IOTLB_REG_OFFSET << 4)
 #define VTD_ECAP_QI                 (1ULL << 1)
+#define VTD_ECAP_DT                 (1ULL << 2)
+/* Interrupt Remapping support */
+#define VTD_ECAP_IR                 (1ULL << 3)
+#define VTD_ECAP_EIM                (1ULL << 4)
+#define VTD_ECAP_PT                 (1ULL << 6)
+#define VTD_ECAP_MHMV               (15ULL << 20)
 
 /* CAP_REG */
 /* (offset >> 4) << 24 */
@@ -183,11 +197,13 @@
 #define VTD_DOMAIN_ID_SHIFT         16  /* 16-bit domain id for 64K domains */
 #define VTD_DOMAIN_ID_MASK          ((1UL << VTD_DOMAIN_ID_SHIFT) - 1)
 #define VTD_CAP_ND                  (((VTD_DOMAIN_ID_SHIFT - 4) / 2) & 7ULL)
-#define VTD_MGAW                    39  /* Maximum Guest Address Width */
-#define VTD_CAP_MGAW                (((VTD_MGAW - 1) & 0x3fULL) << 16)
-#define VTD_MAMV                    9ULL
+#define VTD_ADDRESS_SIZE(aw)        (1ULL << (aw))
+#define VTD_CAP_MGAW(aw)            ((((aw) - 1) & 0x3fULL) << 16)
+#define VTD_MAMV                    18ULL
 #define VTD_CAP_MAMV                (VTD_MAMV << 48)
 #define VTD_CAP_PSI                 (1ULL << 39)
+#define VTD_CAP_SLLPS               ((1ULL << 34) | (1ULL << 35))
+#define VTD_CAP_CM                  (1ULL << 7)
 
 /* Supported Adjusted Guest Address Widths */
 #define VTD_CAP_SAGAW_SHIFT         8
@@ -196,13 +212,12 @@
 #define VTD_CAP_SAGAW_39bit         (0x2ULL << VTD_CAP_SAGAW_SHIFT)
  /* 48-bit AGAW, 4-level page-table */
 #define VTD_CAP_SAGAW_48bit         (0x4ULL << VTD_CAP_SAGAW_SHIFT)
-#define VTD_CAP_SAGAW               VTD_CAP_SAGAW_39bit
 
 /* IQT_REG */
 #define VTD_IQT_QT(val)             (((val) >> 4) & 0x7fffULL)
 
 /* IQA_REG */
-#define VTD_IQA_IQA_MASK            (VTD_HAW_MASK ^ 0xfffULL)
+#define VTD_IQA_IQA_MASK(aw)        (VTD_HAW_MASK(aw) ^ 0xfffULL)
 #define VTD_IQA_QS                  0x7ULL
 
 /* IQH_REG */
@@ -235,7 +250,7 @@
 #define VTD_FRCD_SID_MASK       0xffffULL
 #define VTD_FRCD_SID(val)       ((val) & VTD_FRCD_SID_MASK)
 /* For the low 64-bit of 128-bit */
-#define VTD_FRCD_FI(val)        ((val) & (((1ULL << VTD_MGAW) - 1) ^ 0xfffULL))
+#define VTD_FRCD_FI(val)        ((val) & ~0xfffULL)
 
 /* DMA Remapping Fault Conditions */
 typedef enum VTDFaultReason {
@@ -263,6 +278,19 @@ typedef enum VTDFaultReason {
      * context-entry.
      */
     VTD_FR_CONTEXT_ENTRY_TT,
+
+    /* Interrupt remapping transition faults */
+    VTD_FR_IR_REQ_RSVD = 0x20, /* One or more IR request reserved
+                                * fields set */
+    VTD_FR_IR_INDEX_OVER = 0x21, /* Index value greater than max */
+    VTD_FR_IR_ENTRY_P = 0x22,    /* Present (P) not set in IRTE */
+    VTD_FR_IR_ROOT_INVAL = 0x23, /* IR Root table invalid */
+    VTD_FR_IR_IRTE_RSVD = 0x24,  /* IRTE Rsvd field non-zero with
+                                  * Present flag set */
+    VTD_FR_IR_REQ_COMPAT = 0x25, /* Encountered compatible IR
+                                  * request while disabled */
+    VTD_FR_IR_SID_ERR = 0x26,   /* Invalid Source-ID */
+
     /* This is not a normal fault reason. We use this to indicate some faults
      * that are not referenced by the VT-d specification.
      * Fault event with such reason should not be recorded.
@@ -273,17 +301,36 @@ typedef enum VTDFaultReason {
 
 #define VTD_CONTEXT_CACHE_GEN_MAX       0xffffffffUL
 
-/* Queued Invalidation Descriptor */
-struct VTDInvDesc {
-    uint64_t lo;
-    uint64_t hi;
+/* Interrupt Entry Cache Invalidation Descriptor: VT-d 6.5.2.7. */
+struct VTDInvDescIEC {
+    uint32_t type:4;            /* Should always be 0x4 */
+    uint32_t granularity:1;     /* If set, it's global IR invalidation */
+    uint32_t resved_1:22;
+    uint32_t index_mask:5;      /* 2^N for continuous int invalidation */
+    uint32_t index:16;          /* Start index to invalidate */
+    uint32_t reserved_2:16;
 };
-typedef struct VTDInvDesc VTDInvDesc;
+typedef struct VTDInvDescIEC VTDInvDescIEC;
+
+/* Queued Invalidation Descriptor */
+union VTDInvDesc {
+    struct {
+        uint64_t lo;
+        uint64_t hi;
+    };
+    union {
+        VTDInvDescIEC iec;
+    };
+};
+typedef union VTDInvDesc VTDInvDesc;
 
 /* Masks for struct VTDInvDesc */
 #define VTD_INV_DESC_TYPE               0xf
 #define VTD_INV_DESC_CC                 0x1 /* Context-cache Invalidate Desc */
 #define VTD_INV_DESC_IOTLB              0x2
+#define VTD_INV_DESC_DEVICE             0x3
+#define VTD_INV_DESC_IEC                0x4 /* Interrupt Entry Cache
+                                               Invalidate Descriptor */
 #define VTD_INV_DESC_WAIT               0x5 /* Invalidation Wait Descriptor */
 #define VTD_INV_DESC_NONE               0   /* Not an Invalidate Descriptor */
 
@@ -311,16 +358,40 @@ typedef struct VTDInvDesc VTDInvDesc;
 #define VTD_INV_DESC_IOTLB_DOMAIN       (2ULL << 4)
 #define VTD_INV_DESC_IOTLB_PAGE         (3ULL << 4)
 #define VTD_INV_DESC_IOTLB_DID(val)     (((val) >> 16) & VTD_DOMAIN_ID_MASK)
-#define VTD_INV_DESC_IOTLB_ADDR(val)    ((val) & ~0xfffULL & \
-                                         ((1ULL << VTD_MGAW) - 1))
+#define VTD_INV_DESC_IOTLB_ADDR(val)    ((val) & ~0xfffULL)
 #define VTD_INV_DESC_IOTLB_AM(val)      ((val) & 0x3fULL)
 #define VTD_INV_DESC_IOTLB_RSVD_LO      0xffffffff0000ff00ULL
 #define VTD_INV_DESC_IOTLB_RSVD_HI      0xf80ULL
 
+/* Mask for Device IOTLB Invalidate Descriptor */
+#define VTD_INV_DESC_DEVICE_IOTLB_ADDR(val) ((val) & 0xfffffffffffff000ULL)
+#define VTD_INV_DESC_DEVICE_IOTLB_SIZE(val) ((val) & 0x1)
+#define VTD_INV_DESC_DEVICE_IOTLB_SID(val) (((val) >> 32) & 0xFFFFULL)
+#define VTD_INV_DESC_DEVICE_IOTLB_RSVD_HI 0xffeULL
+#define VTD_INV_DESC_DEVICE_IOTLB_RSVD_LO 0xffff0000ffe0fff8
+
+/* Rsvd field masks for spte */
+#define VTD_SPTE_PAGE_L1_RSVD_MASK(aw) \
+        (0x800ULL | ~(VTD_HAW_MASK(aw) | VTD_SL_IGN_COM))
+#define VTD_SPTE_PAGE_L2_RSVD_MASK(aw) \
+        (0x800ULL | ~(VTD_HAW_MASK(aw) | VTD_SL_IGN_COM))
+#define VTD_SPTE_PAGE_L3_RSVD_MASK(aw) \
+        (0x800ULL | ~(VTD_HAW_MASK(aw) | VTD_SL_IGN_COM))
+#define VTD_SPTE_PAGE_L4_RSVD_MASK(aw) \
+        (0x880ULL | ~(VTD_HAW_MASK(aw) | VTD_SL_IGN_COM))
+#define VTD_SPTE_LPAGE_L1_RSVD_MASK(aw) \
+        (0x800ULL | ~(VTD_HAW_MASK(aw) | VTD_SL_IGN_COM))
+#define VTD_SPTE_LPAGE_L2_RSVD_MASK(aw) \
+        (0x1ff800ULL | ~(VTD_HAW_MASK(aw) | VTD_SL_IGN_COM))
+#define VTD_SPTE_LPAGE_L3_RSVD_MASK(aw) \
+        (0x3ffff800ULL | ~(VTD_HAW_MASK(aw) | VTD_SL_IGN_COM))
+#define VTD_SPTE_LPAGE_L4_RSVD_MASK(aw) \
+        (0x880ULL | ~(VTD_HAW_MASK(aw) | VTD_SL_IGN_COM))
+
 /* Information about page-selective IOTLB invalidate */
 struct VTDIOTLBPageInvInfo {
     uint16_t domain_id;
-    uint64_t gfn;
+    uint64_t addr;
     uint8_t mask;
 };
 typedef struct VTDIOTLBPageInvInfo VTDIOTLBPageInvInfo;
@@ -347,7 +418,7 @@ typedef struct VTDRootEntry VTDRootEntry;
 #define VTD_ROOT_ENTRY_CTP          (~0xfffULL)
 
 #define VTD_ROOT_ENTRY_NR           (VTD_PAGE_SIZE / sizeof(VTDRootEntry))
-#define VTD_ROOT_ENTRY_RSVD         (0xffeULL | ~VTD_HAW_MASK)
+#define VTD_ROOT_ENTRY_RSVD(aw)     (0xffeULL | ~VTD_HAW_MASK(aw))
 
 /* Masks for struct VTDContextEntry */
 /* lo */
@@ -355,11 +426,11 @@ typedef struct VTDRootEntry VTDRootEntry;
 #define VTD_CONTEXT_ENTRY_FPD       (1ULL << 1) /* Fault Processing Disable */
 #define VTD_CONTEXT_ENTRY_TT        (3ULL << 2) /* Translation Type */
 #define VTD_CONTEXT_TT_MULTI_LEVEL  0
-#define VTD_CONTEXT_TT_DEV_IOTLB    1
-#define VTD_CONTEXT_TT_PASS_THROUGH 2
+#define VTD_CONTEXT_TT_DEV_IOTLB    (1ULL << 2)
+#define VTD_CONTEXT_TT_PASS_THROUGH (2ULL << 2)
 /* Second Level Page Translation Pointer*/
 #define VTD_CONTEXT_ENTRY_SLPTPTR   (~0xfffULL)
-#define VTD_CONTEXT_ENTRY_RSVD_LO   (0xff0ULL | ~VTD_HAW_MASK)
+#define VTD_CONTEXT_ENTRY_RSVD_LO(aw) (0xff0ULL | ~VTD_HAW_MASK(aw))
 /* hi */
 #define VTD_CONTEXT_ENTRY_AW        7ULL /* Adjusted guest-address-width */
 #define VTD_CONTEXT_ENTRY_DID(val)  (((val) >> 8) & VTD_DOMAIN_ID_MASK)
@@ -383,7 +454,7 @@ typedef struct VTDRootEntry VTDRootEntry;
 #define VTD_SL_RW_MASK              3ULL
 #define VTD_SL_R                    1ULL
 #define VTD_SL_W                    (1ULL << 1)
-#define VTD_SL_PT_BASE_ADDR_MASK    (~(VTD_PAGE_SIZE - 1) & VTD_HAW_MASK)
+#define VTD_SL_PT_BASE_ADDR_MASK(aw) (~(VTD_PAGE_SIZE - 1) & VTD_HAW_MASK(aw))
 #define VTD_SL_IGN_COM              0xbff0000000000000ULL
 
 #endif

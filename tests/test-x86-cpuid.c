@@ -22,9 +22,9 @@
  * THE SOFTWARE.
  */
 
-#include <glib.h>
+#include "qemu/osdep.h"
 
-#include "topology.h"
+#include "hw/i386/topology.h"
 
 static void test_topo_bits(void)
 {

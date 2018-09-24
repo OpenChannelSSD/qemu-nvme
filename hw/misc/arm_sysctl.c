@@ -7,12 +7,14 @@
  * This code is licensed under the GPL.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "qemu/timer.h"
 #include "qemu/bitops.h"
 #include "hw/sysbus.h"
 #include "hw/arm/primecell.h"
 #include "sysemu/sysemu.h"
+#include "qemu/log.h"
 
 #define LOCK_VALUE 0xa05f
 
@@ -170,7 +172,8 @@ static uint64_t arm_sysctl_read(void *opaque, hwaddr offset,
     case 0x58: /* BOOTCS */
         return 0;
     case 0x5c: /* 24MHz */
-        return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 24000000, get_ticks_per_sec());
+        return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 24000000,
+                        NANOSECONDS_PER_SECOND);
     case 0x60: /* MISC */
         return 0;
     case 0x84: /* PROCID0 */
@@ -348,13 +351,13 @@ static bool vexpress_cfgctrl_write(arm_sysctl_state *s, unsigned int dcc,
         break;
     case SYS_CFG_SHUTDOWN:
         if (site == SYS_CFG_SITE_MB && device == 0) {
-            qemu_system_shutdown_request();
+            qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
             return true;
         }
         break;
     case SYS_CFG_REBOOT:
         if (site == SYS_CFG_SITE_MB && device == 0) {
-            qemu_system_reset_request();
+            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             return true;
         }
         break;
@@ -426,7 +429,7 @@ static void arm_sysctl_write(void *opaque, hwaddr offset,
             if (s->lockval == LOCK_VALUE) {
                 s->resetlevel = val;
                 if (val & 0x100) {
-                    qemu_system_reset_request();
+                    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
                 }
             }
             break;
@@ -435,7 +438,7 @@ static void arm_sysctl_write(void *opaque, hwaddr offset,
             if (s->lockval == LOCK_VALUE) {
                 s->resetlevel = val;
                 if (val & 0x04) {
-                    qemu_system_reset_request();
+                    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
                 }
             }
             break;

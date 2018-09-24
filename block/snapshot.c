@@ -22,8 +22,15 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include "block/snapshot.h"
 #include "block/block_int.h"
+#include "block/qdict.h"
+#include "qapi/error.h"
+#include "qapi/qmp/qdict.h"
+#include "qapi/qmp/qerror.h"
+#include "qapi/qmp/qstring.h"
+#include "qemu/option.h"
 
 QemuOptsList internal_snapshot_opts = {
     .name = "snapshot",
@@ -148,7 +155,7 @@ int bdrv_can_snapshot(BlockDriverState *bs)
 
     if (!drv->bdrv_snapshot_create) {
         if (bs->file != NULL) {
-            return bdrv_can_snapshot(bs->file);
+            return bdrv_can_snapshot(bs->file->bs);
         }
         return 0;
     }
@@ -167,36 +174,73 @@ int bdrv_snapshot_create(BlockDriverState *bs,
         return drv->bdrv_snapshot_create(bs, sn_info);
     }
     if (bs->file) {
-        return bdrv_snapshot_create(bs->file, sn_info);
+        return bdrv_snapshot_create(bs->file->bs, sn_info);
     }
     return -ENOTSUP;
 }
 
 int bdrv_snapshot_goto(BlockDriverState *bs,
-                       const char *snapshot_id)
+                       const char *snapshot_id,
+                       Error **errp)
 {
     BlockDriver *drv = bs->drv;
     int ret, open_ret;
 
     if (!drv) {
+        error_setg(errp, "Block driver is closed");
         return -ENOMEDIUM;
     }
-    if (drv->bdrv_snapshot_goto) {
-        return drv->bdrv_snapshot_goto(bs, snapshot_id);
+
+    if (!QLIST_EMPTY(&bs->dirty_bitmaps)) {
+        error_setg(errp, "Device has active dirty bitmaps");
+        return -EBUSY;
     }
 
-    if (bs->file) {
-        drv->bdrv_close(bs);
-        ret = bdrv_snapshot_goto(bs->file, snapshot_id);
-        open_ret = drv->bdrv_open(bs, NULL, bs->open_flags, NULL);
-        if (open_ret < 0) {
-            bdrv_unref(bs->file);
-            bs->drv = NULL;
-            return open_ret;
+    if (drv->bdrv_snapshot_goto) {
+        ret = drv->bdrv_snapshot_goto(bs, snapshot_id);
+        if (ret < 0) {
+            error_setg_errno(errp, -ret, "Failed to load snapshot");
         }
         return ret;
     }
 
+    if (bs->file) {
+        BlockDriverState *file;
+        QDict *options = qdict_clone_shallow(bs->options);
+        QDict *file_options;
+        Error *local_err = NULL;
+
+        file = bs->file->bs;
+        /* Prevent it from getting deleted when detached from bs */
+        bdrv_ref(file);
+
+        qdict_extract_subqdict(options, &file_options, "file.");
+        qobject_unref(file_options);
+        qdict_put_str(options, "file", bdrv_get_node_name(file));
+
+        if (drv->bdrv_close) {
+            drv->bdrv_close(bs);
+        }
+        bdrv_unref_child(bs, bs->file);
+        bs->file = NULL;
+
+        ret = bdrv_snapshot_goto(file, snapshot_id, errp);
+        open_ret = drv->bdrv_open(bs, options, bs->open_flags, &local_err);
+        qobject_unref(options);
+        if (open_ret < 0) {
+            bdrv_unref(file);
+            bs->drv = NULL;
+            /* A bdrv_snapshot_goto() error takes precedence */
+            error_propagate(errp, local_err);
+            return ret < 0 ? ret : open_ret;
+        }
+
+        assert(bs->file->bs == file);
+        bdrv_unref(file);
+        return ret;
+    }
+
+    error_setg(errp, "Block driver does not support snapshots");
     return -ENOTSUP;
 }
 
@@ -228,29 +272,38 @@ int bdrv_snapshot_delete(BlockDriverState *bs,
                          Error **errp)
 {
     BlockDriver *drv = bs->drv;
+    int ret;
+
     if (!drv) {
-        error_set(errp, QERR_DEVICE_HAS_NO_MEDIUM, bdrv_get_device_name(bs));
+        error_setg(errp, QERR_DEVICE_HAS_NO_MEDIUM, bdrv_get_device_name(bs));
         return -ENOMEDIUM;
     }
     if (!snapshot_id && !name) {
         error_setg(errp, "snapshot_id and name are both NULL");
         return -EINVAL;
     }
+
+    /* drain all pending i/o before deleting snapshot */
+    bdrv_drained_begin(bs);
+
     if (drv->bdrv_snapshot_delete) {
-        return drv->bdrv_snapshot_delete(bs, snapshot_id, name, errp);
+        ret = drv->bdrv_snapshot_delete(bs, snapshot_id, name, errp);
+    } else if (bs->file) {
+        ret = bdrv_snapshot_delete(bs->file->bs, snapshot_id, name, errp);
+    } else {
+        error_setg(errp, "Block format '%s' used by device '%s' "
+                   "does not support internal snapshot deletion",
+                   drv->format_name, bdrv_get_device_name(bs));
+        ret = -ENOTSUP;
     }
-    if (bs->file) {
-        return bdrv_snapshot_delete(bs->file, snapshot_id, name, errp);
-    }
-    error_set(errp, QERR_BLOCK_FORMAT_FEATURE_NOT_SUPPORTED,
-              drv->format_name, bdrv_get_device_name(bs),
-              "internal snapshot deletion");
-    return -ENOTSUP;
+
+    bdrv_drained_end(bs);
+    return ret;
 }
 
-void bdrv_snapshot_delete_by_id_or_name(BlockDriverState *bs,
-                                        const char *id_or_name,
-                                        Error **errp)
+int bdrv_snapshot_delete_by_id_or_name(BlockDriverState *bs,
+                                       const char *id_or_name,
+                                       Error **errp)
 {
     int ret;
     Error *local_err = NULL;
@@ -265,6 +318,7 @@ void bdrv_snapshot_delete_by_id_or_name(BlockDriverState *bs,
     if (ret < 0) {
         error_propagate(errp, local_err);
     }
+    return ret;
 }
 
 int bdrv_snapshot_list(BlockDriverState *bs,
@@ -278,7 +332,7 @@ int bdrv_snapshot_list(BlockDriverState *bs,
         return drv->bdrv_snapshot_list(bs, psn_info);
     }
     if (bs->file) {
-        return bdrv_snapshot_list(bs->file, psn_info);
+        return bdrv_snapshot_list(bs->file->bs, psn_info);
     }
     return -ENOTSUP;
 }
@@ -311,7 +365,7 @@ int bdrv_snapshot_load_tmp(BlockDriverState *bs,
     BlockDriver *drv = bs->drv;
 
     if (!drv) {
-        error_set(errp, QERR_DEVICE_HAS_NO_MEDIUM, bdrv_get_device_name(bs));
+        error_setg(errp, QERR_DEVICE_HAS_NO_MEDIUM, bdrv_get_device_name(bs));
         return -ENOMEDIUM;
     }
     if (!snapshot_id && !name) {
@@ -325,9 +379,9 @@ int bdrv_snapshot_load_tmp(BlockDriverState *bs,
     if (drv->bdrv_snapshot_load_tmp) {
         return drv->bdrv_snapshot_load_tmp(bs, snapshot_id, name, errp);
     }
-    error_set(errp, QERR_BLOCK_FORMAT_FEATURE_NOT_SUPPORTED,
-              drv->format_name, bdrv_get_device_name(bs),
-              "temporarily load internal snapshot");
+    error_setg(errp, "Block format '%s' used by device '%s' "
+               "does not support temporarily loading internal snapshots",
+               drv->format_name, bdrv_get_device_name(bs));
     return -ENOTSUP;
 }
 
@@ -345,9 +399,171 @@ int bdrv_snapshot_load_tmp_by_id_or_name(BlockDriverState *bs,
         ret = bdrv_snapshot_load_tmp(bs, NULL, id_or_name, &local_err);
     }
 
-    if (local_err) {
-        error_propagate(errp, local_err);
-    }
+    error_propagate(errp, local_err);
 
     return ret;
+}
+
+
+/* Group operations. All block drivers are involved.
+ * These functions will properly handle dataplane (take aio_context_acquire
+ * when appropriate for appropriate block drivers) */
+
+bool bdrv_all_can_snapshot(BlockDriverState **first_bad_bs)
+{
+    bool ok = true;
+    BlockDriverState *bs;
+    BdrvNextIterator it;
+
+    for (bs = bdrv_first(&it); bs; bs = bdrv_next(&it)) {
+        AioContext *ctx = bdrv_get_aio_context(bs);
+
+        aio_context_acquire(ctx);
+        if (bdrv_is_inserted(bs) && !bdrv_is_read_only(bs)) {
+            ok = bdrv_can_snapshot(bs);
+        }
+        aio_context_release(ctx);
+        if (!ok) {
+            bdrv_next_cleanup(&it);
+            goto fail;
+        }
+    }
+
+fail:
+    *first_bad_bs = bs;
+    return ok;
+}
+
+int bdrv_all_delete_snapshot(const char *name, BlockDriverState **first_bad_bs,
+                             Error **err)
+{
+    int ret = 0;
+    BlockDriverState *bs;
+    BdrvNextIterator it;
+    QEMUSnapshotInfo sn1, *snapshot = &sn1;
+
+    for (bs = bdrv_first(&it); bs; bs = bdrv_next(&it)) {
+        AioContext *ctx = bdrv_get_aio_context(bs);
+
+        aio_context_acquire(ctx);
+        if (bdrv_can_snapshot(bs) &&
+                bdrv_snapshot_find(bs, snapshot, name) >= 0) {
+            ret = bdrv_snapshot_delete_by_id_or_name(bs, name, err);
+        }
+        aio_context_release(ctx);
+        if (ret < 0) {
+            bdrv_next_cleanup(&it);
+            goto fail;
+        }
+    }
+
+fail:
+    *first_bad_bs = bs;
+    return ret;
+}
+
+
+int bdrv_all_goto_snapshot(const char *name, BlockDriverState **first_bad_bs,
+                           Error **errp)
+{
+    int ret = 0;
+    BlockDriverState *bs;
+    BdrvNextIterator it;
+
+    for (bs = bdrv_first(&it); bs; bs = bdrv_next(&it)) {
+        AioContext *ctx = bdrv_get_aio_context(bs);
+
+        aio_context_acquire(ctx);
+        if (bdrv_can_snapshot(bs)) {
+            ret = bdrv_snapshot_goto(bs, name, errp);
+        }
+        aio_context_release(ctx);
+        if (ret < 0) {
+            bdrv_next_cleanup(&it);
+            goto fail;
+        }
+    }
+
+fail:
+    *first_bad_bs = bs;
+    return ret;
+}
+
+int bdrv_all_find_snapshot(const char *name, BlockDriverState **first_bad_bs)
+{
+    QEMUSnapshotInfo sn;
+    int err = 0;
+    BlockDriverState *bs;
+    BdrvNextIterator it;
+
+    for (bs = bdrv_first(&it); bs; bs = bdrv_next(&it)) {
+        AioContext *ctx = bdrv_get_aio_context(bs);
+
+        aio_context_acquire(ctx);
+        if (bdrv_can_snapshot(bs)) {
+            err = bdrv_snapshot_find(bs, &sn, name);
+        }
+        aio_context_release(ctx);
+        if (err < 0) {
+            bdrv_next_cleanup(&it);
+            goto fail;
+        }
+    }
+
+fail:
+    *first_bad_bs = bs;
+    return err;
+}
+
+int bdrv_all_create_snapshot(QEMUSnapshotInfo *sn,
+                             BlockDriverState *vm_state_bs,
+                             uint64_t vm_state_size,
+                             BlockDriverState **first_bad_bs)
+{
+    int err = 0;
+    BlockDriverState *bs;
+    BdrvNextIterator it;
+
+    for (bs = bdrv_first(&it); bs; bs = bdrv_next(&it)) {
+        AioContext *ctx = bdrv_get_aio_context(bs);
+
+        aio_context_acquire(ctx);
+        if (bs == vm_state_bs) {
+            sn->vm_state_size = vm_state_size;
+            err = bdrv_snapshot_create(bs, sn);
+        } else if (bdrv_can_snapshot(bs)) {
+            sn->vm_state_size = 0;
+            err = bdrv_snapshot_create(bs, sn);
+        }
+        aio_context_release(ctx);
+        if (err < 0) {
+            bdrv_next_cleanup(&it);
+            goto fail;
+        }
+    }
+
+fail:
+    *first_bad_bs = bs;
+    return err;
+}
+
+BlockDriverState *bdrv_all_find_vmstate_bs(void)
+{
+    BlockDriverState *bs;
+    BdrvNextIterator it;
+
+    for (bs = bdrv_first(&it); bs; bs = bdrv_next(&it)) {
+        AioContext *ctx = bdrv_get_aio_context(bs);
+        bool found;
+
+        aio_context_acquire(ctx);
+        found = bdrv_can_snapshot(bs);
+        aio_context_release(ctx);
+
+        if (found) {
+            bdrv_next_cleanup(&it);
+            break;
+        }
+    }
+    return bs;
 }

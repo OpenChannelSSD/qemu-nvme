@@ -1,6 +1,8 @@
 # Default configuration for sparc-softmmu
 
+CONFIG_ISA_BUS=y
 CONFIG_ECC=y
+CONFIG_SCSI=y
 CONFIG_ESP=y
 CONFIG_ESCC=y
 CONFIG_M48T59=y

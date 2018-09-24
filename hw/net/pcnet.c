@@ -35,11 +35,13 @@
  * http://www.ibiblio.org/pub/historic-linux/early-ports/Sparc/NCR/NCR92C990.txt
  */
 
+#include "qemu/osdep.h"
 #include "hw/qdev.h"
 #include "net/net.h"
+#include "net/eth.h"
 #include "qemu/timer.h"
-#include "qemu/sockets.h"
 #include "sysemu/sysemu.h"
+#include "trace.h"
 
 #include "pcnet.h"
 
@@ -300,7 +302,7 @@ static inline void pcnet_tmd_load(PCNetState *s, struct pcnet_TMD *tmd,
             uint32_t tbadr;
             int16_t length;
             int16_t status;
-	} xda;
+        } xda;
         s->phys_mem_read(s->dma_opaque, addr, (void *)&xda, sizeof(xda), 0);
         tmd->tbadr = le32_to_cpu(xda.tbadr) & 0xffffff;
         tmd->length = le16_to_cpu(xda.length);
@@ -453,32 +455,32 @@ static inline void pcnet_rmd_store(PCNetState *s, struct pcnet_RMD *rmd,
 #define CHECK_RMD(ADDR,RES) do {                \
     switch (BCR_SWSTYLE(s)) {                   \
     case 0x00:                                  \
-        do {                                    \
+        {                                       \
             uint16_t rda[4];                    \
             s->phys_mem_read(s->dma_opaque, (ADDR), \
                 (void *)&rda[0], sizeof(rda), 0); \
             (RES) |= (rda[2] & 0xf000)!=0xf000; \
             (RES) |= (rda[3] & 0xf000)!=0x0000; \
-        } while (0);                            \
+        }                                       \
         break;                                  \
     case 0x01:                                  \
     case 0x02:                                  \
-        do {                                    \
+        {                                       \
             uint32_t rda[4];                    \
             s->phys_mem_read(s->dma_opaque, (ADDR), \
                 (void *)&rda[0], sizeof(rda), 0); \
             (RES) |= (rda[1] & 0x0000f000L)!=0x0000f000L; \
             (RES) |= (rda[2] & 0x0000f000L)!=0x00000000L; \
-        } while (0);                            \
+        }                                       \
         break;                                  \
     case 0x03:                                  \
-        do {                                    \
+        {                                       \
             uint32_t rda[4];                    \
             s->phys_mem_read(s->dma_opaque, (ADDR), \
                 (void *)&rda[0], sizeof(rda), 0); \
             (RES) |= (rda[0] & 0x0000f000L)!=0x00000000L; \
             (RES) |= (rda[1] & 0x0000f000L)!=0x0000f000L; \
-        } while (0);                            \
+        }                                       \
         break;                                  \
     }                                           \
 } while (0)
@@ -486,22 +488,22 @@ static inline void pcnet_rmd_store(PCNetState *s, struct pcnet_RMD *rmd,
 #define CHECK_TMD(ADDR,RES) do {                \
     switch (BCR_SWSTYLE(s)) {                   \
     case 0x00:                                  \
-        do {                                    \
+        {                                       \
             uint16_t xda[4];                    \
             s->phys_mem_read(s->dma_opaque, (ADDR), \
                 (void *)&xda[0], sizeof(xda), 0); \
             (RES) |= (xda[2] & 0xf000)!=0xf000; \
-        } while (0);                            \
+        }                                       \
         break;                                  \
     case 0x01:                                  \
     case 0x02:                                  \
     case 0x03:                                  \
-        do {                                    \
+        {                                       \
             uint32_t xda[4];                    \
             s->phys_mem_read(s->dma_opaque, (ADDR), \
                 (void *)&xda[0], sizeof(xda), 0); \
             (RES) |= (xda[1] & 0x0000f000L)!=0x0000f000L; \
-        } while (0);                            \
+        }                                       \
         break;                                  \
     }                                           \
 } while (0)
@@ -519,25 +521,6 @@ static inline void pcnet_rmd_store(PCNetState *s, struct pcnet_RMD *rmd,
            hdr->ether_shost[3],hdr->ether_shost[4],hdr->ether_shost[5], \
            be16_to_cpu(hdr->ether_type));       \
 } while (0)
-
-#define MULTICAST_FILTER_LEN 8
-
-static inline uint32_t lnc_mchash(const uint8_t *ether_addr)
-{
-#define LNC_POLYNOMIAL          0xEDB88320UL
-    uint32_t crc = 0xFFFFFFFF;
-    int idx, bit;
-    uint8_t data;
-
-    for (idx = 0; idx < 6; idx++) {
-        for (data = *ether_addr++, bit = 0; bit < MULTICAST_FILTER_LEN; bit++) {
-            crc = (crc >> 1) ^ (((crc ^ data) & 1) ? LNC_POLYNOMIAL : 0);
-            data >>= 1;
-        }
-    }
-    return crc;
-#undef LNC_POLYNOMIAL
-}
 
 #define CRC(crc, ch)	 (crc = (crc >> 8) ^ crctab[(crc ^ (ch)) & 0xff])
 
@@ -654,7 +637,7 @@ static inline int ladr_match(PCNetState *s, const uint8_t *buf, int size)
             s->csr[10] & 0xff, s->csr[10] >> 8,
             s->csr[11] & 0xff, s->csr[11] >> 8
         };
-        int index = lnc_mchash(hdr->ether_dhost) >> 26;
+        int index = net_crc32_le(hdr->ether_dhost, ETH_ALEN) >> 26;
         return !!(ladr[index >> 3] & (1 << (index & 7)));
     }
     return 0;
@@ -662,17 +645,20 @@ static inline int ladr_match(PCNetState *s, const uint8_t *buf, int size)
 
 static inline hwaddr pcnet_rdra_addr(PCNetState *s, int idx)
 {
-    while (idx < 1) idx += CSR_RCVRL(s);
+    while (idx < 1) {
+        idx += CSR_RCVRL(s);
+    }
     return s->rdra + ((CSR_RCVRL(s) - idx) * (BCR_SWSTYLE(s) ? 16 : 8));
 }
 
 static inline int64_t pcnet_get_next_poll_time(PCNetState *s, int64_t current_time)
 {
     int64_t next_time = current_time +
-        muldiv64(65536 - (CSR_SPND(s) ? 0 : CSR_POLL(s)),
-                 get_ticks_per_sec(), 33000000L);
-    if (next_time <= current_time)
+                        (65536 - (CSR_SPND(s) ? 0 : CSR_POLL(s))) * 30;
+
+    if (next_time <= current_time) {
         next_time = current_time + 1;
+    }
     return next_time;
 }
 
@@ -685,9 +671,7 @@ static void pcnet_bcr_writew(PCNetState *s, uint32_t rap, uint32_t val);
 
 static void pcnet_s_reset(PCNetState *s)
 {
-#ifdef PCNET_DEBUG
-    printf("pcnet_s_reset\n");
-#endif
+    trace_pcnet_s_reset(s);
 
     s->rdra = 0;
     s->tdra = 0;
@@ -760,9 +744,7 @@ static void pcnet_update_irq(PCNetState *s)
         s->csr[4] |= 0x0040;
         s->csr[0] |= 0x0080;
         isr = 1;
-#ifdef PCNET_DEBUG
-        printf("pcnet user int\n");
-#endif
+        trace_pcnet_user_int(s);
     }
 
 #if 1
@@ -777,9 +759,7 @@ static void pcnet_update_irq(PCNetState *s)
     }
 
     if (isr != s->isr) {
-#ifdef PCNET_DEBUG
-        printf("pcnet: INTA=%d\n", isr);
-#endif
+        trace_pcnet_isr_change(s, isr, s->isr);
     }
     qemu_set_irq(s->irq, isr);
     s->isr = isr;
@@ -791,9 +771,7 @@ static void pcnet_init(PCNetState *s)
     uint16_t padr[3], ladrf[4], mode;
     uint32_t rdra, tdra;
 
-#ifdef PCNET_DEBUG
-    printf("pcnet_init init_addr=0x%08x\n", PHYSADDR(s,CSR_IADR(s)));
-#endif
+    trace_pcnet_init(s, PHYSADDR(s, CSR_IADR(s)));
 
     if (BCR_SSIZE32(s)) {
         struct pcnet_initblk32 initblk;
@@ -802,13 +780,13 @@ static void pcnet_init(PCNetState *s)
         mode = le16_to_cpu(initblk.mode);
         rlen = initblk.rlen >> 4;
         tlen = initblk.tlen >> 4;
-	ladrf[0] = le16_to_cpu(initblk.ladrf[0]);
-	ladrf[1] = le16_to_cpu(initblk.ladrf[1]);
-	ladrf[2] = le16_to_cpu(initblk.ladrf[2]);
-	ladrf[3] = le16_to_cpu(initblk.ladrf[3]);
-	padr[0] = le16_to_cpu(initblk.padr[0]);
-	padr[1] = le16_to_cpu(initblk.padr[1]);
-	padr[2] = le16_to_cpu(initblk.padr[2]);
+        ladrf[0] = le16_to_cpu(initblk.ladrf[0]);
+        ladrf[1] = le16_to_cpu(initblk.ladrf[1]);
+        ladrf[2] = le16_to_cpu(initblk.ladrf[2]);
+        ladrf[3] = le16_to_cpu(initblk.ladrf[3]);
+        padr[0] = le16_to_cpu(initblk.padr[0]);
+        padr[1] = le16_to_cpu(initblk.padr[1]);
+        padr[2] = le16_to_cpu(initblk.padr[2]);
         rdra = le32_to_cpu(initblk.rdra);
         tdra = le32_to_cpu(initblk.tdra);
     } else {
@@ -816,13 +794,13 @@ static void pcnet_init(PCNetState *s)
         s->phys_mem_read(s->dma_opaque, PHYSADDR(s,CSR_IADR(s)),
                 (uint8_t *)&initblk, sizeof(initblk), 0);
         mode = le16_to_cpu(initblk.mode);
-	ladrf[0] = le16_to_cpu(initblk.ladrf[0]);
-	ladrf[1] = le16_to_cpu(initblk.ladrf[1]);
-	ladrf[2] = le16_to_cpu(initblk.ladrf[2]);
-	ladrf[3] = le16_to_cpu(initblk.ladrf[3]);
-	padr[0] = le16_to_cpu(initblk.padr[0]);
-	padr[1] = le16_to_cpu(initblk.padr[1]);
-	padr[2] = le16_to_cpu(initblk.padr[2]);
+        ladrf[0] = le16_to_cpu(initblk.ladrf[0]);
+        ladrf[1] = le16_to_cpu(initblk.ladrf[1]);
+        ladrf[2] = le16_to_cpu(initblk.ladrf[2]);
+        ladrf[3] = le16_to_cpu(initblk.ladrf[3]);
+        padr[0] = le16_to_cpu(initblk.padr[0]);
+        padr[1] = le16_to_cpu(initblk.padr[1]);
+        padr[2] = le16_to_cpu(initblk.padr[2]);
         rdra = le32_to_cpu(initblk.rdra);
         tdra = le32_to_cpu(initblk.tdra);
         rlen = rdra >> 29;
@@ -831,9 +809,7 @@ static void pcnet_init(PCNetState *s)
         tdra &= 0x00ffffff;
     }
 
-#if defined(PCNET_DEBUG)
-    printf("rlen=%d tlen=%d\n", rlen, tlen);
-#endif
+    trace_pcnet_rlen_tlen(s, rlen, tlen);
 
     CSR_RCVRL(s) = (rlen < 9) ? (1 << rlen) : 512;
     CSR_XMTRL(s) = (tlen < 9) ? (1 << tlen) : 512;
@@ -852,11 +828,8 @@ static void pcnet_init(PCNetState *s)
     CSR_RCVRC(s) = CSR_RCVRL(s);
     CSR_XMTRC(s) = CSR_XMTRL(s);
 
-#ifdef PCNET_DEBUG
-    printf("pcnet ss32=%d rdra=0x%08x[%d] tdra=0x%08x[%d]\n",
-        BCR_SSIZE32(s),
-        s->rdra, CSR_RCVRL(s), s->tdra, CSR_XMTRL(s));
-#endif
+    trace_pcnet_ss32_rdra_tdra(s, BCR_SSIZE32(s),
+                               s->rdra, CSR_RCVRL(s), s->tdra, CSR_XMTRL(s));
 
     s->csr[0] |= 0x0101;
     s->csr[0] &= ~0x0004;       /* clear STOP bit */
@@ -870,12 +843,12 @@ static void pcnet_start(PCNetState *s)
     printf("pcnet_start\n");
 #endif
 
-    if (!CSR_DTX(s))
+    if (!CSR_DTX(s)) {
         s->csr[0] |= 0x0010;    /* set TXON */
-
-    if (!CSR_DRX(s))
+    }
+    if (!CSR_DRX(s)) {
         s->csr[0] |= 0x0020;    /* set RXON */
-
+    }
     s->csr[0] &= ~0x0004;       /* clear STOP bit */
     s->csr[0] |= 0x0002;
     pcnet_poll_timer(s);
@@ -937,8 +910,7 @@ static void pcnet_rdte_poll(PCNetState *s)
                        crda);
             }
         } else {
-            printf("pcnet: BAD RMD RDA=0x" TARGET_FMT_plx "\n",
-                   crda);
+            printf("pcnet: BAD RMD RDA=0x" TARGET_FMT_plx "\n", crda);
 #endif
         }
     }
@@ -1005,15 +977,6 @@ static int pcnet_tdte_poll(PCNetState *s)
     }
 
     return !!(CSR_CXST(s) & 0x8000);
-}
-
-int pcnet_can_receive(NetClientState *nc)
-{
-    PCNetState *s = qemu_get_nic_opaque(nc);
-    if (CSR_STOP(s) || CSR_SPND(s))
-        return 0;
-
-    return sizeof(s->buffer)-16;
 }
 
 #define MIN_BUF_SIZE 60
@@ -1086,6 +1049,12 @@ ssize_t pcnet_receive(NetClientState *nc, const uint8_t *buf, size_t size_)
             int pktcount = 0;
 
             if (!s->looptest) {
+                if (size > 4092) {
+#ifdef PCNET_DEBUG_RMD
+                    fprintf(stderr, "pcnet: truncates rx packet.\n");
+#endif
+                    size = 4092;
+                }
                 memcpy(src, buf, size);
                 /* no need to compute the CRC */
                 src[size] = 0;
@@ -1106,7 +1075,7 @@ ssize_t pcnet_receive(NetClientState *nc, const uint8_t *buf, size_t size_)
                 uint32_t fcs = ~0;
                 uint8_t *p = src;
 
-                while (p != &src[size-4])
+                while (p != &src[size])
                     CRC(fcs, *p++);
                 crc_err = (*(uint32_t *)p != htonl(fcs));
             }
@@ -1183,10 +1152,11 @@ ssize_t pcnet_receive(NetClientState *nc, const uint8_t *buf, size_t size_)
 #endif
 
             while (pktcount--) {
-                if (CSR_RCVRC(s) <= 1)
+                if (CSR_RCVRC(s) <= 1) {
                     CSR_RCVRC(s) = CSR_RCVRL(s);
-                else
+                } else {
                     CSR_RCVRC(s)--;
+                }
             }
 
             pcnet_rdte_poll(s);
@@ -1212,7 +1182,7 @@ static void pcnet_transmit(PCNetState *s)
     hwaddr xmit_cxda = 0;
     int count = CSR_XMTRL(s)-1;
     int add_crc = 0;
-
+    int bcnt;
     s->xmit_pos = -1;
 
     if (!CSR_TXON(s)) {
@@ -1222,7 +1192,7 @@ static void pcnet_transmit(PCNetState *s)
 
     s->tx_busy = 1;
 
-    txagain:
+txagain:
     if (pcnet_tdte_poll(s)) {
         struct pcnet_TMD tmd;
 
@@ -1247,50 +1217,66 @@ static void pcnet_transmit(PCNetState *s)
             s->xmit_pos = -1;
             goto txdone;
         }
-        if (!GET_FIELD(tmd.status, TMDS, ENP)) {
-            int bcnt = 4096 - GET_FIELD(tmd.length, TMDL, BCNT);
-            s->phys_mem_read(s->dma_opaque, PHYSADDR(s, tmd.tbadr),
-                             s->buffer + s->xmit_pos, bcnt, CSR_BSWP(s));
-            s->xmit_pos += bcnt;
-        } else if (s->xmit_pos >= 0) {
-            int bcnt = 4096 - GET_FIELD(tmd.length, TMDL, BCNT);
-            s->phys_mem_read(s->dma_opaque, PHYSADDR(s, tmd.tbadr),
-                             s->buffer + s->xmit_pos, bcnt, CSR_BSWP(s));
-            s->xmit_pos += bcnt;
-#ifdef PCNET_DEBUG
-            printf("pcnet_transmit size=%d\n", s->xmit_pos);
-#endif
-            if (CSR_LOOP(s)) {
-                if (BCR_SWSTYLE(s) == 1)
-                    add_crc = !GET_FIELD(tmd.status, TMDS, NOFCS);
-                s->looptest = add_crc ? PCNET_LOOPTEST_CRC : PCNET_LOOPTEST_NOCRC;
-                pcnet_receive(qemu_get_queue(s->nic), s->buffer, s->xmit_pos);
-                s->looptest = 0;
-            } else
-                if (s->nic)
-                    qemu_send_packet(qemu_get_queue(s->nic), s->buffer,
-                                     s->xmit_pos);
 
-            s->csr[0] &= ~0x0008;   /* clear TDMD */
-            s->csr[4] |= 0x0004;    /* set TXSTRT */
-            s->xmit_pos = -1;
+        if (s->xmit_pos < 0) {
+            goto txdone;
         }
 
-    txdone:
+        bcnt = 4096 - GET_FIELD(tmd.length, TMDL, BCNT);
+
+        /* if multi-tmd packet outsizes s->buffer then skip it silently.
+         * Note: this is not what real hw does.
+         * Last four bytes of s->buffer are used to store CRC FCS code.
+         */
+        if (s->xmit_pos + bcnt > sizeof(s->buffer) - 4) {
+            s->xmit_pos = -1;
+            goto txdone;
+        }
+
+        s->phys_mem_read(s->dma_opaque, PHYSADDR(s, tmd.tbadr),
+                         s->buffer + s->xmit_pos, bcnt, CSR_BSWP(s));
+        s->xmit_pos += bcnt;
+
+        if (!GET_FIELD(tmd.status, TMDS, ENP)) {
+            goto txdone;
+        }
+
+#ifdef PCNET_DEBUG
+        printf("pcnet_transmit size=%d\n", s->xmit_pos);
+#endif
+        if (CSR_LOOP(s)) {
+            if (BCR_SWSTYLE(s) == 1)
+                add_crc = !GET_FIELD(tmd.status, TMDS, NOFCS);
+            s->looptest = add_crc ? PCNET_LOOPTEST_CRC : PCNET_LOOPTEST_NOCRC;
+            pcnet_receive(qemu_get_queue(s->nic), s->buffer, s->xmit_pos);
+            s->looptest = 0;
+        } else {
+            if (s->nic) {
+                qemu_send_packet(qemu_get_queue(s->nic), s->buffer,
+                                 s->xmit_pos);
+            }
+        }
+
+        s->csr[0] &= ~0x0008;   /* clear TDMD */
+        s->csr[4] |= 0x0004;    /* set TXSTRT */
+        s->xmit_pos = -1;
+
+txdone:
         SET_FIELD(&tmd.status, TMDS, OWN, 0);
         TMDSTORE(&tmd, PHYSADDR(s,CSR_CXDA(s)));
-        if (!CSR_TOKINTD(s) || (CSR_LTINTEN(s) && GET_FIELD(tmd.status, TMDS, LTINT)))
+        if (!CSR_TOKINTD(s)
+            || (CSR_LTINTEN(s) && GET_FIELD(tmd.status, TMDS, LTINT))) {
             s->csr[0] |= 0x0200;    /* set TINT */
-
-        if (CSR_XMTRC(s)<=1)
+        }
+        if (CSR_XMTRC(s) <= 1) {
             CSR_XMTRC(s) = CSR_XMTRL(s);
-        else
+        } else {
             CSR_XMTRC(s)--;
-        if (count--)
+        }
+        if (count--) {
             goto txagain;
-
-    } else
-    if (s->xmit_pos >= 0) {
+        }
+    } else if (s->xmit_pos >= 0) {
         struct pcnet_TMD tmd;
         TMDLOAD(&tmd, xmit_cxda);
         SET_FIELD(&tmd.misc, TMDM, BUFF, 1);
@@ -1301,9 +1287,9 @@ static void pcnet_transmit(PCNetState *s)
         s->csr[0] |= 0x0200;    /* set TINT */
         if (!CSR_DXSUFLO(s)) {
             s->csr[0] &= ~0x0010;
-        } else
-        if (count--)
-          goto txagain;
+        } else if (count--) {
+            goto txagain;
+        }
     }
 
     s->tx_busy = 0;
@@ -1315,13 +1301,11 @@ static void pcnet_poll(PCNetState *s)
         pcnet_rdte_poll(s);
     }
 
-    if (CSR_TDMD(s) ||
-        (CSR_TXON(s) && !CSR_DPOLL(s) && pcnet_tdte_poll(s)))
-    {
+    if (CSR_TDMD(s) || (CSR_TXON(s) && !CSR_DPOLL(s) && pcnet_tdte_poll(s))) {
         /* prevent recursion */
-        if (s->tx_busy)
+        if (s->tx_busy) {
             return;
-
+        }
         pcnet_transmit(s);
     }
 }
@@ -1340,15 +1324,16 @@ static void pcnet_poll_timer(void *opaque)
 
     if (!CSR_STOP(s) && !CSR_SPND(s) && !CSR_DPOLL(s)) {
         uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) * 33;
-        if (!s->timer || !now)
+        if (!s->timer || !now) {
             s->timer = now;
-        else {
+        } else {
             uint64_t t = now - s->timer + CSR_POLL(s);
             if (t > 0xffffLL) {
                 pcnet_poll(s);
                 CSR_POLL(s) = CSR_PINT(s);
-            } else
+            } else {
                 CSR_POLL(s) = t;
+            }
         }
         timer_mod(s->poll_timer,
             pcnet_get_next_poll_time(s,qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)));
@@ -1371,21 +1356,21 @@ static void pcnet_csr_writew(PCNetState *s, uint32_t rap, uint32_t new_value)
         val = (val & 0x007f) | (s->csr[0] & 0x7f00);
 
         /* IFF STOP, STRT and INIT are set, clear STRT and INIT */
-        if ((val&7) == 7)
-          val &= ~3;
-
-        if (!CSR_STOP(s) && (val & 4))
+        if ((val & 7) == 7) {
+            val &= ~3;
+        }
+        if (!CSR_STOP(s) && (val & 4)) {
             pcnet_stop(s);
-
-        if (!CSR_INIT(s) && (val & 1))
+        }
+        if (!CSR_INIT(s) && (val & 1)) {
             pcnet_init(s);
-
-        if (!CSR_STRT(s) && (val & 2))
+        }
+        if (!CSR_STRT(s) && (val & 2)) {
             pcnet_start(s);
-
-        if (CSR_TDMD(s))
+        }
+        if (CSR_TDMD(s)) {
             pcnet_transmit(s);
-
+        }
         return;
     case 1:
     case 2:
@@ -1429,12 +1414,16 @@ static void pcnet_csr_writew(PCNetState *s, uint32_t rap, uint32_t new_value)
     case 47: /* POLLINT */
     case 72:
     case 74:
+        break;
     case 76: /* RCVRL */
     case 78: /* XMTRL */
+        val = (val > 0) ? val : 512;
+        break;
     case 112:
-       if (CSR_STOP(s) || CSR_SPND(s))
-           break;
-       return;
+        if (CSR_STOP(s) || CSR_SPND(s)) {
+            break;
+        }
+        return;
     case 3:
         break;
     case 4:
@@ -1651,8 +1640,7 @@ void pcnet_ioport_writel(void *opaque, uint32_t addr, uint32_t val)
             pcnet_bcr_writew(s, s->rap, val & 0xffff);
             break;
         }
-    } else
-    if ((addr & 0x0f) == 0) {
+    } else if ((addr & 0x0f) == 0) {
         /* switch device to dword i/o mode */
         pcnet_bcr_writew(s, BCR_BSBC, pcnet_bcr_readw(s, BCR_BSBC) | 0x0080);
 #ifdef PCNET_DEBUG_IO
@@ -1714,17 +1702,12 @@ const VMStateDescription vmstate_pcnet = {
         VMSTATE_BUFFER(buffer, PCNetState),
         VMSTATE_UNUSED_TEST(is_version_2, 4),
         VMSTATE_INT32(tx_busy, PCNetState),
-        VMSTATE_TIMER(poll_timer, PCNetState),
+        VMSTATE_TIMER_PTR(poll_timer, PCNetState),
         VMSTATE_END_OF_LIST()
     }
 };
 
-void pcnet_common_cleanup(PCNetState *d)
-{
-    d->nic = NULL;
-}
-
-int pcnet_common_init(DeviceState *dev, PCNetState *s, NetClientInfo *info)
+void pcnet_common_init(DeviceState *dev, PCNetState *s, NetClientInfo *info)
 {
     int i;
     uint16_t checksum;
@@ -1763,6 +1746,4 @@ int pcnet_common_init(DeviceState *dev, PCNetState *s, NetClientInfo *info)
     *(uint16_t *)&s->prom[12] = cpu_to_le16(checksum);
 
     s->lnkst = 0x40; /* initial link state: up */
-
-    return 0;
 }

@@ -125,7 +125,7 @@ struct tpi_info {
     __u32 reserved3  : 12;
     __u32 int_type   : 3;
     __u32 reserved4  : 12;
-} __attribute__ ((packed));
+} __attribute__ ((packed, aligned(4)));
 
 /* channel command word (type 1) */
 struct ccw1 {
@@ -133,7 +133,7 @@ struct ccw1 {
     __u8 flags;
     __u16 count;
     __u32 cda;
-} __attribute__ ((packed));
+} __attribute__ ((packed, aligned(8)));
 
 #define CCW_FLAG_DC              0x80
 #define CCW_FLAG_CC              0x40

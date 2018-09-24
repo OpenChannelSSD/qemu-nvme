@@ -19,6 +19,7 @@
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "qxl.h"
 #include "trace.h"
 
@@ -77,7 +78,7 @@ void qxl_render_resize(PCIQXLDevice *qxl)
         qxl->guest_primary.bits_pp = 32;
         break;
     default:
-        fprintf(stderr, "%s: unhandled format: %x\n", __FUNCTION__,
+        fprintf(stderr, "%s: unhandled format: %x\n", __func__,
                 qxl->guest_primary.surface.format);
         qxl->guest_primary.bytes_pp = 4;
         qxl->guest_primary.bits_pp = 32;
@@ -159,7 +160,7 @@ static void qxl_render_update_area_unlocked(PCIQXLDevice *qxl)
 /*
  * use ssd.lock to protect render_update_cookie_num.
  * qxl_render_update is called by io thread or vcpu thread, and the completion
- * callbacks are called by spice_server thread, defering to bh called from the
+ * callbacks are called by spice_server thread, deferring to bh called from the
  * io thread.
  */
 void qxl_render_update(PCIQXLDevice *qxl)
@@ -168,7 +169,8 @@ void qxl_render_update(PCIQXLDevice *qxl)
 
     qemu_mutex_lock(&qxl->ssd.lock);
 
-    if (!runstate_is_running() || !qxl->guest_primary.commands) {
+    if (!runstate_is_running() || !qxl->guest_primary.commands ||
+        qxl->mode == QXL_MODE_UNDEFINED) {
         qxl_render_update_area_unlocked(qxl);
         qemu_mutex_unlock(&qxl->ssd.lock);
         return;
@@ -203,10 +205,35 @@ void qxl_render_update_area_done(PCIQXLDevice *qxl, QXLCookie *cookie)
     g_free(cookie);
 }
 
-static QEMUCursor *qxl_cursor(PCIQXLDevice *qxl, QXLCursor *cursor)
+static void qxl_unpack_chunks(void *dest, size_t size, PCIQXLDevice *qxl,
+                              QXLDataChunk *chunk, uint32_t group_id)
+{
+    uint32_t max_chunks = 32;
+    size_t offset = 0;
+    size_t bytes;
+
+    for (;;) {
+        bytes = MIN(size - offset, chunk->data_size);
+        memcpy(dest + offset, chunk->data, bytes);
+        offset += bytes;
+        if (offset == size) {
+            return;
+        }
+        chunk = qxl_phys2virt(qxl, chunk->next_chunk, group_id);
+        if (!chunk) {
+            return;
+        }
+        max_chunks--;
+        if (max_chunks == 0) {
+            return;
+        }
+    }
+}
+
+static QEMUCursor *qxl_cursor(PCIQXLDevice *qxl, QXLCursor *cursor,
+                              uint32_t group_id)
 {
     QEMUCursor *c;
-    uint8_t *image, *mask;
     size_t size;
 
     c = cursor_alloc(cursor->header.width, cursor->header.height);
@@ -215,22 +242,14 @@ static QEMUCursor *qxl_cursor(PCIQXLDevice *qxl, QXLCursor *cursor)
     switch (cursor->header.type) {
     case SPICE_CURSOR_TYPE_ALPHA:
         size = sizeof(uint32_t) * cursor->header.width * cursor->header.height;
-        memcpy(c->data, cursor->chunk.data, size);
+        qxl_unpack_chunks(c->data, size, qxl, &cursor->chunk, group_id);
         if (qxl->debug > 2) {
             cursor_print_ascii_art(c, "qxl/alpha");
         }
         break;
-    case SPICE_CURSOR_TYPE_MONO:
-        mask  = cursor->chunk.data;
-        image = mask + cursor_get_mono_bpl(c) * c->width;
-        cursor_set_mono(c, 0xffffff, 0x000000, image, 1, mask);
-        if (qxl->debug > 2) {
-            cursor_print_ascii_art(c, "qxl/mono");
-        }
-        break;
     default:
         fprintf(stderr, "%s: not implemented: type %d\n",
-                __FUNCTION__, cursor->header.type);
+                __func__, cursor->header.type);
         goto fail;
     }
     return c;
@@ -257,7 +276,7 @@ int qxl_render_cursor(PCIQXLDevice *qxl, QXLCommandExt *ext)
     }
 
     if (qxl->debug > 1 && cmd->type != QXL_CURSOR_MOVE) {
-        fprintf(stderr, "%s", __FUNCTION__);
+        fprintf(stderr, "%s", __func__);
         qxl_log_cmd_cursor(qxl, cmd, ext->group_id);
         fprintf(stderr, "\n");
     }
@@ -267,11 +286,7 @@ int qxl_render_cursor(PCIQXLDevice *qxl, QXLCommandExt *ext)
         if (!cursor) {
             return 1;
         }
-        if (cursor->chunk.data_size != cursor->data_size) {
-            fprintf(stderr, "%s: multiple chunks\n", __FUNCTION__);
-            return 1;
-        }
-        c = qxl_cursor(qxl, cursor);
+        c = qxl_cursor(qxl, cursor, ext->group_id);
         if (c == NULL) {
             c = cursor_builtin_left_ptr();
         }
@@ -283,12 +298,14 @@ int qxl_render_cursor(PCIQXLDevice *qxl, QXLCommandExt *ext)
         qxl->ssd.mouse_x = cmd->u.set.position.x;
         qxl->ssd.mouse_y = cmd->u.set.position.y;
         qemu_mutex_unlock(&qxl->ssd.lock);
+        qemu_bh_schedule(qxl->ssd.cursor_bh);
         break;
     case QXL_CURSOR_MOVE:
         qemu_mutex_lock(&qxl->ssd.lock);
         qxl->ssd.mouse_x = cmd->u.position.x;
         qxl->ssd.mouse_y = cmd->u.position.y;
         qemu_mutex_unlock(&qxl->ssd.lock);
+        qemu_bh_schedule(qxl->ssd.cursor_bh);
         break;
     }
     return 0;

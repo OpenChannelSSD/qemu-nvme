@@ -9,14 +9,16 @@
  * (at your option) any later version.
  */
 
-#include "config.h"
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "e500.h"
 #include "hw/boards.h"
 #include "sysemu/device_tree.h"
 #include "hw/ppc/openpic.h"
+#include "qemu/error-report.h"
+#include "cpu.h"
 
-static void mpc8544ds_fixup_devtree(PPCE500Params *params, void *fdt)
+static void mpc8544ds_fixup_devtree(void *fdt)
 {
     const char model[] = "MPC8544DS";
     const char compatible[] = "MPC8544DS\0MPC85xxDS";
@@ -28,27 +30,46 @@ static void mpc8544ds_fixup_devtree(PPCE500Params *params, void *fdt)
 
 static void mpc8544ds_init(MachineState *machine)
 {
-    PPCE500Params params = {
-        .pci_first_slot = 0x11,
-        .pci_nr_slots = 2,
-        .fixup_devtree = mpc8544ds_fixup_devtree,
-        .mpic_version = OPENPIC_MODEL_FSL_MPIC_20,
-    };
+    if (machine->ram_size > 0xc0000000) {
+        error_report("The MPC8544DS board only supports up to 3GB of RAM");
+        exit(1);
+    }
 
-    ppce500_init(machine, &params);
+    ppce500_init(machine);
 }
 
+static void e500plat_machine_class_init(ObjectClass *oc, void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    PPCE500MachineClass *pmc = PPCE500_MACHINE_CLASS(oc);
 
-static QEMUMachine ppce500_machine = {
-    .name = "mpc8544ds",
-    .desc = "mpc8544ds",
-    .init = mpc8544ds_init,
-    .max_cpus = 15,
+    pmc->pci_first_slot = 0x11;
+    pmc->pci_nr_slots = 2;
+    pmc->fixup_devtree = mpc8544ds_fixup_devtree;
+    pmc->mpic_version = OPENPIC_MODEL_FSL_MPIC_20;
+    pmc->ccsrbar_base = 0xE0000000ULL;
+    pmc->pci_mmio_base = 0xC0000000ULL;
+    pmc->pci_mmio_bus_base = 0xC0000000ULL;
+    pmc->pci_pio_base = 0xE1000000ULL;
+    pmc->spin_base = 0xEF000000ULL;
+
+    mc->desc = "mpc8544ds";
+    mc->init = mpc8544ds_init;
+    mc->max_cpus = 15;
+    mc->default_cpu_type = POWERPC_CPU_TYPE_NAME("e500v2_v30");
+}
+
+#define TYPE_MPC8544DS_MACHINE  MACHINE_TYPE_NAME("mpc8544ds")
+
+static const TypeInfo mpc8544ds_info = {
+    .name          = TYPE_MPC8544DS_MACHINE,
+    .parent        = TYPE_PPCE500_MACHINE,
+    .class_init    = e500plat_machine_class_init,
 };
 
-static void ppce500_machine_init(void)
+static void mpc8544ds_register_types(void)
 {
-    qemu_register_machine(&ppce500_machine);
+    type_register_static(&mpc8544ds_info);
 }
 
-machine_init(ppce500_machine_init);
+type_init(mpc8544ds_register_types)

@@ -10,7 +10,8 @@
  * GNU GPL, version 2 or (at your option) any later version.
  */
 
-#include "hw/ssi.h"
+#include "qemu/osdep.h"
+#include "hw/ssi/ssi.h"
 
 typedef struct {
     SSISlave parent_obj;
@@ -115,7 +116,7 @@ static const VMStateDescription vmstate_max111x = {
         VMSTATE_UINT8(tb1, MAX111xState),
         VMSTATE_UINT8(rb2, MAX111xState),
         VMSTATE_UINT8(rb3, MAX111xState),
-        VMSTATE_INT32_EQUAL(inputs, MAX111xState),
+        VMSTATE_INT32_EQUAL(inputs, MAX111xState, NULL),
         VMSTATE_INT32(com, MAX111xState),
         VMSTATE_ARRAY_INT32_UNSAFE(input, MAX111xState, inputs,
                                    vmstate_info_uint8, uint8_t),
@@ -146,14 +147,14 @@ static int max111x_init(SSISlave *d, int inputs)
     return 0;
 }
 
-static int max1110_init(SSISlave *dev)
+static void max1110_realize(SSISlave *dev, Error **errp)
 {
-    return max111x_init(dev, 8);
+    max111x_init(dev, 8);
 }
 
-static int max1111_init(SSISlave *dev)
+static void max1111_realize(SSISlave *dev, Error **errp)
 {
-    return max111x_init(dev, 4);
+    max111x_init(dev, 4);
 }
 
 void max111x_set_input(DeviceState *dev, int line, uint8_t value)
@@ -182,7 +183,7 @@ static void max1110_class_init(ObjectClass *klass, void *data)
 {
     SSISlaveClass *k = SSI_SLAVE_CLASS(klass);
 
-    k->init = max1110_init;
+    k->realize = max1110_realize;
 }
 
 static const TypeInfo max1110_info = {
@@ -195,7 +196,7 @@ static void max1111_class_init(ObjectClass *klass, void *data)
 {
     SSISlaveClass *k = SSI_SLAVE_CLASS(klass);
 
-    k->init = max1111_init;
+    k->realize = max1111_realize;
 }
 
 static const TypeInfo max1111_info = {

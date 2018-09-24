@@ -10,11 +10,14 @@
  * See the COPYING.LIB file in the top-level directory.
  */
 
-#include <glib.h>
+#include "qemu/osdep.h"
 #include "block/aio.h"
+#include "qapi/error.h"
 #include "qemu/timer.h"
 #include "qemu/sockets.h"
 #include "qemu/error-report.h"
+#include "qemu/coroutine.h"
+#include "qemu/main-loop.h"
 
 static AioContext *ctx;
 
@@ -97,16 +100,9 @@ static void event_ready_cb(EventNotifier *e)
 
 /* Tests using aio_*.  */
 
-static void test_notify(void)
-{
-    g_assert(!aio_poll(ctx, false));
-    aio_notify(ctx);
-    g_assert(!aio_poll(ctx, true));
-    g_assert(!aio_poll(ctx, false));
-}
-
 typedef struct {
     QemuMutex start_lock;
+    EventNotifier notifier;
     bool thread_acquired;
 } AcquireTestData;
 
@@ -118,6 +114,11 @@ static void *test_acquire_thread(void *opaque)
     qemu_mutex_lock(&data->start_lock);
     qemu_mutex_unlock(&data->start_lock);
 
+    /* event_notifier_set might be called either before or after
+     * the main thread's call to poll().  The test case's outcome
+     * should be the same in either case.
+     */
+    event_notifier_set(&data->notifier);
     aio_context_acquire(ctx);
     aio_context_release(ctx);
 
@@ -126,20 +127,25 @@ static void *test_acquire_thread(void *opaque)
     return NULL;
 }
 
-static void dummy_notifier_read(EventNotifier *unused)
+static void set_event_notifier(AioContext *ctx, EventNotifier *notifier,
+                               EventNotifierHandler *handler)
 {
-    g_assert(false); /* should never be invoked */
+    aio_set_event_notifier(ctx, notifier, false, handler, NULL);
+}
+
+static void dummy_notifier_read(EventNotifier *n)
+{
+    event_notifier_test_and_clear(n);
 }
 
 static void test_acquire(void)
 {
     QemuThread thread;
-    EventNotifier notifier;
     AcquireTestData data;
 
     /* Dummy event notifier ensures aio_poll() will block */
-    event_notifier_init(&notifier, false);
-    aio_set_event_notifier(ctx, &notifier, dummy_notifier_read);
+    event_notifier_init(&data.notifier, false);
+    set_event_notifier(ctx, &data.notifier, dummy_notifier_read);
     g_assert(!aio_poll(ctx, false)); /* consume aio_notify() */
 
     qemu_mutex_init(&data.start_lock);
@@ -153,12 +159,13 @@ static void test_acquire(void)
     /* Block in aio_poll(), let other thread kick us and acquire context */
     aio_context_acquire(ctx);
     qemu_mutex_unlock(&data.start_lock); /* let the thread run */
-    g_assert(!aio_poll(ctx, true));
+    g_assert(aio_poll(ctx, true));
+    g_assert(!data.thread_acquired);
     aio_context_release(ctx);
 
     qemu_thread_join(&thread);
-    aio_set_event_notifier(ctx, &notifier, NULL);
-    event_notifier_cleanup(&notifier);
+    set_event_notifier(ctx, &data.notifier, NULL);
+    event_notifier_cleanup(&data.notifier);
 
     g_assert(data.thread_acquired);
 }
@@ -316,11 +323,11 @@ static void test_set_event_notifier(void)
 {
     EventNotifierTestData data = { .n = 0, .active = 0 };
     event_notifier_init(&data.e, false);
-    aio_set_event_notifier(ctx, &data.e, event_ready_cb);
+    set_event_notifier(ctx, &data.e, event_ready_cb);
     g_assert(!aio_poll(ctx, false));
     g_assert_cmpint(data.n, ==, 0);
 
-    aio_set_event_notifier(ctx, &data.e, NULL);
+    set_event_notifier(ctx, &data.e, NULL);
     g_assert(!aio_poll(ctx, false));
     g_assert_cmpint(data.n, ==, 0);
     event_notifier_cleanup(&data.e);
@@ -330,8 +337,8 @@ static void test_wait_event_notifier(void)
 {
     EventNotifierTestData data = { .n = 0, .active = 1 };
     event_notifier_init(&data.e, false);
-    aio_set_event_notifier(ctx, &data.e, event_ready_cb);
-    g_assert(!aio_poll(ctx, false));
+    set_event_notifier(ctx, &data.e, event_ready_cb);
+    while (aio_poll(ctx, false));
     g_assert_cmpint(data.n, ==, 0);
     g_assert_cmpint(data.active, ==, 1);
 
@@ -344,7 +351,7 @@ static void test_wait_event_notifier(void)
     g_assert_cmpint(data.n, ==, 1);
     g_assert_cmpint(data.active, ==, 0);
 
-    aio_set_event_notifier(ctx, &data.e, NULL);
+    set_event_notifier(ctx, &data.e, NULL);
     g_assert(!aio_poll(ctx, false));
     g_assert_cmpint(data.n, ==, 1);
 
@@ -355,8 +362,8 @@ static void test_flush_event_notifier(void)
 {
     EventNotifierTestData data = { .n = 0, .active = 10, .auto_set = true };
     event_notifier_init(&data.e, false);
-    aio_set_event_notifier(ctx, &data.e, event_ready_cb);
-    g_assert(!aio_poll(ctx, false));
+    set_event_notifier(ctx, &data.e, event_ready_cb);
+    while (aio_poll(ctx, false));
     g_assert_cmpint(data.n, ==, 0);
     g_assert_cmpint(data.active, ==, 10);
 
@@ -371,9 +378,33 @@ static void test_flush_event_notifier(void)
     g_assert_cmpint(data.active, ==, 0);
     g_assert(!aio_poll(ctx, false));
 
-    aio_set_event_notifier(ctx, &data.e, NULL);
+    set_event_notifier(ctx, &data.e, NULL);
     g_assert(!aio_poll(ctx, false));
     event_notifier_cleanup(&data.e);
+}
+
+static void test_aio_external_client(void)
+{
+    int i, j;
+
+    for (i = 1; i < 3; i++) {
+        EventNotifierTestData data = { .n = 0, .active = 10, .auto_set = true };
+        event_notifier_init(&data.e, false);
+        aio_set_event_notifier(ctx, &data.e, true, event_ready_cb, NULL);
+        event_notifier_set(&data.e);
+        for (j = 0; j < i; j++) {
+            aio_disable_external(ctx);
+        }
+        for (j = 0; j < i; j++) {
+            assert(!aio_poll(ctx, false));
+            assert(event_notifier_test_and_clear(&data.e));
+            event_notifier_set(&data.e);
+            aio_enable_external(ctx);
+        }
+        assert(aio_poll(ctx, false));
+        set_event_notifier(ctx, &data.e, NULL);
+        event_notifier_cleanup(&data.e);
+    }
 }
 
 static void test_wait_event_notifier_noflush(void)
@@ -382,7 +413,7 @@ static void test_wait_event_notifier_noflush(void)
     EventNotifierTestData dummy = { .n = 0, .active = 1 };
 
     event_notifier_init(&data.e, false);
-    aio_set_event_notifier(ctx, &data.e, event_ready_cb);
+    set_event_notifier(ctx, &data.e, event_ready_cb);
 
     g_assert(!aio_poll(ctx, false));
     g_assert_cmpint(data.n, ==, 0);
@@ -395,7 +426,7 @@ static void test_wait_event_notifier_noflush(void)
 
     /* An active event notifier forces aio_poll to look at EventNotifiers.  */
     event_notifier_init(&dummy.e, false);
-    aio_set_event_notifier(ctx, &dummy.e, event_ready_cb);
+    set_event_notifier(ctx, &dummy.e, event_ready_cb);
 
     event_notifier_set(&data.e);
     g_assert(aio_poll(ctx, false));
@@ -415,10 +446,10 @@ static void test_wait_event_notifier_noflush(void)
     g_assert_cmpint(dummy.n, ==, 1);
     g_assert_cmpint(dummy.active, ==, 0);
 
-    aio_set_event_notifier(ctx, &dummy.e, NULL);
+    set_event_notifier(ctx, &dummy.e, NULL);
     event_notifier_cleanup(&dummy.e);
 
-    aio_set_event_notifier(ctx, &data.e, NULL);
+    set_event_notifier(ctx, &data.e, NULL);
     g_assert(!aio_poll(ctx, false));
     g_assert_cmpint(data.n, ==, 2);
 
@@ -429,14 +460,14 @@ static void test_timer_schedule(void)
 {
     TimerTestData data = { .n = 0, .ctx = ctx, .ns = SCALE_MS * 750LL,
                            .max = 2,
-                           .clock_type = QEMU_CLOCK_VIRTUAL };
+                           .clock_type = QEMU_CLOCK_REALTIME };
     EventNotifier e;
 
     /* aio_poll will not block to wait for timers to complete unless it has
      * an fd to wait on. Fixing this breaks other tests. So create a dummy one.
      */
     event_notifier_init(&e, false);
-    aio_set_event_notifier(ctx, &e, dummy_io_handler_read);
+    set_event_notifier(ctx, &e, dummy_io_handler_read);
     aio_poll(ctx, false);
 
     aio_timer_init(ctx, &data.timer, data.clock_type,
@@ -475,7 +506,7 @@ static void test_timer_schedule(void)
     g_assert(!aio_poll(ctx, false));
     g_assert_cmpint(data.n, ==, 2);
 
-    aio_set_event_notifier(ctx, &e, NULL);
+    set_event_notifier(ctx, &e, NULL);
     event_notifier_cleanup(&e);
 
     timer_del(&data.timer);
@@ -493,14 +524,6 @@ static void test_timer_schedule(void)
  *   non-blocking loop like "while (g_main_context_iteration(NULL, false)"
  *   works well, and that's what I am using.
  */
-
-static void test_source_notify(void)
-{
-    while (g_main_context_iteration(NULL, false));
-    aio_notify(ctx);
-    g_assert(g_main_context_iteration(NULL, true));
-    g_assert(!g_main_context_iteration(NULL, false));
-}
 
 static void test_source_flush(void)
 {
@@ -654,11 +677,11 @@ static void test_source_set_event_notifier(void)
 {
     EventNotifierTestData data = { .n = 0, .active = 0 };
     event_notifier_init(&data.e, false);
-    aio_set_event_notifier(ctx, &data.e, event_ready_cb);
+    set_event_notifier(ctx, &data.e, event_ready_cb);
     while (g_main_context_iteration(NULL, false));
     g_assert_cmpint(data.n, ==, 0);
 
-    aio_set_event_notifier(ctx, &data.e, NULL);
+    set_event_notifier(ctx, &data.e, NULL);
     while (g_main_context_iteration(NULL, false));
     g_assert_cmpint(data.n, ==, 0);
     event_notifier_cleanup(&data.e);
@@ -668,8 +691,8 @@ static void test_source_wait_event_notifier(void)
 {
     EventNotifierTestData data = { .n = 0, .active = 1 };
     event_notifier_init(&data.e, false);
-    aio_set_event_notifier(ctx, &data.e, event_ready_cb);
-    g_assert(g_main_context_iteration(NULL, false));
+    set_event_notifier(ctx, &data.e, event_ready_cb);
+    while (g_main_context_iteration(NULL, false));
     g_assert_cmpint(data.n, ==, 0);
     g_assert_cmpint(data.active, ==, 1);
 
@@ -682,7 +705,7 @@ static void test_source_wait_event_notifier(void)
     g_assert_cmpint(data.n, ==, 1);
     g_assert_cmpint(data.active, ==, 0);
 
-    aio_set_event_notifier(ctx, &data.e, NULL);
+    set_event_notifier(ctx, &data.e, NULL);
     while (g_main_context_iteration(NULL, false));
     g_assert_cmpint(data.n, ==, 1);
 
@@ -693,8 +716,8 @@ static void test_source_flush_event_notifier(void)
 {
     EventNotifierTestData data = { .n = 0, .active = 10, .auto_set = true };
     event_notifier_init(&data.e, false);
-    aio_set_event_notifier(ctx, &data.e, event_ready_cb);
-    g_assert(g_main_context_iteration(NULL, false));
+    set_event_notifier(ctx, &data.e, event_ready_cb);
+    while (g_main_context_iteration(NULL, false));
     g_assert_cmpint(data.n, ==, 0);
     g_assert_cmpint(data.active, ==, 10);
 
@@ -709,7 +732,7 @@ static void test_source_flush_event_notifier(void)
     g_assert_cmpint(data.active, ==, 0);
     g_assert(!g_main_context_iteration(NULL, false));
 
-    aio_set_event_notifier(ctx, &data.e, NULL);
+    set_event_notifier(ctx, &data.e, NULL);
     while (g_main_context_iteration(NULL, false));
     event_notifier_cleanup(&data.e);
 }
@@ -720,7 +743,7 @@ static void test_source_wait_event_notifier_noflush(void)
     EventNotifierTestData dummy = { .n = 0, .active = 1 };
 
     event_notifier_init(&data.e, false);
-    aio_set_event_notifier(ctx, &data.e, event_ready_cb);
+    set_event_notifier(ctx, &data.e, event_ready_cb);
 
     while (g_main_context_iteration(NULL, false));
     g_assert_cmpint(data.n, ==, 0);
@@ -733,7 +756,7 @@ static void test_source_wait_event_notifier_noflush(void)
 
     /* An active event notifier forces aio_poll to look at EventNotifiers.  */
     event_notifier_init(&dummy.e, false);
-    aio_set_event_notifier(ctx, &dummy.e, event_ready_cb);
+    set_event_notifier(ctx, &dummy.e, event_ready_cb);
 
     event_notifier_set(&data.e);
     g_assert(g_main_context_iteration(NULL, false));
@@ -753,10 +776,10 @@ static void test_source_wait_event_notifier_noflush(void)
     g_assert_cmpint(dummy.n, ==, 1);
     g_assert_cmpint(dummy.active, ==, 0);
 
-    aio_set_event_notifier(ctx, &dummy.e, NULL);
+    set_event_notifier(ctx, &dummy.e, NULL);
     event_notifier_cleanup(&dummy.e);
 
-    aio_set_event_notifier(ctx, &data.e, NULL);
+    set_event_notifier(ctx, &data.e, NULL);
     while (g_main_context_iteration(NULL, false));
     g_assert_cmpint(data.n, ==, 2);
 
@@ -767,7 +790,7 @@ static void test_source_timer_schedule(void)
 {
     TimerTestData data = { .n = 0, .ctx = ctx, .ns = SCALE_MS * 750LL,
                            .max = 2,
-                           .clock_type = QEMU_CLOCK_VIRTUAL };
+                           .clock_type = QEMU_CLOCK_REALTIME };
     EventNotifier e;
     int64_t expiry;
 
@@ -775,7 +798,7 @@ static void test_source_timer_schedule(void)
      * an fd to wait on. Fixing this breaks other tests. So create a dummy one.
      */
     event_notifier_init(&e, false);
-    aio_set_event_notifier(ctx, &e, dummy_io_handler_read);
+    set_event_notifier(ctx, &e, dummy_io_handler_read);
     do {} while (g_main_context_iteration(NULL, false));
 
     aio_timer_init(ctx, &data.timer, data.clock_type,
@@ -800,37 +823,69 @@ static void test_source_timer_schedule(void)
     g_assert_cmpint(data.n, ==, 2);
     g_assert(qemu_clock_get_ns(data.clock_type) > expiry);
 
-    aio_set_event_notifier(ctx, &e, NULL);
+    set_event_notifier(ctx, &e, NULL);
     event_notifier_cleanup(&e);
 
     timer_del(&data.timer);
 }
 
+/*
+ * Check that aio_co_enter() can chain many times
+ *
+ * Two coroutines should be able to invoke each other via aio_co_enter() many
+ * times without hitting a limit like stack exhaustion.  In other words, the
+ * calls should be chained instead of nested.
+ */
+
+typedef struct {
+    Coroutine *other;
+    unsigned i;
+    unsigned max;
+} ChainData;
+
+static void coroutine_fn chain(void *opaque)
+{
+    ChainData *data = opaque;
+
+    for (data->i = 0; data->i < data->max; data->i++) {
+        /* Queue up the other coroutine... */
+        aio_co_enter(ctx, data->other);
+
+        /* ...and give control to it */
+        qemu_coroutine_yield();
+    }
+}
+
+static void test_queue_chaining(void)
+{
+    /* This number of iterations hit stack exhaustion in the past: */
+    ChainData data_a = { .max = 25000 };
+    ChainData data_b = { .max = 25000 };
+
+    data_b.other = qemu_coroutine_create(chain, &data_a);
+    data_a.other = qemu_coroutine_create(chain, &data_b);
+
+    qemu_coroutine_enter(data_b.other);
+
+    g_assert_cmpint(data_a.i, ==, data_a.max);
+    g_assert_cmpint(data_b.i, ==, data_b.max - 1);
+
+    /* Allow the second coroutine to terminate */
+    qemu_coroutine_enter(data_a.other);
+
+    g_assert_cmpint(data_b.i, ==, data_b.max);
+}
 
 /* End of tests.  */
 
 int main(int argc, char **argv)
 {
-    Error *local_error = NULL;
-    GSource *src;
-
-    init_clocks();
-
-    ctx = aio_context_new(&local_error);
-    if (!ctx) {
-        error_report("Failed to create AIO Context: '%s'",
-                     error_get_pretty(local_error));
-        error_free(local_error);
-        exit(1);
-    }
-    src = aio_get_g_source(ctx);
-    g_source_attach(src, NULL);
-    g_source_unref(src);
+    qemu_init_main_loop(&error_fatal);
+    ctx = qemu_get_aio_context();
 
     while (g_main_context_iteration(NULL, false));
 
     g_test_init(&argc, &argv, NULL);
-    g_test_add_func("/aio/notify",                  test_notify);
     g_test_add_func("/aio/acquire",                 test_acquire);
     g_test_add_func("/aio/bh/schedule",             test_bh_schedule);
     g_test_add_func("/aio/bh/schedule10",           test_bh_schedule10);
@@ -843,9 +898,11 @@ int main(int argc, char **argv)
     g_test_add_func("/aio/event/wait",              test_wait_event_notifier);
     g_test_add_func("/aio/event/wait/no-flush-cb",  test_wait_event_notifier_noflush);
     g_test_add_func("/aio/event/flush",             test_flush_event_notifier);
+    g_test_add_func("/aio/external-client",         test_aio_external_client);
     g_test_add_func("/aio/timer/schedule",          test_timer_schedule);
 
-    g_test_add_func("/aio-gsource/notify",                  test_source_notify);
+    g_test_add_func("/aio/coroutine/queue-chaining", test_queue_chaining);
+
     g_test_add_func("/aio-gsource/flush",                   test_source_flush);
     g_test_add_func("/aio-gsource/bh/schedule",             test_source_bh_schedule);
     g_test_add_func("/aio-gsource/bh/schedule10",           test_source_bh_schedule10);

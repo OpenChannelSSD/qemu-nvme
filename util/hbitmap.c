@@ -9,13 +9,11 @@
  * later.  See the COPYING file in the top-level directory.
  */
 
-#include <string.h>
-#include <glib.h>
-#include <assert.h>
 #include "qemu/osdep.h"
 #include "qemu/hbitmap.h"
 #include "qemu/host-utils.h"
 #include "trace.h"
+#include "crypto/hash.h"
 
 /* HBitmaps provides an array of bits.  The bits are stored as usual in an
  * array of unsigned longs, but HBitmap is also optimized to provide fast
@@ -81,6 +79,9 @@ struct HBitmap {
      */
     int granularity;
 
+    /* A meta dirty bitmap to track the dirtiness of bits in this HBitmap. */
+    HBitmap *meta;
+
     /* A number of progressively less coarse bitmaps (i.e. level 0 is the
      * coarsest).  Each bit in level N represents a word in level N+1 that
      * has a set bit, except the last level where each bit represents the
@@ -90,6 +91,9 @@ struct HBitmap {
      * bitmap will still allocate HBITMAP_LEVELS arrays.
      */
     unsigned long *levels[HBITMAP_LEVELS];
+
+    /* The length of each levels[] array. */
+    uint64_t sizes[HBITMAP_LEVELS];
 };
 
 /* Advance hbi to the next nonzero word and return it.  hbi->pos
@@ -103,8 +107,9 @@ unsigned long hbitmap_iter_skip_words(HBitmapIter *hbi)
 
     unsigned long cur;
     do {
-        cur = hbi->cur[--i];
+        i--;
         pos >>= BITS_PER_LEVEL;
+        cur = hbi->cur[i] & hb->levels[i][pos];
     } while (cur == 0);
 
     /* Check for end of iteration.  We always use fewer than BITS_PER_LONG
@@ -136,6 +141,30 @@ unsigned long hbitmap_iter_skip_words(HBitmapIter *hbi)
     return cur;
 }
 
+int64_t hbitmap_iter_next(HBitmapIter *hbi, bool advance)
+{
+    unsigned long cur = hbi->cur[HBITMAP_LEVELS - 1] &
+            hbi->hb->levels[HBITMAP_LEVELS - 1][hbi->pos];
+    int64_t item;
+
+    if (cur == 0) {
+        cur = hbitmap_iter_skip_words(hbi);
+        if (cur == 0) {
+            return -1;
+        }
+    }
+
+    if (advance) {
+        /* The next call will resume work from the next bit.  */
+        hbi->cur[HBITMAP_LEVELS - 1] = cur & (cur - 1);
+    } else {
+        hbi->cur[HBITMAP_LEVELS - 1] = cur;
+    }
+    item = ((uint64_t)hbi->pos << BITS_PER_LEVEL) + ctzl(cur);
+
+    return item << hbi->granularity;
+}
+
 void hbitmap_iter_init(HBitmapIter *hbi, const HBitmap *hb, uint64_t first)
 {
     unsigned i, bit;
@@ -161,6 +190,45 @@ void hbitmap_iter_init(HBitmapIter *hbi, const HBitmap *hb, uint64_t first)
             hbi->cur[i] &= ~(1UL << bit);
         }
     }
+}
+
+int64_t hbitmap_next_zero(const HBitmap *hb, uint64_t start)
+{
+    size_t pos = (start >> hb->granularity) >> BITS_PER_LEVEL;
+    unsigned long *last_lev = hb->levels[HBITMAP_LEVELS - 1];
+    uint64_t sz = hb->sizes[HBITMAP_LEVELS - 1];
+    unsigned long cur = last_lev[pos];
+    unsigned start_bit_offset =
+            (start >> hb->granularity) & (BITS_PER_LONG - 1);
+    int64_t res;
+
+    cur |= (1UL << start_bit_offset) - 1;
+    assert((start >> hb->granularity) < hb->size);
+
+    if (cur == (unsigned long)-1) {
+        do {
+            pos++;
+        } while (pos < sz && last_lev[pos] == (unsigned long)-1);
+
+        if (pos >= sz) {
+            return -1;
+        }
+
+        cur = last_lev[pos];
+    }
+
+    res = (pos << BITS_PER_LEVEL) + ctol(cur);
+    if (res >= hb->size) {
+        return -1;
+    }
+
+    res = res << hb->granularity;
+    if (res < start) {
+        assert(((start - res) >> hb->granularity) == 0);
+        return start;
+    }
+
+    return res;
 }
 
 bool hbitmap_empty(const HBitmap *hb)
@@ -209,25 +277,27 @@ static uint64_t hb_count_between(HBitmap *hb, uint64_t start, uint64_t last)
 }
 
 /* Setting starts at the last layer and propagates up if an element
- * changes from zero to non-zero.
+ * changes.
  */
 static inline bool hb_set_elem(unsigned long *elem, uint64_t start, uint64_t last)
 {
     unsigned long mask;
-    bool changed;
+    unsigned long old;
 
     assert((last >> BITS_PER_LEVEL) == (start >> BITS_PER_LEVEL));
     assert(start <= last);
 
     mask = 2UL << (last & (BITS_PER_LONG - 1));
     mask -= 1UL << (start & (BITS_PER_LONG - 1));
-    changed = (*elem == 0);
+    old = *elem;
     *elem |= mask;
-    return changed;
+    return old != *elem;
 }
 
-/* The recursive workhorse (the depth is limited to HBITMAP_LEVELS)... */
-static void hb_set_between(HBitmap *hb, int level, uint64_t start, uint64_t last)
+/* The recursive workhorse (the depth is limited to HBITMAP_LEVELS)...
+ * Returns true if at least one bit is changed. */
+static bool hb_set_between(HBitmap *hb, int level, uint64_t start,
+                           uint64_t last)
 {
     size_t pos = start >> BITS_PER_LEVEL;
     size_t lastpos = last >> BITS_PER_LEVEL;
@@ -256,22 +326,28 @@ static void hb_set_between(HBitmap *hb, int level, uint64_t start, uint64_t last
     if (level > 0 && changed) {
         hb_set_between(hb, level - 1, pos, lastpos);
     }
+    return changed;
 }
 
 void hbitmap_set(HBitmap *hb, uint64_t start, uint64_t count)
 {
     /* Compute range in the last layer.  */
+    uint64_t first, n;
     uint64_t last = start + count - 1;
 
     trace_hbitmap_set(hb, start, count,
                       start >> hb->granularity, last >> hb->granularity);
 
-    start >>= hb->granularity;
+    first = start >> hb->granularity;
     last >>= hb->granularity;
-    count = last - start + 1;
+    assert(last < hb->size);
+    n = last - first + 1;
 
-    hb->count += count - hb_count_between(hb, start, last);
-    hb_set_between(hb, HBITMAP_LEVELS - 1, start, last);
+    hb->count += n - hb_count_between(hb, first, last);
+    if (hb_set_between(hb, HBITMAP_LEVELS - 1, first, last) &&
+        hb->meta) {
+        hbitmap_set(hb->meta, start, count);
+    }
 }
 
 /* Resetting works the other way round: propagate up if the new
@@ -292,8 +368,10 @@ static inline bool hb_reset_elem(unsigned long *elem, uint64_t start, uint64_t l
     return blanked;
 }
 
-/* The recursive workhorse (the depth is limited to HBITMAP_LEVELS)... */
-static void hb_reset_between(HBitmap *hb, int level, uint64_t start, uint64_t last)
+/* The recursive workhorse (the depth is limited to HBITMAP_LEVELS)...
+ * Returns true if at least one bit is changed. */
+static bool hb_reset_between(HBitmap *hb, int level, uint64_t start,
+                             uint64_t last)
 {
     size_t pos = start >> BITS_PER_LEVEL;
     size_t lastpos = last >> BITS_PER_LEVEL;
@@ -336,21 +414,60 @@ static void hb_reset_between(HBitmap *hb, int level, uint64_t start, uint64_t la
     if (level > 0 && changed) {
         hb_reset_between(hb, level - 1, pos, lastpos);
     }
+
+    return changed;
+
 }
 
 void hbitmap_reset(HBitmap *hb, uint64_t start, uint64_t count)
 {
     /* Compute range in the last layer.  */
+    uint64_t first;
     uint64_t last = start + count - 1;
 
     trace_hbitmap_reset(hb, start, count,
                         start >> hb->granularity, last >> hb->granularity);
 
-    start >>= hb->granularity;
+    first = start >> hb->granularity;
     last >>= hb->granularity;
+    assert(last < hb->size);
 
-    hb->count -= hb_count_between(hb, start, last);
-    hb_reset_between(hb, HBITMAP_LEVELS - 1, start, last);
+    hb->count -= hb_count_between(hb, first, last);
+    if (hb_reset_between(hb, HBITMAP_LEVELS - 1, first, last) &&
+        hb->meta) {
+        hbitmap_set(hb->meta, start, count);
+    }
+}
+
+void hbitmap_reset_all(HBitmap *hb)
+{
+    unsigned int i;
+
+    /* Same as hbitmap_alloc() except for memset() instead of malloc() */
+    for (i = HBITMAP_LEVELS; --i >= 1; ) {
+        memset(hb->levels[i], 0, hb->sizes[i] * sizeof(unsigned long));
+    }
+
+    hb->levels[0][0] = 1UL << (BITS_PER_LONG - 1);
+    hb->count = 0;
+}
+
+bool hbitmap_is_serializable(const HBitmap *hb)
+{
+    /* Every serialized chunk must be aligned to 64 bits so that endianness
+     * requirements can be fulfilled on both 64 bit and 32 bit hosts.
+     * We have hbitmap_serialization_align() which converts this
+     * alignment requirement from bitmap bits to items covered (e.g. sectors).
+     * That value is:
+     *    64 << hb->granularity
+     * Since this value must not exceed UINT64_MAX, hb->granularity must be
+     * less than 58 (== 64 - 6, where 6 is ld(64), i.e. 1 << 6 == 64).
+     *
+     * In order for hbitmap_serialization_align() to always return a
+     * meaningful value, bitmaps that are to be serialized must have a
+     * granularity of less than 58. */
+
+    return hb->granularity < 58;
 }
 
 bool hbitmap_get(const HBitmap *hb, uint64_t item)
@@ -358,13 +475,172 @@ bool hbitmap_get(const HBitmap *hb, uint64_t item)
     /* Compute position and bit in the last layer.  */
     uint64_t pos = item >> hb->granularity;
     unsigned long bit = 1UL << (pos & (BITS_PER_LONG - 1));
+    assert(pos < hb->size);
 
     return (hb->levels[HBITMAP_LEVELS - 1][pos >> BITS_PER_LEVEL] & bit) != 0;
+}
+
+uint64_t hbitmap_serialization_align(const HBitmap *hb)
+{
+    assert(hbitmap_is_serializable(hb));
+
+    /* Require at least 64 bit granularity to be safe on both 64 bit and 32 bit
+     * hosts. */
+    return UINT64_C(64) << hb->granularity;
+}
+
+/* Start should be aligned to serialization granularity, chunk size should be
+ * aligned to serialization granularity too, except for last chunk.
+ */
+static void serialization_chunk(const HBitmap *hb,
+                                uint64_t start, uint64_t count,
+                                unsigned long **first_el, uint64_t *el_count)
+{
+    uint64_t last = start + count - 1;
+    uint64_t gran = hbitmap_serialization_align(hb);
+
+    assert((start & (gran - 1)) == 0);
+    assert((last >> hb->granularity) < hb->size);
+    if ((last >> hb->granularity) != hb->size - 1) {
+        assert((count & (gran - 1)) == 0);
+    }
+
+    start = (start >> hb->granularity) >> BITS_PER_LEVEL;
+    last = (last >> hb->granularity) >> BITS_PER_LEVEL;
+
+    *first_el = &hb->levels[HBITMAP_LEVELS - 1][start];
+    *el_count = last - start + 1;
+}
+
+uint64_t hbitmap_serialization_size(const HBitmap *hb,
+                                    uint64_t start, uint64_t count)
+{
+    uint64_t el_count;
+    unsigned long *cur;
+
+    if (!count) {
+        return 0;
+    }
+    serialization_chunk(hb, start, count, &cur, &el_count);
+
+    return el_count * sizeof(unsigned long);
+}
+
+void hbitmap_serialize_part(const HBitmap *hb, uint8_t *buf,
+                            uint64_t start, uint64_t count)
+{
+    uint64_t el_count;
+    unsigned long *cur, *end;
+
+    if (!count) {
+        return;
+    }
+    serialization_chunk(hb, start, count, &cur, &el_count);
+    end = cur + el_count;
+
+    while (cur != end) {
+        unsigned long el =
+            (BITS_PER_LONG == 32 ? cpu_to_le32(*cur) : cpu_to_le64(*cur));
+
+        memcpy(buf, &el, sizeof(el));
+        buf += sizeof(el);
+        cur++;
+    }
+}
+
+void hbitmap_deserialize_part(HBitmap *hb, uint8_t *buf,
+                              uint64_t start, uint64_t count,
+                              bool finish)
+{
+    uint64_t el_count;
+    unsigned long *cur, *end;
+
+    if (!count) {
+        return;
+    }
+    serialization_chunk(hb, start, count, &cur, &el_count);
+    end = cur + el_count;
+
+    while (cur != end) {
+        memcpy(cur, buf, sizeof(*cur));
+
+        if (BITS_PER_LONG == 32) {
+            le32_to_cpus((uint32_t *)cur);
+        } else {
+            le64_to_cpus((uint64_t *)cur);
+        }
+
+        buf += sizeof(unsigned long);
+        cur++;
+    }
+    if (finish) {
+        hbitmap_deserialize_finish(hb);
+    }
+}
+
+void hbitmap_deserialize_zeroes(HBitmap *hb, uint64_t start, uint64_t count,
+                                bool finish)
+{
+    uint64_t el_count;
+    unsigned long *first;
+
+    if (!count) {
+        return;
+    }
+    serialization_chunk(hb, start, count, &first, &el_count);
+
+    memset(first, 0, el_count * sizeof(unsigned long));
+    if (finish) {
+        hbitmap_deserialize_finish(hb);
+    }
+}
+
+void hbitmap_deserialize_ones(HBitmap *hb, uint64_t start, uint64_t count,
+                              bool finish)
+{
+    uint64_t el_count;
+    unsigned long *first;
+
+    if (!count) {
+        return;
+    }
+    serialization_chunk(hb, start, count, &first, &el_count);
+
+    memset(first, 0xff, el_count * sizeof(unsigned long));
+    if (finish) {
+        hbitmap_deserialize_finish(hb);
+    }
+}
+
+void hbitmap_deserialize_finish(HBitmap *bitmap)
+{
+    int64_t i, size, prev_size;
+    int lev;
+
+    /* restore levels starting from penultimate to zero level, assuming
+     * that the last level is ok */
+    size = MAX((bitmap->size + BITS_PER_LONG - 1) >> BITS_PER_LEVEL, 1);
+    for (lev = HBITMAP_LEVELS - 1; lev-- > 0; ) {
+        prev_size = size;
+        size = MAX((size + BITS_PER_LONG - 1) >> BITS_PER_LEVEL, 1);
+        memset(bitmap->levels[lev], 0, size * sizeof(unsigned long));
+
+        for (i = 0; i < prev_size; ++i) {
+            if (bitmap->levels[lev + 1][i]) {
+                bitmap->levels[lev][i >> BITS_PER_LEVEL] |=
+                    1UL << (i & (BITS_PER_LONG - 1));
+            }
+        }
+    }
+
+    bitmap->levels[0][0] |= 1UL << (BITS_PER_LONG - 1);
+    bitmap->count = hb_count_between(bitmap, 0, bitmap->size - 1);
 }
 
 void hbitmap_free(HBitmap *hb)
 {
     unsigned i;
+    assert(!hb->meta);
     for (i = HBITMAP_LEVELS; i-- > 0; ) {
         g_free(hb->levels[i]);
     }
@@ -373,7 +649,7 @@ void hbitmap_free(HBitmap *hb)
 
 HBitmap *hbitmap_alloc(uint64_t size, int granularity)
 {
-    HBitmap *hb = g_malloc0(sizeof (struct HBitmap));
+    HBitmap *hb = g_new0(struct HBitmap, 1);
     unsigned i;
 
     assert(granularity >= 0 && granularity < 64);
@@ -384,7 +660,8 @@ HBitmap *hbitmap_alloc(uint64_t size, int granularity)
     hb->granularity = granularity;
     for (i = HBITMAP_LEVELS; i-- > 0; ) {
         size = MAX((size + BITS_PER_LONG - 1) >> BITS_PER_LEVEL, 1);
-        hb->levels[i] = g_malloc0(size * sizeof(unsigned long));
+        hb->sizes[i] = size;
+        hb->levels[i] = g_new0(unsigned long, size);
     }
 
     /* We necessarily have free bits in level 0 due to the definition
@@ -394,4 +671,114 @@ HBitmap *hbitmap_alloc(uint64_t size, int granularity)
     assert(size == 1);
     hb->levels[0][0] |= 1UL << (BITS_PER_LONG - 1);
     return hb;
+}
+
+void hbitmap_truncate(HBitmap *hb, uint64_t size)
+{
+    bool shrink;
+    unsigned i;
+    uint64_t num_elements = size;
+    uint64_t old;
+
+    /* Size comes in as logical elements, adjust for granularity. */
+    size = (size + (1ULL << hb->granularity) - 1) >> hb->granularity;
+    assert(size <= ((uint64_t)1 << HBITMAP_LOG_MAX_SIZE));
+    shrink = size < hb->size;
+
+    /* bit sizes are identical; nothing to do. */
+    if (size == hb->size) {
+        return;
+    }
+
+    /* If we're losing bits, let's clear those bits before we invalidate all of
+     * our invariants. This helps keep the bitcount consistent, and will prevent
+     * us from carrying around garbage bits beyond the end of the map.
+     */
+    if (shrink) {
+        /* Don't clear partial granularity groups;
+         * start at the first full one. */
+        uint64_t start = ROUND_UP(num_elements, UINT64_C(1) << hb->granularity);
+        uint64_t fix_count = (hb->size << hb->granularity) - start;
+
+        assert(fix_count);
+        hbitmap_reset(hb, start, fix_count);
+    }
+
+    hb->size = size;
+    for (i = HBITMAP_LEVELS; i-- > 0; ) {
+        size = MAX(BITS_TO_LONGS(size), 1);
+        if (hb->sizes[i] == size) {
+            break;
+        }
+        old = hb->sizes[i];
+        hb->sizes[i] = size;
+        hb->levels[i] = g_realloc(hb->levels[i], size * sizeof(unsigned long));
+        if (!shrink) {
+            memset(&hb->levels[i][old], 0x00,
+                   (size - old) * sizeof(*hb->levels[i]));
+        }
+    }
+    if (hb->meta) {
+        hbitmap_truncate(hb->meta, hb->size << hb->granularity);
+    }
+}
+
+
+/**
+ * Given HBitmaps A and B, let A := A (BITOR) B.
+ * Bitmap B will not be modified.
+ *
+ * @return true if the merge was successful,
+ *         false if it was not attempted.
+ */
+bool hbitmap_merge(HBitmap *a, const HBitmap *b)
+{
+    int i;
+    uint64_t j;
+
+    if ((a->size != b->size) || (a->granularity != b->granularity)) {
+        return false;
+    }
+
+    if (hbitmap_count(b) == 0) {
+        return true;
+    }
+
+    /* This merge is O(size), as BITS_PER_LONG and HBITMAP_LEVELS are constant.
+     * It may be possible to improve running times for sparsely populated maps
+     * by using hbitmap_iter_next, but this is suboptimal for dense maps.
+     */
+    for (i = HBITMAP_LEVELS - 1; i >= 0; i--) {
+        for (j = 0; j < a->sizes[i]; j++) {
+            a->levels[i][j] |= b->levels[i][j];
+        }
+    }
+
+    return true;
+}
+
+HBitmap *hbitmap_create_meta(HBitmap *hb, int chunk_size)
+{
+    assert(!(chunk_size & (chunk_size - 1)));
+    assert(!hb->meta);
+    hb->meta = hbitmap_alloc(hb->size << hb->granularity,
+                             hb->granularity + ctz32(chunk_size));
+    return hb->meta;
+}
+
+void hbitmap_free_meta(HBitmap *hb)
+{
+    assert(hb->meta);
+    hbitmap_free(hb->meta);
+    hb->meta = NULL;
+}
+
+char *hbitmap_sha256(const HBitmap *bitmap, Error **errp)
+{
+    size_t size = bitmap->sizes[HBITMAP_LEVELS - 1] * sizeof(unsigned long);
+    char *data = (char *)bitmap->levels[HBITMAP_LEVELS - 1];
+    char *hash = NULL;
+    qcrypto_hash_digest(QCRYPTO_HASH_ALG_SHA256, data, size, &hash, errp);
+
+    return hash;
 }

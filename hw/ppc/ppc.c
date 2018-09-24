@@ -21,6 +21,9 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
+#include "qemu-common.h"
+#include "cpu.h"
 #include "hw/hw.h"
 #include "hw/ppc/ppc.h"
 #include "hw/ppc/ppc_e500.h"
@@ -51,8 +54,6 @@
 #  define LOG_TB(...) do { } while (0)
 #endif
 
-#define NSEC_PER_SEC    1000000000LL
-
 static void cpu_ppc_tb_stop (CPUPPCState *env);
 static void cpu_ppc_tb_start (CPUPPCState *env);
 
@@ -60,7 +61,16 @@ void ppc_set_irq(PowerPCCPU *cpu, int n_IRQ, int level)
 {
     CPUState *cs = CPU(cpu);
     CPUPPCState *env = &cpu->env;
-    unsigned int old_pending = env->pending_interrupts;
+    unsigned int old_pending;
+    bool locked = false;
+
+    /* We may already have the BQL if coming from the reset path */
+    if (!qemu_mutex_iothread_locked()) {
+        locked = true;
+        qemu_mutex_lock_iothread();
+    }
+
+    old_pending = env->pending_interrupts;
 
     if (level) {
         env->pending_interrupts |= 1 << n_IRQ;
@@ -78,9 +88,14 @@ void ppc_set_irq(PowerPCCPU *cpu, int n_IRQ, int level)
 #endif
     }
 
+
     LOG_IRQ("%s: %p n_IRQ %d level %d => pending %08" PRIx32
                 "req %08x\n", __func__, env, n_IRQ, level,
                 env->pending_interrupts, CPU(cpu)->interrupt_request);
+
+    if (locked) {
+        qemu_mutex_unlock_iothread();
+    }
 }
 
 /* PowerPC 6xx / 7xx internal IRQ controller */
@@ -163,9 +178,9 @@ static void ppc6xx_set_irq(void *opaque, int pin, int level)
     }
 }
 
-void ppc6xx_irq_init(CPUPPCState *env)
+void ppc6xx_irq_init(PowerPCCPU *cpu)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    CPUPPCState *env = &cpu->env;
 
     env->irq_inputs = (void **)qemu_allocate_irqs(&ppc6xx_set_irq, cpu,
                                                   PPC6xx_INPUT_NB);
@@ -250,9 +265,9 @@ static void ppc970_set_irq(void *opaque, int pin, int level)
     }
 }
 
-void ppc970_irq_init(CPUPPCState *env)
+void ppc970_irq_init(PowerPCCPU *cpu)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    CPUPPCState *env = &cpu->env;
 
     env->irq_inputs = (void **)qemu_allocate_irqs(&ppc970_set_irq, cpu,
                                                   PPC970_INPUT_NB);
@@ -286,9 +301,9 @@ static void power7_set_irq(void *opaque, int pin, int level)
     }
 }
 
-void ppcPOWER7_irq_init(CPUPPCState *env)
+void ppcPOWER7_irq_init(PowerPCCPU *cpu)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    CPUPPCState *env = &cpu->env;
 
     env->irq_inputs = (void **)qemu_allocate_irqs(&power7_set_irq, cpu,
                                                   POWER7_INPUT_NB);
@@ -371,9 +386,9 @@ static void ppc40x_set_irq(void *opaque, int pin, int level)
     }
 }
 
-void ppc40x_irq_init(CPUPPCState *env)
+void ppc40x_irq_init(PowerPCCPU *cpu)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    CPUPPCState *env = &cpu->env;
 
     env->irq_inputs = (void **)qemu_allocate_irqs(&ppc40x_set_irq,
                                                   cpu, PPC40x_INPUT_NB);
@@ -396,7 +411,7 @@ static void ppce500_set_irq(void *opaque, int pin, int level)
             if (level) {
                 LOG_IRQ("%s: reset the PowerPC system\n",
                             __func__);
-                qemu_system_reset_request();
+                qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             }
             break;
         case PPCE500_INPUT_RESET_CORE:
@@ -435,9 +450,9 @@ static void ppce500_set_irq(void *opaque, int pin, int level)
     }
 }
 
-void ppce500_irq_init(CPUPPCState *env)
+void ppce500_irq_init(PowerPCCPU *cpu)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    CPUPPCState *env = &cpu->env;
 
     env->irq_inputs = (void **)qemu_allocate_irqs(&ppce500_set_irq,
                                                   cpu, PPCE500_INPUT_NB);
@@ -464,7 +479,7 @@ void ppce500_set_mpic_proxy(bool enabled)
 uint64_t cpu_ppc_get_tb(ppc_tb_t *tb_env, uint64_t vmclk, int64_t tb_offset)
 {
     /* TB time in tb periods */
-    return muldiv64(vmclk, tb_env->tb_freq, get_ticks_per_sec()) + tb_offset;
+    return muldiv64(vmclk, tb_env->tb_freq, NANOSECONDS_PER_SECOND) + tb_offset;
 }
 
 uint64_t cpu_ppc_load_tbl (CPUPPCState *env)
@@ -505,7 +520,9 @@ uint32_t cpu_ppc_load_tbu (CPUPPCState *env)
 static inline void cpu_ppc_store_tb(ppc_tb_t *tb_env, uint64_t vmclk,
                                     int64_t *tb_offsetp, uint64_t value)
 {
-    *tb_offsetp = value - muldiv64(vmclk, tb_env->tb_freq, get_ticks_per_sec());
+    *tb_offsetp = value -
+        muldiv64(vmclk, tb_env->tb_freq, NANOSECONDS_PER_SECOND);
+
     LOG_TB("%s: tb %016" PRIx64 " offset %08" PRIx64 "\n",
                 __func__, value, *tb_offsetp);
 }
@@ -639,11 +656,11 @@ static inline uint32_t _cpu_ppc_load_decr(CPUPPCState *env, uint64_t next)
 
     diff = next - qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     if (diff >= 0) {
-        decr = muldiv64(diff, tb_env->decr_freq, get_ticks_per_sec());
+        decr = muldiv64(diff, tb_env->decr_freq, NANOSECONDS_PER_SECOND);
     } else if (tb_env->flags & PPC_TIMER_BOOKE) {
         decr = 0;
     }  else {
-        decr = -muldiv64(-diff, tb_env->decr_freq, get_ticks_per_sec());
+        decr = -muldiv64(-diff, tb_env->decr_freq, NANOSECONDS_PER_SECOND);
     }
     LOG_TB("%s: %08" PRIx32 "\n", __func__, decr);
 
@@ -675,7 +692,8 @@ uint64_t cpu_ppc_load_purr (CPUPPCState *env)
 
     diff = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - tb_env->purr_start;
 
-    return tb_env->purr_load + muldiv64(diff, tb_env->tb_freq, get_ticks_per_sec());
+    return tb_env->purr_load +
+        muldiv64(diff, tb_env->tb_freq, NANOSECONDS_PER_SECOND);
 }
 
 /* When decrementer expires,
@@ -695,9 +713,18 @@ static inline void cpu_ppc_decr_lower(PowerPCCPU *cpu)
 
 static inline void cpu_ppc_hdecr_excp(PowerPCCPU *cpu)
 {
+    CPUPPCState *env = &cpu->env;
+
     /* Raise it */
-    LOG_TB("raise decrementer exception\n");
-    ppc_set_irq(cpu, PPC_INTERRUPT_HDECR, 1);
+    LOG_TB("raise hv decrementer exception\n");
+
+    /* The architecture specifies that we don't deliver HDEC
+     * interrupts in a PM state. Not only they don't cause a
+     * wakeup but they also get effectively discarded.
+     */
+    if (!env->in_pm_state) {
+        ppc_set_irq(cpu, PPC_INTERRUPT_HDECR, 1);
+    }
 }
 
 static inline void cpu_ppc_hdecr_lower(PowerPCCPU *cpu)
@@ -751,7 +778,7 @@ static void __cpu_ppc_store_decr(PowerPCCPU *cpu, uint64_t *nextp,
 
     /* Calculate the next timer event */
     now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    next = now + muldiv64(value, get_ticks_per_sec(), tb_env->decr_freq);
+    next = now + muldiv64(value, NANOSECONDS_PER_SECOND, tb_env->decr_freq);
     *nextp = next;
 
     /* Adjust timer */
@@ -833,10 +860,9 @@ static void cpu_ppc_set_tb_clk (void *opaque, uint32_t freq)
     cpu_ppc_store_purr(cpu, 0x0000000000000000ULL);
 }
 
-static void timebase_pre_save(void *opaque)
+static void timebase_save(PPCTimebase *tb)
 {
-    PPCTimebase *tb = opaque;
-    uint64_t ticks = cpu_get_real_ticks();
+    uint64_t ticks = cpu_get_host_ticks();
     PowerPCCPU *first_ppc_cpu = POWERPC_CPU(first_cpu);
 
     if (!first_ppc_cpu->env.tb_env) {
@@ -844,42 +870,30 @@ static void timebase_pre_save(void *opaque)
         return;
     }
 
-    tb->time_of_the_day_ns = get_clock_realtime();
+    /* not used anymore, we keep it for compatibility */
+    tb->time_of_the_day_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
     /*
-     * tb_offset is only expected to be changed by migration so
+     * tb_offset is only expected to be changed by QEMU so
      * there is no need to update it from KVM here
      */
     tb->guest_timebase = ticks + first_ppc_cpu->env.tb_env->tb_offset;
 }
 
-static int timebase_post_load(void *opaque, int version_id)
+static void timebase_load(PPCTimebase *tb)
 {
-    PPCTimebase *tb_remote = opaque;
     CPUState *cpu;
     PowerPCCPU *first_ppc_cpu = POWERPC_CPU(first_cpu);
-    int64_t tb_off_adj, tb_off, ns_diff;
-    int64_t migration_duration_ns, migration_duration_tb, guest_tb, host_ns;
+    int64_t tb_off_adj, tb_off;
     unsigned long freq;
 
     if (!first_ppc_cpu->env.tb_env) {
         error_report("No timebase object");
-        return -1;
+        return;
     }
 
     freq = first_ppc_cpu->env.tb_env->tb_freq;
-    /*
-     * Calculate timebase on the destination side of migration.
-     * The destination timebase must be not less than the source timebase.
-     * We try to adjust timebase by downtime if host clocks are not
-     * too much out of sync (1 second for now).
-     */
-    host_ns = get_clock_realtime();
-    ns_diff = MAX(0, host_ns - tb_remote->time_of_the_day_ns);
-    migration_duration_ns = MIN(NSEC_PER_SEC, ns_diff);
-    migration_duration_tb = muldiv64(migration_duration_ns, freq, NSEC_PER_SEC);
-    guest_tb = tb_remote->guest_timebase + MIN(0, migration_duration_tb);
 
-    tb_off_adj = guest_tb - cpu_get_real_ticks();
+    tb_off_adj = tb->guest_timebase - cpu_get_host_ticks();
 
     tb_off = first_ppc_cpu->env.tb_env->tb_offset;
     trace_ppc_tb_adjust(tb_off, tb_off_adj, tb_off_adj - tb_off,
@@ -889,7 +903,44 @@ static int timebase_post_load(void *opaque, int version_id)
     CPU_FOREACH(cpu) {
         PowerPCCPU *pcpu = POWERPC_CPU(cpu);
         pcpu->env.tb_env->tb_offset = tb_off_adj;
+#if defined(CONFIG_KVM)
+        kvm_set_one_reg(cpu, KVM_REG_PPC_TB_OFFSET,
+                        &pcpu->env.tb_env->tb_offset);
+#endif
     }
+}
+
+void cpu_ppc_clock_vm_state_change(void *opaque, int running,
+                                   RunState state)
+{
+    PPCTimebase *tb = opaque;
+
+    if (running) {
+        timebase_load(tb);
+    } else {
+        timebase_save(tb);
+    }
+}
+
+/*
+ * When migrating, read the clock just before migration,
+ * so that the guest clock counts during the events
+ * between:
+ *
+ *  * vm_stop()
+ *  *
+ *  * pre_save()
+ *
+ *  This reduces clock difference on migration from 5s
+ *  to 0.1s (when max_downtime == 5s), because sending the
+ *  final pages of memory (which happens between vm_stop()
+ *  and pre_save()) takes max_downtime.
+ */
+static int timebase_pre_save(void *opaque)
+{
+    PPCTimebase *tb = opaque;
+
+    timebase_save(tb);
 
     return 0;
 }
@@ -900,7 +951,6 @@ const VMStateDescription vmstate_ppc_timebase = {
     .minimum_version_id = 1,
     .minimum_version_id_old = 1,
     .pre_save = timebase_pre_save,
-    .post_load = timebase_post_load,
     .fields      = (VMStateField []) {
         VMSTATE_UINT64(guest_timebase, PPCTimebase),
         VMSTATE_INT64(time_of_the_day_ns, PPCTimebase),
@@ -923,9 +973,7 @@ clk_setup_cb cpu_ppc_tb_init (CPUPPCState *env, uint32_t freq)
     }
     /* Create new timer */
     tb_env->decr_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, &cpu_ppc_decr_cb, cpu);
-    if (0) {
-        /* XXX: find a suitable condition to enable the hypervisor decrementer
-         */
+    if (env->has_hv_mode) {
         tb_env->hdecr_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, &cpu_ppc_hdecr_cb,
                                                 cpu);
     } else {
@@ -937,13 +985,6 @@ clk_setup_cb cpu_ppc_tb_init (CPUPPCState *env, uint32_t freq)
 }
 
 /* Specific helpers for POWER & PowerPC 601 RTC */
-#if 0
-static clk_setup_cb cpu_ppc601_rtc_init (CPUPPCState *env)
-{
-    return cpu_ppc_tb_init(env, 7812500);
-}
-#endif
-
 void cpu_ppc601_store_rtcu (CPUPPCState *env, uint32_t value)
 {
     _cpu_ppc_store_tbu(env, value);
@@ -1011,7 +1052,7 @@ static void cpu_4xx_fit_cb (void *opaque)
         /* Cannot occur, but makes gcc happy */
         return;
     }
-    next = now + muldiv64(next, get_ticks_per_sec(), tb_env->tb_freq);
+    next = now + muldiv64(next, NANOSECONDS_PER_SECOND, tb_env->tb_freq);
     if (next == now)
         next++;
     timer_mod(ppc40x_timer->fit_timer, next);
@@ -1042,7 +1083,7 @@ static void start_stop_pit (CPUPPCState *env, ppc_tb_t *tb_env, int is_excp)
                     __func__, ppc40x_timer->pit_reload);
         now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         next = now + muldiv64(ppc40x_timer->pit_reload,
-                              get_ticks_per_sec(), tb_env->decr_freq);
+                              NANOSECONDS_PER_SECOND, tb_env->decr_freq);
         if (is_excp)
             next += tb_env->decr_next - now;
         if (next == now)
@@ -1107,7 +1148,7 @@ static void cpu_4xx_wdt_cb (void *opaque)
         /* Cannot occur, but makes gcc happy */
         return;
     }
-    next = now + muldiv64(next, get_ticks_per_sec(), tb_env->decr_freq);
+    next = now + muldiv64(next, NANOSECONDS_PER_SECOND, tb_env->decr_freq);
     if (next == now)
         next++;
     LOG_TB("%s: TCR " TARGET_FMT_lx " TSR " TARGET_FMT_lx "\n", __func__,
@@ -1316,186 +1357,4 @@ void PPC_debug_write (void *opaque, uint32_t addr, uint32_t val)
         qemu_set_log(val | 0x100);
         break;
     }
-}
-
-/*****************************************************************************/
-/* NVRAM helpers */
-static inline uint32_t nvram_read (nvram_t *nvram, uint32_t addr)
-{
-    return (*nvram->read_fn)(nvram->opaque, addr);
-}
-
-static inline void nvram_write (nvram_t *nvram, uint32_t addr, uint32_t val)
-{
-    (*nvram->write_fn)(nvram->opaque, addr, val);
-}
-
-static void NVRAM_set_byte(nvram_t *nvram, uint32_t addr, uint8_t value)
-{
-    nvram_write(nvram, addr, value);
-}
-
-static uint8_t NVRAM_get_byte(nvram_t *nvram, uint32_t addr)
-{
-    return nvram_read(nvram, addr);
-}
-
-static void NVRAM_set_word(nvram_t *nvram, uint32_t addr, uint16_t value)
-{
-    nvram_write(nvram, addr, value >> 8);
-    nvram_write(nvram, addr + 1, value & 0xFF);
-}
-
-static uint16_t NVRAM_get_word(nvram_t *nvram, uint32_t addr)
-{
-    uint16_t tmp;
-
-    tmp = nvram_read(nvram, addr) << 8;
-    tmp |= nvram_read(nvram, addr + 1);
-
-    return tmp;
-}
-
-static void NVRAM_set_lword(nvram_t *nvram, uint32_t addr, uint32_t value)
-{
-    nvram_write(nvram, addr, value >> 24);
-    nvram_write(nvram, addr + 1, (value >> 16) & 0xFF);
-    nvram_write(nvram, addr + 2, (value >> 8) & 0xFF);
-    nvram_write(nvram, addr + 3, value & 0xFF);
-}
-
-uint32_t NVRAM_get_lword (nvram_t *nvram, uint32_t addr)
-{
-    uint32_t tmp;
-
-    tmp = nvram_read(nvram, addr) << 24;
-    tmp |= nvram_read(nvram, addr + 1) << 16;
-    tmp |= nvram_read(nvram, addr + 2) << 8;
-    tmp |= nvram_read(nvram, addr + 3);
-
-    return tmp;
-}
-
-static void NVRAM_set_string(nvram_t *nvram, uint32_t addr, const char *str,
-                             uint32_t max)
-{
-    int i;
-
-    for (i = 0; i < max && str[i] != '\0'; i++) {
-        nvram_write(nvram, addr + i, str[i]);
-    }
-    nvram_write(nvram, addr + i, str[i]);
-    nvram_write(nvram, addr + max - 1, '\0');
-}
-
-int NVRAM_get_string (nvram_t *nvram, uint8_t *dst, uint16_t addr, int max)
-{
-    int i;
-
-    memset(dst, 0, max);
-    for (i = 0; i < max; i++) {
-        dst[i] = NVRAM_get_byte(nvram, addr + i);
-        if (dst[i] == '\0')
-            break;
-    }
-
-    return i;
-}
-
-static uint16_t NVRAM_crc_update (uint16_t prev, uint16_t value)
-{
-    uint16_t tmp;
-    uint16_t pd, pd1, pd2;
-
-    tmp = prev >> 8;
-    pd = prev ^ value;
-    pd1 = pd & 0x000F;
-    pd2 = ((pd >> 4) & 0x000F) ^ pd1;
-    tmp ^= (pd1 << 3) | (pd1 << 8);
-    tmp ^= pd2 | (pd2 << 7) | (pd2 << 12);
-
-    return tmp;
-}
-
-static uint16_t NVRAM_compute_crc (nvram_t *nvram, uint32_t start, uint32_t count)
-{
-    uint32_t i;
-    uint16_t crc = 0xFFFF;
-    int odd;
-
-    odd = count & 1;
-    count &= ~1;
-    for (i = 0; i != count; i++) {
-        crc = NVRAM_crc_update(crc, NVRAM_get_word(nvram, start + i));
-    }
-    if (odd) {
-        crc = NVRAM_crc_update(crc, NVRAM_get_byte(nvram, start + i) << 8);
-    }
-
-    return crc;
-}
-
-#define CMDLINE_ADDR 0x017ff000
-
-int PPC_NVRAM_set_params (nvram_t *nvram, uint16_t NVRAM_size,
-                          const char *arch,
-                          uint32_t RAM_size, int boot_device,
-                          uint32_t kernel_image, uint32_t kernel_size,
-                          const char *cmdline,
-                          uint32_t initrd_image, uint32_t initrd_size,
-                          uint32_t NVRAM_image,
-                          int width, int height, int depth)
-{
-    uint16_t crc;
-
-    /* Set parameters for Open Hack'Ware BIOS */
-    NVRAM_set_string(nvram, 0x00, "QEMU_BIOS", 16);
-    NVRAM_set_lword(nvram,  0x10, 0x00000002); /* structure v2 */
-    NVRAM_set_word(nvram,   0x14, NVRAM_size);
-    NVRAM_set_string(nvram, 0x20, arch, 16);
-    NVRAM_set_lword(nvram,  0x30, RAM_size);
-    NVRAM_set_byte(nvram,   0x34, boot_device);
-    NVRAM_set_lword(nvram,  0x38, kernel_image);
-    NVRAM_set_lword(nvram,  0x3C, kernel_size);
-    if (cmdline) {
-        /* XXX: put the cmdline in NVRAM too ? */
-        pstrcpy_targphys("cmdline", CMDLINE_ADDR, RAM_size - CMDLINE_ADDR, cmdline);
-        NVRAM_set_lword(nvram,  0x40, CMDLINE_ADDR);
-        NVRAM_set_lword(nvram,  0x44, strlen(cmdline));
-    } else {
-        NVRAM_set_lword(nvram,  0x40, 0);
-        NVRAM_set_lword(nvram,  0x44, 0);
-    }
-    NVRAM_set_lword(nvram,  0x48, initrd_image);
-    NVRAM_set_lword(nvram,  0x4C, initrd_size);
-    NVRAM_set_lword(nvram,  0x50, NVRAM_image);
-
-    NVRAM_set_word(nvram,   0x54, width);
-    NVRAM_set_word(nvram,   0x56, height);
-    NVRAM_set_word(nvram,   0x58, depth);
-    crc = NVRAM_compute_crc(nvram, 0x00, 0xF8);
-    NVRAM_set_word(nvram,   0xFC, crc);
-
-    return 0;
-}
-
-/* CPU device-tree ID helpers */
-int ppc_get_vcpu_dt_id(PowerPCCPU *cpu)
-{
-    return cpu->cpu_dt_id;
-}
-
-PowerPCCPU *ppc_get_vcpu_by_dt_id(int cpu_dt_id)
-{
-    CPUState *cs;
-
-    CPU_FOREACH(cs) {
-        PowerPCCPU *cpu = POWERPC_CPU(cs);
-
-        if (cpu->cpu_dt_id == cpu_dt_id) {
-            return cpu;
-        }
-    }
-
-    return NULL;
 }

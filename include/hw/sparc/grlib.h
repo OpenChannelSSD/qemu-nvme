@@ -22,8 +22,8 @@
  * THE SOFTWARE.
  */
 
-#ifndef _GRLIB_H_
-#define _GRLIB_H_
+#ifndef GRLIB_H
+#define GRLIB_H
 
 #include "hw/qdev.h"
 #include "hw/sysbus.h"
@@ -55,9 +55,7 @@ DeviceState *grlib_irqmp_create(hwaddr   base,
     qdev_prop_set_ptr(dev, "set_pil_in", set_pil_in);
     qdev_prop_set_ptr(dev, "set_pil_in_opaque", env);
 
-    if (qdev_init(dev)) {
-        return NULL;
-    }
+    qdev_init_nofail(dev);
 
     env->irq_manager = dev;
 
@@ -87,9 +85,7 @@ DeviceState *grlib_gptimer_create(hwaddr  base,
     qdev_prop_set_uint32(dev, "frequency", freq);
     qdev_prop_set_uint32(dev, "irq-line", base_irq);
 
-    if (qdev_init(dev)) {
-        return NULL;
-    }
+    qdev_init_nofail(dev);
 
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
 
@@ -104,7 +100,7 @@ DeviceState *grlib_gptimer_create(hwaddr  base,
 
 static inline
 DeviceState *grlib_apbuart_create(hwaddr  base,
-                                  CharDriverState    *serial,
+                                  Chardev    *serial,
                                   qemu_irq            irq)
 {
     DeviceState *dev;
@@ -112,9 +108,7 @@ DeviceState *grlib_apbuart_create(hwaddr  base,
     dev = qdev_create(NULL, "grlib,apbuart");
     qdev_prop_set_chr(dev, "chrdev", serial);
 
-    if (qdev_init(dev)) {
-        return NULL;
-    }
+    qdev_init_nofail(dev);
 
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
 
@@ -123,4 +117,4 @@ DeviceState *grlib_apbuart_create(hwaddr  base,
     return dev;
 }
 
-#endif /* ! _GRLIB_H_ */
+#endif /* GRLIB_H */

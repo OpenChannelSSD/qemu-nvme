@@ -21,11 +21,19 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qemu/timer.h"
-#include "sysemu/char.h"
+#include "qemu/error-report.h"
+#include "chardev/char-fe.h"
+#include "migration/register.h"
 #include "slirp.h"
 #include "hw/hw.h"
+#include "qemu/cutils.h"
+
+#ifndef _WIN32
+#include <net/if.h>
+#endif
 
 /* host loopback address */
 struct in_addr loopback_addr;
@@ -43,7 +51,13 @@ static QTAILQ_HEAD(slirp_instances, Slirp) slirp_instances =
     QTAILQ_HEAD_INITIALIZER(slirp_instances);
 
 static struct in_addr dns_addr;
+#ifndef _WIN32
+static struct in6_addr dns6_addr;
+#endif
 static u_int dns_addr_time;
+#ifndef _WIN32
+static u_int dns6_addr_time;
+#endif
 
 #define TIMEOUT_FAST 2  /* milliseconds */
 #define TIMEOUT_SLOW 499  /* milliseconds */
@@ -97,6 +111,11 @@ int get_dns_addr(struct in_addr *pdns_addr)
     return 0;
 }
 
+int get_dns6_addr(struct in6_addr *pdns6_addr, uint32_t *scope_id)
+{
+    return -1;
+}
+
 static void winsock_cleanup(void)
 {
     WSACleanup();
@@ -104,33 +123,39 @@ static void winsock_cleanup(void)
 
 #else
 
-static struct stat dns_addr_stat;
+static int get_dns_addr_cached(void *pdns_addr, void *cached_addr,
+                               socklen_t addrlen,
+                               struct stat *cached_stat, u_int *cached_time)
+{
+    struct stat old_stat;
+    if (curtime - *cached_time < TIMEOUT_DEFAULT) {
+        memcpy(pdns_addr, cached_addr, addrlen);
+        return 0;
+    }
+    old_stat = *cached_stat;
+    if (stat("/etc/resolv.conf", cached_stat) != 0) {
+        return -1;
+    }
+    if (cached_stat->st_dev == old_stat.st_dev
+        && cached_stat->st_ino == old_stat.st_ino
+        && cached_stat->st_size == old_stat.st_size
+        && cached_stat->st_mtime == old_stat.st_mtime) {
+        memcpy(pdns_addr, cached_addr, addrlen);
+        return 0;
+    }
+    return 1;
+}
 
-int get_dns_addr(struct in_addr *pdns_addr)
+static int get_dns_addr_resolv_conf(int af, void *pdns_addr, void *cached_addr,
+                                    socklen_t addrlen, uint32_t *scope_id,
+                                    u_int *cached_time)
 {
     char buff[512];
     char buff2[257];
     FILE *f;
     int found = 0;
-    struct in_addr tmp_addr;
-
-    if (dns_addr.s_addr != 0) {
-        struct stat old_stat;
-        if ((curtime - dns_addr_time) < TIMEOUT_DEFAULT) {
-            *pdns_addr = dns_addr;
-            return 0;
-        }
-        old_stat = dns_addr_stat;
-        if (stat("/etc/resolv.conf", &dns_addr_stat) != 0)
-            return -1;
-        if ((dns_addr_stat.st_dev == old_stat.st_dev)
-            && (dns_addr_stat.st_ino == old_stat.st_ino)
-            && (dns_addr_stat.st_size == old_stat.st_size)
-            && (dns_addr_stat.st_mtime == old_stat.st_mtime)) {
-            *pdns_addr = dns_addr;
-            return 0;
-        }
-    }
+    void *tmp_addr = alloca(addrlen);
+    unsigned if_index;
 
     f = fopen("/etc/resolv.conf", "r");
     if (!f)
@@ -141,13 +166,25 @@ int get_dns_addr(struct in_addr *pdns_addr)
 #endif
     while (fgets(buff, 512, f) != NULL) {
         if (sscanf(buff, "nameserver%*[ \t]%256s", buff2) == 1) {
-            if (!inet_aton(buff2, &tmp_addr))
+            char *c = strchr(buff2, '%');
+            if (c) {
+                if_index = if_nametoindex(c + 1);
+                *c = '\0';
+            } else {
+                if_index = 0;
+            }
+
+            if (!inet_pton(af, buff2, tmp_addr)) {
                 continue;
+            }
             /* If it's the first one, set it to dns_addr */
             if (!found) {
-                *pdns_addr = tmp_addr;
-                dns_addr = tmp_addr;
-                dns_addr_time = curtime;
+                memcpy(pdns_addr, tmp_addr, addrlen);
+                memcpy(cached_addr, tmp_addr, addrlen);
+                if (scope_id) {
+                    *scope_id = if_index;
+                }
+                *cached_time = curtime;
             }
 #ifdef DEBUG
             else
@@ -160,8 +197,14 @@ int get_dns_addr(struct in_addr *pdns_addr)
                 break;
             }
 #ifdef DEBUG
-            else
-                fprintf(stderr, "%s", inet_ntoa(tmp_addr));
+            else {
+                char s[INET6_ADDRSTRLEN];
+                const char *res = inet_ntop(af, tmp_addr, s, sizeof(s));
+                if (!res) {
+                    res = "(string conversion error)";
+                }
+                fprintf(stderr, "%s", res);
+            }
 #endif
         }
     }
@@ -169,6 +212,39 @@ int get_dns_addr(struct in_addr *pdns_addr)
     if (!found)
         return -1;
     return 0;
+}
+
+int get_dns_addr(struct in_addr *pdns_addr)
+{
+    static struct stat dns_addr_stat;
+
+    if (dns_addr.s_addr != 0) {
+        int ret;
+        ret = get_dns_addr_cached(pdns_addr, &dns_addr, sizeof(dns_addr),
+                                  &dns_addr_stat, &dns_addr_time);
+        if (ret <= 0) {
+            return ret;
+        }
+    }
+    return get_dns_addr_resolv_conf(AF_INET, pdns_addr, &dns_addr,
+                                    sizeof(dns_addr), NULL, &dns_addr_time);
+}
+
+int get_dns6_addr(struct in6_addr *pdns6_addr, uint32_t *scope_id)
+{
+    static struct stat dns6_addr_stat;
+
+    if (!in6_zero(&dns6_addr)) {
+        int ret;
+        ret = get_dns_addr_cached(pdns6_addr, &dns6_addr, sizeof(dns6_addr),
+                                  &dns6_addr_stat, &dns6_addr_time);
+        if (ret <= 0) {
+            return ret;
+        }
+    }
+    return get_dns_addr_resolv_conf(AF_INET6, pdns6_addr, &dns6_addr,
+                                    sizeof(dns6_addr),
+                                    scope_id, &dns6_addr_time);
 }
 
 #endif
@@ -197,21 +273,34 @@ static void slirp_init_once(void)
 static void slirp_state_save(QEMUFile *f, void *opaque);
 static int slirp_state_load(QEMUFile *f, void *opaque, int version_id);
 
-Slirp *slirp_init(int restricted, struct in_addr vnetwork,
+static SaveVMHandlers savevm_slirp_state = {
+    .save_state = slirp_state_save,
+    .load_state = slirp_state_load,
+};
+
+Slirp *slirp_init(int restricted, bool in_enabled, struct in_addr vnetwork,
                   struct in_addr vnetmask, struct in_addr vhost,
-                  const char *vhostname, const char *tftp_path,
-                  const char *bootfile, struct in_addr vdhcp_start,
-                  struct in_addr vnameserver, const char **vdnssearch,
-                  void *opaque)
+                  bool in6_enabled,
+                  struct in6_addr vprefix_addr6, uint8_t vprefix_len,
+                  struct in6_addr vhost6, const char *vhostname,
+                  const char *tftp_path, const char *bootfile,
+                  struct in_addr vdhcp_start, struct in_addr vnameserver,
+                  struct in6_addr vnameserver6, const char **vdnssearch,
+                  const char *vdomainname, void *opaque)
 {
     Slirp *slirp = g_malloc0(sizeof(Slirp));
 
     slirp_init_once();
 
+    slirp->grand = g_rand_new();
     slirp->restricted = restricted;
+
+    slirp->in_enabled = in_enabled;
+    slirp->in6_enabled = in6_enabled;
 
     if_init(slirp);
     ip_init(slirp);
+    ip6_init(slirp);
 
     /* Initialise mbufs *after* setting the MTU */
     m_init(slirp);
@@ -219,14 +308,19 @@ Slirp *slirp_init(int restricted, struct in_addr vnetwork,
     slirp->vnetwork_addr = vnetwork;
     slirp->vnetwork_mask = vnetmask;
     slirp->vhost_addr = vhost;
+    slirp->vprefix_addr6 = vprefix_addr6;
+    slirp->vprefix_len = vprefix_len;
+    slirp->vhost_addr6 = vhost6;
     if (vhostname) {
         pstrcpy(slirp->client_hostname, sizeof(slirp->client_hostname),
                 vhostname);
     }
     slirp->tftp_prefix = g_strdup(tftp_path);
     slirp->bootp_filename = g_strdup(bootfile);
+    slirp->vdomainname = g_strdup(vdomainname);
     slirp->vdhcp_startaddr = vdhcp_start;
     slirp->vnameserver_addr = vnameserver;
+    slirp->vnameserver_addr6 = vnameserver6;
 
     if (vdnssearch) {
         translate_dnssearch(slirp, vdnssearch);
@@ -234,8 +328,7 @@ Slirp *slirp_init(int restricted, struct in_addr vnetwork,
 
     slirp->opaque = opaque;
 
-    register_savevm(NULL, "slirp", 0, 3,
-                    slirp_state_save, slirp_state_load, slirp);
+    register_savevm_live(NULL, "slirp", 0, 4, &savevm_slirp_state, slirp);
 
     QTAILQ_INSERT_TAIL(&slirp_instances, slirp, entry);
 
@@ -249,11 +342,15 @@ void slirp_cleanup(Slirp *slirp)
     unregister_savevm(NULL, "slirp", slirp);
 
     ip_cleanup(slirp);
+    ip6_cleanup(slirp);
     m_cleanup(slirp);
+
+    g_rand_free(slirp->grand);
 
     g_free(slirp->vdnssearch);
     g_free(slirp->tftp_prefix);
     g_free(slirp->bootp_filename);
+    g_free(slirp->vdomainname);
     g_free(slirp);
 }
 
@@ -516,7 +613,12 @@ void slirp_pollfds_poll(GArray *pollfds, int select_error)
                  * test for G_IO_IN below if this succeeds
                  */
                 if (revents & G_IO_PRI) {
-                    sorecvoob(so);
+                    ret = sorecvoob(so);
+                    if (ret < 0) {
+                        /* Socket error might have resulted in the socket being
+                         * removed, do not try to do anything more with it. */
+                        continue;
+                    }
                 }
                 /*
                  * Check sockets for reading
@@ -534,6 +636,11 @@ void slirp_pollfds_poll(GArray *pollfds, int select_error)
                     /* Output it if we read something */
                     if (ret > 0) {
                         tcp_output(sototcpcb(so));
+                    }
+                    if (ret < 0) {
+                        /* Socket error might have resulted in the socket being
+                         * removed, do not try to do anything more with it. */
+                        continue;
                     }
                 }
 
@@ -566,17 +673,18 @@ void slirp_pollfds_poll(GArray *pollfds, int select_error)
                         /*
                          * Continue tcp_input
                          */
-                        tcp_input((struct mbuf *)NULL, sizeof(struct ip), so);
+                        tcp_input((struct mbuf *)NULL, sizeof(struct ip), so,
+                                  so->so_ffamily);
                         /* continue; */
                     } else {
                         ret = sowrite(so);
+                        if (ret > 0) {
+                            /* Call tcp_output in case we need to send a window
+                             * update to the guest, otherwise it will be stuck
+                             * until it sends a window probe. */
+                            tcp_output(sototcpcb(so));
+                        }
                     }
-                    /*
-                     * XXXXX If we wrote something (a lot), there
-                     * could be a need for a window update.
-                     * In the worst case, the remote will send
-                     * a window probe to get things going again
-                     */
                 }
 
                 /*
@@ -615,7 +723,8 @@ void slirp_pollfds_poll(GArray *pollfds, int select_error)
                         }
 
                     }
-                    tcp_input((struct mbuf *)NULL, sizeof(struct ip), so);
+                    tcp_input((struct mbuf *)NULL, sizeof(struct ip), so,
+                              so->so_ffamily);
                 } /* SS_ISFCONNECTING */
 #endif
             }
@@ -671,12 +780,16 @@ void slirp_pollfds_poll(GArray *pollfds, int select_error)
 
 static void arp_input(Slirp *slirp, const uint8_t *pkt, int pkt_len)
 {
-    struct arphdr *ah = (struct arphdr *)(pkt + ETH_HLEN);
-    uint8_t arp_reply[max(ETH_HLEN + sizeof(struct arphdr), 64)];
+    struct slirp_arphdr *ah = (struct slirp_arphdr *)(pkt + ETH_HLEN);
+    uint8_t arp_reply[MAX(ETH_HLEN + sizeof(struct slirp_arphdr), 64)];
     struct ethhdr *reh = (struct ethhdr *)arp_reply;
-    struct arphdr *rah = (struct arphdr *)(arp_reply + ETH_HLEN);
+    struct slirp_arphdr *rah = (struct slirp_arphdr *)(arp_reply + ETH_HLEN);
     int ar_op;
     struct ex_list *ex_ptr;
+
+    if (!slirp->in_enabled) {
+        return;
+    }
 
     ar_op = ntohs(ah->ar_op);
     switch(ar_op) {
@@ -742,39 +855,45 @@ void slirp_input(Slirp *slirp, const uint8_t *pkt, int pkt_len)
         arp_input(slirp, pkt, pkt_len);
         break;
     case ETH_P_IP:
+    case ETH_P_IPV6:
         m = m_get(slirp);
         if (!m)
             return;
-        /* Note: we add to align the IP header */
-        if (M_FREEROOM(m) < pkt_len + 2) {
-            m_inc(m, pkt_len + 2);
+        /* Note: we add 2 to align the IP header on 4 bytes,
+         * and add the margin for the tcpiphdr overhead  */
+        if (M_FREEROOM(m) < pkt_len + TCPIPHDR_DELTA + 2) {
+            m_inc(m, pkt_len + TCPIPHDR_DELTA + 2);
         }
-        m->m_len = pkt_len + 2;
-        memcpy(m->m_data + 2, pkt, pkt_len);
+        m->m_len = pkt_len + TCPIPHDR_DELTA + 2;
+        memcpy(m->m_data + TCPIPHDR_DELTA + 2, pkt, pkt_len);
 
-        m->m_data += 2 + ETH_HLEN;
-        m->m_len -= 2 + ETH_HLEN;
+        m->m_data += TCPIPHDR_DELTA + 2 + ETH_HLEN;
+        m->m_len -= TCPIPHDR_DELTA + 2 + ETH_HLEN;
 
-        ip_input(m);
+        if (proto == ETH_P_IP) {
+            ip_input(m);
+        } else if (proto == ETH_P_IPV6) {
+            ip6_input(m);
+        }
         break;
+
+    case ETH_P_NCSI:
+        ncsi_input(slirp, pkt, pkt_len);
+        break;
+
     default:
         break;
     }
 }
 
-/* Output the IP packet to the ethernet device. Returns 0 if the packet must be
- * re-queued.
+/* Prepare the IPv4 packet to be sent to the ethernet device. Returns 1 if no
+ * packet should be sent, 0 if the packet must be re-queued, 2 if the packet
+ * is ready to go.
  */
-int if_encap(Slirp *slirp, struct mbuf *ifm)
+static int if_encap4(Slirp *slirp, struct mbuf *ifm, struct ethhdr *eh,
+        uint8_t ethaddr[ETH_ALEN])
 {
-    uint8_t buf[1600];
-    struct ethhdr *eh = (struct ethhdr *)buf;
-    uint8_t ethaddr[ETH_ALEN];
     const struct ip *iph = (const struct ip *)ifm->m_data;
-
-    if (ifm->m_len + ETH_HLEN > sizeof(buf)) {
-        return 1;
-    }
 
     if (iph->ip_dst.s_addr == 0) {
         /* 0.0.0.0 can not be a destination address, something went wrong,
@@ -782,11 +901,11 @@ int if_encap(Slirp *slirp, struct mbuf *ifm)
         return 1;
     }
     if (!arp_table_search(slirp, iph->ip_dst.s_addr, ethaddr)) {
-        uint8_t arp_req[ETH_HLEN + sizeof(struct arphdr)];
+        uint8_t arp_req[ETH_HLEN + sizeof(struct slirp_arphdr)];
         struct ethhdr *reh = (struct ethhdr *)arp_req;
-        struct arphdr *rah = (struct arphdr *)(arp_req + ETH_HLEN);
+        struct slirp_arphdr *rah = (struct slirp_arphdr *)(arp_req + ETH_HLEN);
 
-        if (!ifm->arp_requested) {
+        if (!ifm->resolution_requested) {
             /* If the client addr is not known, send an ARP request */
             memset(reh->h_dest, 0xff, ETH_ALEN);
             memcpy(reh->h_source, special_ethaddr, ETH_ALEN - 4);
@@ -812,22 +931,93 @@ int if_encap(Slirp *slirp, struct mbuf *ifm)
             rah->ar_tip = iph->ip_dst.s_addr;
             slirp->client_ipaddr = iph->ip_dst;
             slirp_output(slirp->opaque, arp_req, sizeof(arp_req));
-            ifm->arp_requested = true;
+            ifm->resolution_requested = true;
 
             /* Expire request and drop outgoing packet after 1 second */
             ifm->expiration_date = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 1000000000ULL;
         }
         return 0;
     } else {
-        memcpy(eh->h_dest, ethaddr, ETH_ALEN);
         memcpy(eh->h_source, special_ethaddr, ETH_ALEN - 4);
         /* XXX: not correct */
         memcpy(&eh->h_source[2], &slirp->vhost_addr, 4);
         eh->h_proto = htons(ETH_P_IP);
-        memcpy(buf + sizeof(struct ethhdr), ifm->m_data, ifm->m_len);
-        slirp_output(slirp->opaque, buf, ifm->m_len + ETH_HLEN);
+
+        /* Send this */
+        return 2;
+    }
+}
+
+/* Prepare the IPv6 packet to be sent to the ethernet device. Returns 1 if no
+ * packet should be sent, 0 if the packet must be re-queued, 2 if the packet
+ * is ready to go.
+ */
+static int if_encap6(Slirp *slirp, struct mbuf *ifm, struct ethhdr *eh,
+        uint8_t ethaddr[ETH_ALEN])
+{
+    const struct ip6 *ip6h = mtod(ifm, const struct ip6 *);
+    if (!ndp_table_search(slirp, ip6h->ip_dst, ethaddr)) {
+        if (!ifm->resolution_requested) {
+            ndp_send_ns(slirp, ip6h->ip_dst);
+            ifm->resolution_requested = true;
+            ifm->expiration_date =
+                qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + 1000000000ULL;
+        }
+        return 0;
+    } else {
+        eh->h_proto = htons(ETH_P_IPV6);
+        in6_compute_ethaddr(ip6h->ip_src, eh->h_source);
+
+        /* Send this */
+        return 2;
+    }
+}
+
+/* Output the IP packet to the ethernet device. Returns 0 if the packet must be
+ * re-queued.
+ */
+int if_encap(Slirp *slirp, struct mbuf *ifm)
+{
+    uint8_t buf[1600];
+    struct ethhdr *eh = (struct ethhdr *)buf;
+    uint8_t ethaddr[ETH_ALEN];
+    const struct ip *iph = (const struct ip *)ifm->m_data;
+    int ret;
+
+    if (ifm->m_len + ETH_HLEN > sizeof(buf)) {
         return 1;
     }
+
+    switch (iph->ip_v) {
+    case IPVERSION:
+        ret = if_encap4(slirp, ifm, eh, ethaddr);
+        if (ret < 2) {
+            return ret;
+        }
+        break;
+
+    case IP6VERSION:
+        ret = if_encap6(slirp, ifm, eh, ethaddr);
+        if (ret < 2) {
+            return ret;
+        }
+        break;
+
+    default:
+        g_assert_not_reached();
+        break;
+    }
+
+    memcpy(eh->h_dest, ethaddr, ETH_ALEN);
+    DEBUG_ARGS((dfd, " src = %02x:%02x:%02x:%02x:%02x:%02x\n",
+                eh->h_source[0], eh->h_source[1], eh->h_source[2],
+                eh->h_source[3], eh->h_source[4], eh->h_source[5]));
+    DEBUG_ARGS((dfd, " dst = %02x:%02x:%02x:%02x:%02x:%02x\n",
+                eh->h_dest[0], eh->h_dest[1], eh->h_dest[2],
+                eh->h_dest[3], eh->h_dest[4], eh->h_dest[5]));
+    memcpy(buf + sizeof(struct ethhdr), ifm->m_data, ifm->m_len);
+    slirp_output(slirp->opaque, buf, ifm->m_len + ETH_HLEN);
+    return 1;
 }
 
 /* Drop host forwarding rule, return 0 if found. */
@@ -893,7 +1083,9 @@ int slirp_add_exec(Slirp *slirp, int do_pty, const void *args,
 ssize_t slirp_send(struct socket *so, const void *buf, size_t len, int flags)
 {
     if (so->s == -1 && so->extra) {
-        qemu_chr_fe_write(so->extra, buf, len);
+        /* XXX this blocks entire thread. Rewrite to use
+         * qemu_chr_fe_write and background I/O callbacks */
+        qemu_chr_fe_write_all(so->extra, buf, len);
         return len;
     }
 
@@ -948,91 +1140,298 @@ void slirp_socket_recv(Slirp *slirp, struct in_addr guest_addr, int guest_port,
         tcp_output(sototcpcb(so));
 }
 
-static void slirp_tcp_save(QEMUFile *f, struct tcpcb *tp)
+static int slirp_tcp_post_load(void *opaque, int version)
 {
-    int i;
+    tcp_template((struct tcpcb *)opaque);
 
-    qemu_put_sbe16(f, tp->t_state);
-    for (i = 0; i < TCPT_NTIMERS; i++)
-        qemu_put_sbe16(f, tp->t_timer[i]);
-    qemu_put_sbe16(f, tp->t_rxtshift);
-    qemu_put_sbe16(f, tp->t_rxtcur);
-    qemu_put_sbe16(f, tp->t_dupacks);
-    qemu_put_be16(f, tp->t_maxseg);
-    qemu_put_sbyte(f, tp->t_force);
-    qemu_put_be16(f, tp->t_flags);
-    qemu_put_be32(f, tp->snd_una);
-    qemu_put_be32(f, tp->snd_nxt);
-    qemu_put_be32(f, tp->snd_up);
-    qemu_put_be32(f, tp->snd_wl1);
-    qemu_put_be32(f, tp->snd_wl2);
-    qemu_put_be32(f, tp->iss);
-    qemu_put_be32(f, tp->snd_wnd);
-    qemu_put_be32(f, tp->rcv_wnd);
-    qemu_put_be32(f, tp->rcv_nxt);
-    qemu_put_be32(f, tp->rcv_up);
-    qemu_put_be32(f, tp->irs);
-    qemu_put_be32(f, tp->rcv_adv);
-    qemu_put_be32(f, tp->snd_max);
-    qemu_put_be32(f, tp->snd_cwnd);
-    qemu_put_be32(f, tp->snd_ssthresh);
-    qemu_put_sbe16(f, tp->t_idle);
-    qemu_put_sbe16(f, tp->t_rtt);
-    qemu_put_be32(f, tp->t_rtseq);
-    qemu_put_sbe16(f, tp->t_srtt);
-    qemu_put_sbe16(f, tp->t_rttvar);
-    qemu_put_be16(f, tp->t_rttmin);
-    qemu_put_be32(f, tp->max_sndwnd);
-    qemu_put_byte(f, tp->t_oobflags);
-    qemu_put_byte(f, tp->t_iobc);
-    qemu_put_sbe16(f, tp->t_softerror);
-    qemu_put_byte(f, tp->snd_scale);
-    qemu_put_byte(f, tp->rcv_scale);
-    qemu_put_byte(f, tp->request_r_scale);
-    qemu_put_byte(f, tp->requested_s_scale);
-    qemu_put_be32(f, tp->ts_recent);
-    qemu_put_be32(f, tp->ts_recent_age);
-    qemu_put_be32(f, tp->last_ack_sent);
+    return 0;
 }
 
-static void slirp_sbuf_save(QEMUFile *f, struct sbuf *sbuf)
-{
-    uint32_t off;
-
-    qemu_put_be32(f, sbuf->sb_cc);
-    qemu_put_be32(f, sbuf->sb_datalen);
-    off = (uint32_t)(sbuf->sb_wptr - sbuf->sb_data);
-    qemu_put_sbe32(f, off);
-    off = (uint32_t)(sbuf->sb_rptr - sbuf->sb_data);
-    qemu_put_sbe32(f, off);
-    qemu_put_buffer(f, (unsigned char*)sbuf->sb_data, sbuf->sb_datalen);
-}
-
-static void slirp_socket_save(QEMUFile *f, struct socket *so)
-{
-    qemu_put_be32(f, so->so_urgc);
-    qemu_put_be32(f, so->so_faddr.s_addr);
-    qemu_put_be32(f, so->so_laddr.s_addr);
-    qemu_put_be16(f, so->so_fport);
-    qemu_put_be16(f, so->so_lport);
-    qemu_put_byte(f, so->so_iptos);
-    qemu_put_byte(f, so->so_emu);
-    qemu_put_byte(f, so->so_type);
-    qemu_put_be32(f, so->so_state);
-    slirp_sbuf_save(f, &so->so_rcv);
-    slirp_sbuf_save(f, &so->so_snd);
-    slirp_tcp_save(f, so->so_tcpcb);
-}
-
-static void slirp_bootp_save(QEMUFile *f, Slirp *slirp)
-{
-    int i;
-
-    for (i = 0; i < NB_BOOTP_CLIENTS; i++) {
-        qemu_put_be16(f, slirp->bootp_clients[i].allocated);
-        qemu_put_buffer(f, slirp->bootp_clients[i].macaddr, 6);
+static const VMStateDescription vmstate_slirp_tcp = {
+    .name = "slirp-tcp",
+    .version_id = 0,
+    .post_load = slirp_tcp_post_load,
+    .fields = (VMStateField[]) {
+        VMSTATE_INT16(t_state, struct tcpcb),
+        VMSTATE_INT16_ARRAY(t_timer, struct tcpcb, TCPT_NTIMERS),
+        VMSTATE_INT16(t_rxtshift, struct tcpcb),
+        VMSTATE_INT16(t_rxtcur, struct tcpcb),
+        VMSTATE_INT16(t_dupacks, struct tcpcb),
+        VMSTATE_UINT16(t_maxseg, struct tcpcb),
+        VMSTATE_UINT8(t_force, struct tcpcb),
+        VMSTATE_UINT16(t_flags, struct tcpcb),
+        VMSTATE_UINT32(snd_una, struct tcpcb),
+        VMSTATE_UINT32(snd_nxt, struct tcpcb),
+        VMSTATE_UINT32(snd_up, struct tcpcb),
+        VMSTATE_UINT32(snd_wl1, struct tcpcb),
+        VMSTATE_UINT32(snd_wl2, struct tcpcb),
+        VMSTATE_UINT32(iss, struct tcpcb),
+        VMSTATE_UINT32(snd_wnd, struct tcpcb),
+        VMSTATE_UINT32(rcv_wnd, struct tcpcb),
+        VMSTATE_UINT32(rcv_nxt, struct tcpcb),
+        VMSTATE_UINT32(rcv_up, struct tcpcb),
+        VMSTATE_UINT32(irs, struct tcpcb),
+        VMSTATE_UINT32(rcv_adv, struct tcpcb),
+        VMSTATE_UINT32(snd_max, struct tcpcb),
+        VMSTATE_UINT32(snd_cwnd, struct tcpcb),
+        VMSTATE_UINT32(snd_ssthresh, struct tcpcb),
+        VMSTATE_INT16(t_idle, struct tcpcb),
+        VMSTATE_INT16(t_rtt, struct tcpcb),
+        VMSTATE_UINT32(t_rtseq, struct tcpcb),
+        VMSTATE_INT16(t_srtt, struct tcpcb),
+        VMSTATE_INT16(t_rttvar, struct tcpcb),
+        VMSTATE_UINT16(t_rttmin, struct tcpcb),
+        VMSTATE_UINT32(max_sndwnd, struct tcpcb),
+        VMSTATE_UINT8(t_oobflags, struct tcpcb),
+        VMSTATE_UINT8(t_iobc, struct tcpcb),
+        VMSTATE_INT16(t_softerror, struct tcpcb),
+        VMSTATE_UINT8(snd_scale, struct tcpcb),
+        VMSTATE_UINT8(rcv_scale, struct tcpcb),
+        VMSTATE_UINT8(request_r_scale, struct tcpcb),
+        VMSTATE_UINT8(requested_s_scale, struct tcpcb),
+        VMSTATE_UINT32(ts_recent, struct tcpcb),
+        VMSTATE_UINT32(ts_recent_age, struct tcpcb),
+        VMSTATE_UINT32(last_ack_sent, struct tcpcb),
+        VMSTATE_END_OF_LIST()
     }
+};
+
+/* The sbuf has a pair of pointers that are migrated as offsets;
+ * we calculate the offsets and restore the pointers using
+ * pre_save/post_load on a tmp structure.
+ */
+struct sbuf_tmp {
+    struct sbuf *parent;
+    uint32_t roff, woff;
+};
+
+static int sbuf_tmp_pre_save(void *opaque)
+{
+    struct sbuf_tmp *tmp = opaque;
+    tmp->woff = tmp->parent->sb_wptr - tmp->parent->sb_data;
+    tmp->roff = tmp->parent->sb_rptr - tmp->parent->sb_data;
+
+    return 0;
 }
+
+static int sbuf_tmp_post_load(void *opaque, int version)
+{
+    struct sbuf_tmp *tmp = opaque;
+    uint32_t requested_len = tmp->parent->sb_datalen;
+
+    /* Allocate the buffer space used by the field after the tmp */
+    sbreserve(tmp->parent, tmp->parent->sb_datalen);
+
+    if (tmp->parent->sb_datalen != requested_len) {
+        return -ENOMEM;
+    }
+    if (tmp->woff >= requested_len ||
+        tmp->roff >= requested_len) {
+        error_report("invalid sbuf offsets r/w=%u/%u len=%u",
+                     tmp->roff, tmp->woff, requested_len);
+        return -EINVAL;
+    }
+
+    tmp->parent->sb_wptr = tmp->parent->sb_data + tmp->woff;
+    tmp->parent->sb_rptr = tmp->parent->sb_data + tmp->roff;
+
+    return 0;
+}
+
+
+static const VMStateDescription vmstate_slirp_sbuf_tmp = {
+    .name = "slirp-sbuf-tmp",
+    .post_load = sbuf_tmp_post_load,
+    .pre_save  = sbuf_tmp_pre_save,
+    .version_id = 0,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32(woff, struct sbuf_tmp),
+        VMSTATE_UINT32(roff, struct sbuf_tmp),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_slirp_sbuf = {
+    .name = "slirp-sbuf",
+    .version_id = 0,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32(sb_cc, struct sbuf),
+        VMSTATE_UINT32(sb_datalen, struct sbuf),
+        VMSTATE_WITH_TMP(struct sbuf, struct sbuf_tmp, vmstate_slirp_sbuf_tmp),
+        VMSTATE_VBUFFER_UINT32(sb_data, struct sbuf, 0, NULL, sb_datalen),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool slirp_older_than_v4(void *opaque, int version_id)
+{
+    return version_id < 4;
+}
+
+static bool slirp_family_inet(void *opaque, int version_id)
+{
+    union slirp_sockaddr *ssa = (union slirp_sockaddr *)opaque;
+    return ssa->ss.ss_family == AF_INET;
+}
+
+static int slirp_socket_pre_load(void *opaque)
+{
+    struct socket *so = opaque;
+    if (tcp_attach(so) < 0) {
+        return -ENOMEM;
+    }
+    /* Older versions don't load these fields */
+    so->so_ffamily = AF_INET;
+    so->so_lfamily = AF_INET;
+    return 0;
+}
+
+#ifndef _WIN32
+#define VMSTATE_SIN4_ADDR(f, s, t) VMSTATE_UINT32_TEST(f, s, t)
+#else
+/* Win uses u_long rather than uint32_t - but it's still 32bits long */
+#define VMSTATE_SIN4_ADDR(f, s, t) VMSTATE_SINGLE_TEST(f, s, t, 0, \
+                                       vmstate_info_uint32, u_long)
+#endif
+
+/* The OS provided ss_family field isn't that portable; it's size
+ * and type varies (16/8 bit, signed, unsigned)
+ * and the values it contains aren't fully portable.
+ */
+typedef struct SS_FamilyTmpStruct {
+    union slirp_sockaddr    *parent;
+    uint16_t                 portable_family;
+} SS_FamilyTmpStruct;
+
+#define SS_FAMILY_MIG_IPV4   2  /* Linux, BSD, Win... */
+#define SS_FAMILY_MIG_IPV6  10  /* Linux */
+#define SS_FAMILY_MIG_OTHER 0xffff
+
+static int ss_family_pre_save(void *opaque)
+{
+    SS_FamilyTmpStruct *tss = opaque;
+
+    tss->portable_family = SS_FAMILY_MIG_OTHER;
+
+    if (tss->parent->ss.ss_family == AF_INET) {
+        tss->portable_family = SS_FAMILY_MIG_IPV4;
+    } else if (tss->parent->ss.ss_family == AF_INET6) {
+        tss->portable_family = SS_FAMILY_MIG_IPV6;
+    }
+
+    return 0;
+}
+
+static int ss_family_post_load(void *opaque, int version_id)
+{
+    SS_FamilyTmpStruct *tss = opaque;
+
+    switch (tss->portable_family) {
+    case SS_FAMILY_MIG_IPV4:
+        tss->parent->ss.ss_family = AF_INET;
+        break;
+    case SS_FAMILY_MIG_IPV6:
+    case 23: /* compatibility: AF_INET6 from mingw */
+    case 28: /* compatibility: AF_INET6 from FreeBSD sys/socket.h */
+        tss->parent->ss.ss_family = AF_INET6;
+        break;
+    default:
+        error_report("invalid ss_family type %x", tss->portable_family);
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
+static const VMStateDescription vmstate_slirp_ss_family = {
+    .name = "slirp-socket-addr/ss_family",
+    .pre_save  = ss_family_pre_save,
+    .post_load = ss_family_post_load,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT16(portable_family, SS_FamilyTmpStruct),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_slirp_socket_addr = {
+    .name = "slirp-socket-addr",
+    .version_id = 4,
+    .fields = (VMStateField[]) {
+        VMSTATE_WITH_TMP(union slirp_sockaddr, SS_FamilyTmpStruct,
+                            vmstate_slirp_ss_family),
+        VMSTATE_SIN4_ADDR(sin.sin_addr.s_addr, union slirp_sockaddr,
+                            slirp_family_inet),
+        VMSTATE_UINT16_TEST(sin.sin_port, union slirp_sockaddr,
+                            slirp_family_inet),
+
+#if 0
+        /* Untested: Needs checking by someone with IPv6 test */
+        VMSTATE_BUFFER_TEST(sin6.sin6_addr, union slirp_sockaddr,
+                            slirp_family_inet6),
+        VMSTATE_UINT16_TEST(sin6.sin6_port, union slirp_sockaddr,
+                            slirp_family_inet6),
+        VMSTATE_UINT32_TEST(sin6.sin6_flowinfo, union slirp_sockaddr,
+                            slirp_family_inet6),
+        VMSTATE_UINT32_TEST(sin6.sin6_scope_id, union slirp_sockaddr,
+                            slirp_family_inet6),
+#endif
+
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_slirp_socket = {
+    .name = "slirp-socket",
+    .version_id = 4,
+    .pre_load = slirp_socket_pre_load,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32(so_urgc, struct socket),
+        /* Pre-v4 versions */
+        VMSTATE_SIN4_ADDR(so_faddr.s_addr, struct socket,
+                            slirp_older_than_v4),
+        VMSTATE_SIN4_ADDR(so_laddr.s_addr, struct socket,
+                            slirp_older_than_v4),
+        VMSTATE_UINT16_TEST(so_fport, struct socket, slirp_older_than_v4),
+        VMSTATE_UINT16_TEST(so_lport, struct socket, slirp_older_than_v4),
+        /* v4 and newer */
+        VMSTATE_STRUCT(fhost, struct socket, 4, vmstate_slirp_socket_addr,
+                       union slirp_sockaddr),
+        VMSTATE_STRUCT(lhost, struct socket, 4, vmstate_slirp_socket_addr,
+                       union slirp_sockaddr),
+
+        VMSTATE_UINT8(so_iptos, struct socket),
+        VMSTATE_UINT8(so_emu, struct socket),
+        VMSTATE_UINT8(so_type, struct socket),
+        VMSTATE_INT32(so_state, struct socket),
+        VMSTATE_STRUCT(so_rcv, struct socket, 0, vmstate_slirp_sbuf,
+                       struct sbuf),
+        VMSTATE_STRUCT(so_snd, struct socket, 0, vmstate_slirp_sbuf,
+                       struct sbuf),
+        VMSTATE_STRUCT_POINTER(so_tcpcb, struct socket, vmstate_slirp_tcp,
+                       struct tcpcb),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_slirp_bootp_client = {
+    .name = "slirp_bootpclient",
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT16(allocated, BOOTPClient),
+        VMSTATE_BUFFER(macaddr, BOOTPClient),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_slirp = {
+    .name = "slirp",
+    .version_id = 4,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT16_V(ip_id, Slirp, 2),
+        VMSTATE_STRUCT_ARRAY(bootp_clients, Slirp, NB_BOOTP_CLIENTS, 3,
+                             vmstate_slirp_bootp_client, BOOTPClient),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static void slirp_state_save(QEMUFile *f, void *opaque)
 {
@@ -1048,118 +1447,13 @@ static void slirp_state_save(QEMUFile *f, void *opaque)
                 continue;
 
             qemu_put_byte(f, 42);
-            slirp_socket_save(f, so);
+            vmstate_save_state(f, &vmstate_slirp_socket, so, NULL);
         }
     qemu_put_byte(f, 0);
 
-    qemu_put_be16(f, slirp->ip_id);
-
-    slirp_bootp_save(f, slirp);
+    vmstate_save_state(f, &vmstate_slirp, slirp, NULL);
 }
 
-static void slirp_tcp_load(QEMUFile *f, struct tcpcb *tp)
-{
-    int i;
-
-    tp->t_state = qemu_get_sbe16(f);
-    for (i = 0; i < TCPT_NTIMERS; i++)
-        tp->t_timer[i] = qemu_get_sbe16(f);
-    tp->t_rxtshift = qemu_get_sbe16(f);
-    tp->t_rxtcur = qemu_get_sbe16(f);
-    tp->t_dupacks = qemu_get_sbe16(f);
-    tp->t_maxseg = qemu_get_be16(f);
-    tp->t_force = qemu_get_sbyte(f);
-    tp->t_flags = qemu_get_be16(f);
-    tp->snd_una = qemu_get_be32(f);
-    tp->snd_nxt = qemu_get_be32(f);
-    tp->snd_up = qemu_get_be32(f);
-    tp->snd_wl1 = qemu_get_be32(f);
-    tp->snd_wl2 = qemu_get_be32(f);
-    tp->iss = qemu_get_be32(f);
-    tp->snd_wnd = qemu_get_be32(f);
-    tp->rcv_wnd = qemu_get_be32(f);
-    tp->rcv_nxt = qemu_get_be32(f);
-    tp->rcv_up = qemu_get_be32(f);
-    tp->irs = qemu_get_be32(f);
-    tp->rcv_adv = qemu_get_be32(f);
-    tp->snd_max = qemu_get_be32(f);
-    tp->snd_cwnd = qemu_get_be32(f);
-    tp->snd_ssthresh = qemu_get_be32(f);
-    tp->t_idle = qemu_get_sbe16(f);
-    tp->t_rtt = qemu_get_sbe16(f);
-    tp->t_rtseq = qemu_get_be32(f);
-    tp->t_srtt = qemu_get_sbe16(f);
-    tp->t_rttvar = qemu_get_sbe16(f);
-    tp->t_rttmin = qemu_get_be16(f);
-    tp->max_sndwnd = qemu_get_be32(f);
-    tp->t_oobflags = qemu_get_byte(f);
-    tp->t_iobc = qemu_get_byte(f);
-    tp->t_softerror = qemu_get_sbe16(f);
-    tp->snd_scale = qemu_get_byte(f);
-    tp->rcv_scale = qemu_get_byte(f);
-    tp->request_r_scale = qemu_get_byte(f);
-    tp->requested_s_scale = qemu_get_byte(f);
-    tp->ts_recent = qemu_get_be32(f);
-    tp->ts_recent_age = qemu_get_be32(f);
-    tp->last_ack_sent = qemu_get_be32(f);
-    tcp_template(tp);
-}
-
-static int slirp_sbuf_load(QEMUFile *f, struct sbuf *sbuf)
-{
-    uint32_t off, sb_cc, sb_datalen;
-
-    sb_cc = qemu_get_be32(f);
-    sb_datalen = qemu_get_be32(f);
-
-    sbreserve(sbuf, sb_datalen);
-
-    if (sbuf->sb_datalen != sb_datalen)
-        return -ENOMEM;
-
-    sbuf->sb_cc = sb_cc;
-
-    off = qemu_get_sbe32(f);
-    sbuf->sb_wptr = sbuf->sb_data + off;
-    off = qemu_get_sbe32(f);
-    sbuf->sb_rptr = sbuf->sb_data + off;
-    qemu_get_buffer(f, (unsigned char*)sbuf->sb_data, sbuf->sb_datalen);
-
-    return 0;
-}
-
-static int slirp_socket_load(QEMUFile *f, struct socket *so)
-{
-    if (tcp_attach(so) < 0)
-        return -ENOMEM;
-
-    so->so_urgc = qemu_get_be32(f);
-    so->so_faddr.s_addr = qemu_get_be32(f);
-    so->so_laddr.s_addr = qemu_get_be32(f);
-    so->so_fport = qemu_get_be16(f);
-    so->so_lport = qemu_get_be16(f);
-    so->so_iptos = qemu_get_byte(f);
-    so->so_emu = qemu_get_byte(f);
-    so->so_type = qemu_get_byte(f);
-    so->so_state = qemu_get_be32(f);
-    if (slirp_sbuf_load(f, &so->so_rcv) < 0)
-        return -ENOMEM;
-    if (slirp_sbuf_load(f, &so->so_snd) < 0)
-        return -ENOMEM;
-    slirp_tcp_load(f, so->so_tcpcb);
-
-    return 0;
-}
-
-static void slirp_bootp_load(QEMUFile *f, Slirp *slirp)
-{
-    int i;
-
-    for (i = 0; i < NB_BOOTP_CLIENTS; i++) {
-        slirp->bootp_clients[i].allocated = qemu_get_be16(f);
-        qemu_get_buffer(f, slirp->bootp_clients[i].macaddr, 6);
-    }
-}
 
 static int slirp_state_load(QEMUFile *f, void *opaque, int version_id)
 {
@@ -1173,7 +1467,7 @@ static int slirp_state_load(QEMUFile *f, void *opaque, int version_id)
         if (!so)
             return -ENOMEM;
 
-        ret = slirp_socket_load(f, so);
+        ret = vmstate_load_state(f, &vmstate_slirp_socket, so, version_id);
 
         if (ret < 0)
             return ret;
@@ -1195,13 +1489,5 @@ static int slirp_state_load(QEMUFile *f, void *opaque, int version_id)
         so->extra = (void *)ex_ptr->ex_exec;
     }
 
-    if (version_id >= 2) {
-        slirp->ip_id = qemu_get_be16(f);
-    }
-
-    if (version_id >= 3) {
-        slirp_bootp_load(f, slirp);
-    }
-
-    return 0;
+    return vmstate_load_state(f, &vmstate_slirp, slirp, version_id);
 }

@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
 #include "hw/sh4/sh.h"
 #include "hw/pci/pci.h"
@@ -54,7 +55,7 @@ static void sh_pci_reg_write (void *p, hwaddr addr, uint64_t val,
 
     switch(addr) {
     case 0 ... 0xfc:
-        cpu_to_le32w((uint32_t*)(pcic->dev->config + addr), val);
+        stl_le_p(pcic->dev->config + addr, val);
         break;
     case 0x1c0:
         pcic->par = val;
@@ -84,7 +85,7 @@ static uint64_t sh_pci_reg_read (void *p, hwaddr addr,
 
     switch(addr) {
     case 0 ... 0xfc:
-        return le32_to_cpup((uint32_t*)(pcic->dev->config + addr));
+        return ldl_le_p(pcic->dev->config + addr);
     case 0x1c0:
         return pcic->par;
     case 0x1c4:
@@ -130,12 +131,12 @@ static int sh_pci_device_init(SysBusDevice *dev)
     for (i = 0; i < 4; i++) {
         sysbus_init_irq(dev, &s->irq[i]);
     }
-    phb->bus = pci_register_bus(DEVICE(dev), "pci",
-                                sh_pci_set_irq, sh_pci_map_irq,
-                                s->irq,
-                                get_system_memory(),
-                                get_system_io(),
-                                PCI_DEVFN(0, 0), 4, TYPE_PCI_BUS);
+    phb->bus = pci_register_root_bus(DEVICE(dev), "pci",
+                                     sh_pci_set_irq, sh_pci_map_irq,
+                                     s->irq,
+                                     get_system_memory(),
+                                     get_system_io(),
+                                     PCI_DEVFN(0, 0), 4, TYPE_PCI_BUS);
     memory_region_init_io(&s->memconfig_p4, OBJECT(s), &sh_pci_reg_ops, s,
                           "sh_pci", 0x224);
     memory_region_init_alias(&s->memconfig_a7, OBJECT(s), "sh_pci.2",
@@ -151,12 +152,11 @@ static int sh_pci_device_init(SysBusDevice *dev)
     return 0;
 }
 
-static int sh_pci_host_init(PCIDevice *d)
+static void sh_pci_host_realize(PCIDevice *d, Error **errp)
 {
     pci_set_word(d->config + PCI_COMMAND, PCI_COMMAND_WAIT);
     pci_set_word(d->config + PCI_STATUS, PCI_STATUS_CAP_LIST |
                  PCI_STATUS_FAST_BACK | PCI_STATUS_DEVSEL_MEDIUM);
-    return 0;
 }
 
 static void sh_pci_host_class_init(ObjectClass *klass, void *data)
@@ -164,14 +164,14 @@ static void sh_pci_host_class_init(ObjectClass *klass, void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    k->init = sh_pci_host_init;
+    k->realize = sh_pci_host_realize;
     k->vendor_id = PCI_VENDOR_ID_HITACHI;
     k->device_id = PCI_DEVICE_ID_HITACHI_SH7751R;
     /*
      * PCI-facing part of the host bridge, not usable without the
      * host-facing part, which can't be device_add'ed, yet.
      */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
 }
 
 static const TypeInfo sh_pci_host_info = {
@@ -179,6 +179,10 @@ static const TypeInfo sh_pci_host_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(PCIDevice),
     .class_init    = sh_pci_host_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void sh_pci_device_class_init(ObjectClass *klass, void *data)

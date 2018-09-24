@@ -25,7 +25,6 @@ seq=`basename $0`
 echo "QA output created by $seq"
 
 here=`pwd`
-tmp=/tmp/$$
 status=1	# failure is the default!
 
 _cleanup()
@@ -39,7 +38,7 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 . ./common.filter
 
 _supported_fmt qcow2
-_supported_proto file
+_supported_proto file nfs
 _supported_os Linux
 
 function run_qemu_img()
@@ -60,11 +59,11 @@ _img_info
 
 # Multiple -o should be merged
 run_qemu_img create -f $IMGFMT -o cluster_size=4k -o lazy_refcounts=on "$TEST_IMG" $size
-run_qemu_img info "$TEST_IMG"
+_img_info --format-specific
 
 # If the same -o key is specified more than once, the last one wins
 run_qemu_img create -f $IMGFMT -o cluster_size=4k -o lazy_refcounts=on -o cluster_size=8k "$TEST_IMG" $size
-run_qemu_img info "$TEST_IMG"
+_img_info --format-specific
 run_qemu_img create -f $IMGFMT -o cluster_size=4k,cluster_size=8k "$TEST_IMG" $size
 _img_info
 
@@ -86,8 +85,8 @@ run_qemu_img create -f $IMGFMT -o cluster_size=4k -o help "$TEST_IMG" $size
 run_qemu_img create -f $IMGFMT -o cluster_size=4k -o \? "$TEST_IMG" $size
 
 # Looks like a help option, but is part of the backing file name
-run_qemu_img create -f $IMGFMT -o backing_file="$TEST_IMG",,help "$TEST_IMG" $size
-run_qemu_img create -f $IMGFMT -o backing_file="$TEST_IMG",,\? "$TEST_IMG" $size
+run_qemu_img create -f $IMGFMT -u -o backing_file="$TEST_IMG",,help "$TEST_IMG" $size
+run_qemu_img create -f $IMGFMT -u -o backing_file="$TEST_IMG",,\? "$TEST_IMG" $size
 
 # Try to trick qemu-img into creating escaped commas
 run_qemu_img create -f $IMGFMT -o backing_file="$TEST_IMG", -o help "$TEST_IMG" $size
@@ -97,6 +96,9 @@ run_qemu_img create -f $IMGFMT -o backing_file="$TEST_IMG" -o ,, -o help "$TEST_
 # Leave out everything that isn't needed
 run_qemu_img create -f $IMGFMT -o help
 run_qemu_img create -o help
+
+# Try help option for a format that does not support creation
+run_qemu_img create -f bochs -o help
 
 echo
 echo === convert: Options specified more than once ===
@@ -114,11 +116,11 @@ TEST_IMG="${TEST_IMG}.base" _img_info
 
 # Multiple -o should be merged
 run_qemu_img convert -O $IMGFMT -o cluster_size=4k -o lazy_refcounts=on "$TEST_IMG" "$TEST_IMG".base
-run_qemu_img info "$TEST_IMG".base
+TEST_IMG="${TEST_IMG}.base" _img_info --format-specific
 
 # If the same -o key is specified more than once, the last one wins
 run_qemu_img convert -O $IMGFMT -o cluster_size=4k -o lazy_refcounts=on -o cluster_size=8k "$TEST_IMG" "$TEST_IMG".base
-run_qemu_img info "$TEST_IMG".base
+TEST_IMG="${TEST_IMG}.base" _img_info --format-specific
 run_qemu_img convert -O $IMGFMT -o cluster_size=4k,cluster_size=8k "$TEST_IMG" "$TEST_IMG".base
 TEST_IMG="${TEST_IMG}.base" _img_info
 
@@ -152,20 +154,31 @@ run_qemu_img convert -O $IMGFMT -o backing_file="$TEST_IMG" -o ,, -o help "$TEST
 run_qemu_img convert -O $IMGFMT -o help
 run_qemu_img convert -o help
 
+# Try help option for a format that does not support creation
+run_qemu_img convert -O bochs -o help
+
+echo
+echo === convert: -C and other options ===
+
+# Adding the help option to a command without other -o options
+run_qemu_img convert -C -S 4k -O $IMGFMT "$TEST_IMG" "$TEST_IMG".target
+run_qemu_img convert -C -S 8k -O $IMGFMT "$TEST_IMG" "$TEST_IMG".target
+run_qemu_img convert -C -c -O $IMGFMT "$TEST_IMG" "$TEST_IMG".target
+
 echo
 echo === amend: Options specified more than once ===
 
 # Last -f should win
 run_qemu_img amend -f foo -f $IMGFMT -o lazy_refcounts=on "$TEST_IMG"
-run_qemu_img info "$TEST_IMG"
+_img_info --format-specific
 
 # Multiple -o should be merged
 run_qemu_img amend -f $IMGFMT -o size=130M -o lazy_refcounts=off "$TEST_IMG"
-run_qemu_img info "$TEST_IMG"
+_img_info --format-specific
 
 # If the same -o key is specified more than once, the last one wins
 run_qemu_img amend -f $IMGFMT -o size=8M -o lazy_refcounts=on -o size=132M "$TEST_IMG"
-run_qemu_img info "$TEST_IMG"
+_img_info --format-specific
 run_qemu_img amend -f $IMGFMT -o size=4M,size=148M "$TEST_IMG"
 _img_info
 
@@ -201,6 +214,9 @@ run_qemu_img amend -f $IMGFMT -o backing_file="$TEST_IMG" -o ,, -o help "$TEST_I
 # Leave out everything that isn't needed
 run_qemu_img amend -f $IMGFMT -o help
 run_qemu_img convert -o help
+
+# Try help option for a format that does not support amendment
+run_qemu_img amend -f bochs -o help
 
 # success, all done
 echo "*** done"

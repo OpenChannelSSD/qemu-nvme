@@ -1,4 +1,5 @@
-#include <signal.h>
+#include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "hw/xen/xen_backend.h"
 #include "xen_domainbuild.h"
 #include "qemu/timer.h"
@@ -25,22 +26,22 @@ static int xenstore_domain_mkdir(char *path)
     int i;
 
     if (!xs_mkdir(xenstore, 0, path)) {
-        fprintf(stderr, "%s: xs_mkdir %s: failed\n", __FUNCTION__, path);
+        fprintf(stderr, "%s: xs_mkdir %s: failed\n", __func__, path);
 	return -1;
     }
     if (!xs_set_permissions(xenstore, 0, path, perms_ro, 2)) {
-        fprintf(stderr, "%s: xs_set_permissions failed\n", __FUNCTION__);
+        fprintf(stderr, "%s: xs_set_permissions failed\n", __func__);
 	return -1;
     }
 
     for (i = 0; writable[i]; i++) {
         snprintf(subpath, sizeof(subpath), "%s/%s", path, writable[i]);
         if (!xs_mkdir(xenstore, 0, subpath)) {
-            fprintf(stderr, "%s: xs_mkdir %s: failed\n", __FUNCTION__, subpath);
+            fprintf(stderr, "%s: xs_mkdir %s: failed\n", __func__, subpath);
             return -1;
         }
         if (!xs_set_permissions(xenstore, 0, subpath, perms_rw, 2)) {
-            fprintf(stderr, "%s: xs_set_permissions failed\n", __FUNCTION__);
+            fprintf(stderr, "%s: xs_set_permissions failed\n", __func__);
             return -1;
         }
     }
@@ -53,11 +54,7 @@ int xenstore_domain_init1(const char *kernel, const char *ramdisk,
     char *dom, uuid_string[42], vm[256], path[256];
     int i;
 
-    snprintf(uuid_string, sizeof(uuid_string), UUID_FMT,
-             qemu_uuid[0], qemu_uuid[1], qemu_uuid[2], qemu_uuid[3],
-             qemu_uuid[4], qemu_uuid[5], qemu_uuid[6], qemu_uuid[7],
-             qemu_uuid[8], qemu_uuid[9], qemu_uuid[10], qemu_uuid[11],
-             qemu_uuid[12], qemu_uuid[13], qemu_uuid[14], qemu_uuid[15]);
+    qemu_uuid_unparse(&qemu_uuid, uuid_string);
     dom = xs_get_domain_path(xenstore, xen_domid);
     snprintf(vm,  sizeof(vm),  "/vm/%s", uuid_string);
 
@@ -79,9 +76,9 @@ int xenstore_domain_init1(const char *kernel, const char *ramdisk,
     xenstore_write_str(dom, "vm",     vm);
 
     /* memory */
-    xenstore_write_int(dom, "memory/target", ram_size >> 10);  // kB
-    xenstore_write_int(vm, "memory",         ram_size >> 20);  // MB
-    xenstore_write_int(vm, "maxmem",         ram_size >> 20);  // MB
+    xenstore_write_int(dom, "memory/target", ram_size / KiB);
+    xenstore_write_int(vm, "memory",         ram_size / MiB);
+    xenstore_write_int(vm, "maxmem",         ram_size / MiB);
 
     /* cpus */
     for (i = 0; i < smp_cpus; i++) {
@@ -117,7 +114,7 @@ int xenstore_domain_init2(int xenstore_port, int xenstore_mfn,
 
     /* console */
     xenstore_write_str(dom, "console/type",     "ioemu");
-    xenstore_write_int(dom, "console/limit",    128 * 1024);
+    xenstore_write_int(dom, "console/limit",    128 * KiB);
     xenstore_write_int(dom, "console/ring-ref", console_mfn);
     xenstore_write_int(dom, "console/port",     console_port);
     xen_config_dev_console(0);
@@ -152,7 +149,7 @@ static void xen_domain_poll(void *opaque)
     return;
 
 quit:
-    qemu_system_shutdown_request();
+    qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
 }
 
 static int xen_domain_watcher(void)
@@ -162,7 +159,7 @@ static int xen_domain_watcher(void)
     char byte;
 
     if (pipe(fd) != 0) {
-        qemu_log("%s: Huh? pipe error: %s\n", __FUNCTION__, strerror(errno));
+        qemu_log("%s: Huh? pipe error: %s\n", __func__, strerror(errno));
         return -1;
     }
     if (fork() != 0)
@@ -174,11 +171,14 @@ static int xen_domain_watcher(void)
     for (i = 3; i < n; i++) {
         if (i == fd[0])
             continue;
-        if (i == xc_fd(xen_xc)) {
-            continue;
-        }
         close(i);
     }
+
+    /*
+     * Reopen xc interface, since the original is unsafe after fork
+     * and was closed above.
+     */
+    xen_xc = xc_interface_open(0, 0, 0);
 
     /* ignore term signals */
     signal(SIGINT,  SIG_IGN);
@@ -191,7 +191,7 @@ static int xen_domain_watcher(void)
         case -1:
             if (errno == EINTR)
                 continue;
-            qemu_log("%s: Huh? read error: %s\n", __FUNCTION__, strerror(errno));
+            qemu_log("%s: Huh? read error: %s\n", __func__, strerror(errno));
             qemu_running = 0;
             break;
         case 0:
@@ -199,13 +199,13 @@ static int xen_domain_watcher(void)
             qemu_running = 0;
             break;
         default:
-            qemu_log("%s: Huh? data on the watch pipe?\n", __FUNCTION__);
+            qemu_log("%s: Huh? data on the watch pipe?\n", __func__);
             break;
         }
     }
 
     /* cleanup */
-    qemu_log("%s: destroy domain %d\n", __FUNCTION__, xen_domid);
+    qemu_log("%s: destroy domain %d\n", __func__, xen_domid);
     xc_domain_destroy(xen_xc, xen_domid);
     _exit(0);
 }
@@ -233,8 +233,8 @@ int xen_domain_build_pv(const char *kernel, const char *ramdisk,
     unsigned long xenstore_mfn = 0, console_mfn = 0;
     int rc;
 
-    memcpy(uuid, qemu_uuid, sizeof(uuid));
-    rc = xc_domain_create(xen_xc, ssidref, uuid, flags, &xen_domid);
+    memcpy(uuid, &qemu_uuid, sizeof(uuid));
+    rc = xen_domain_create(xen_xc, ssidref, uuid, flags, &xen_domid);
     if (rc < 0) {
         fprintf(stderr, "xen: xc_domain_create() failed\n");
         goto err;
@@ -261,7 +261,7 @@ int xen_domain_build_pv(const char *kernel, const char *ramdisk,
     }
 #endif
 
-    rc = xc_domain_setmaxmem(xen_xc, xen_domid, ram_size >> 10);
+    rc = xc_domain_setmaxmem(xen_xc, xen_domid, ram_size / KiB);
     if (rc < 0) {
         fprintf(stderr, "xen: xc_domain_setmaxmem() failed\n");
         goto err;
@@ -270,7 +270,7 @@ int xen_domain_build_pv(const char *kernel, const char *ramdisk,
     xenstore_port = xc_evtchn_alloc_unbound(xen_xc, xen_domid, 0);
     console_port = xc_evtchn_alloc_unbound(xen_xc, xen_domid, 0);
 
-    rc = xc_linux_build(xen_xc, xen_domid, ram_size >> 20,
+    rc = xc_linux_build(xen_xc, xen_domid, ram_size / MiB,
                         kernel, ramdisk, cmdline,
                         0, flags,
                         xenstore_port, &xenstore_mfn,

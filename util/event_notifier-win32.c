@@ -10,6 +10,7 @@
  * See the COPYING file in the top-level directory.
  */
 
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qemu/event_notifier.h"
 #include "qemu/main-loop.h"
@@ -24,22 +25,12 @@ int event_notifier_init(EventNotifier *e, int active)
 void event_notifier_cleanup(EventNotifier *e)
 {
     CloseHandle(e->event);
+    e->event = NULL;
 }
 
 HANDLE event_notifier_get_handle(EventNotifier *e)
 {
     return e->event;
-}
-
-int event_notifier_set_handler(EventNotifier *e,
-                               EventNotifierHandler *handler)
-{
-    if (handler) {
-        return qemu_add_wait_object(e->event, (IOHandler *)handler, e);
-    } else {
-        qemu_del_wait_object(e->event, (IOHandler *)handler, e);
-        return 0;
-    }
 }
 
 int event_notifier_set(EventNotifier *e)

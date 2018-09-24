@@ -10,11 +10,8 @@
  */
 
 #ifndef HBITMAP_H
-#define HBITMAP_H 1
+#define HBITMAP_H
 
-#include <limits.h>
-#include <stdint.h>
-#include <stdbool.h>
 #include "bitops.h"
 #include "host-utils.h"
 
@@ -65,6 +62,29 @@ struct HBitmapIter {
 HBitmap *hbitmap_alloc(uint64_t size, int granularity);
 
 /**
+ * hbitmap_truncate:
+ * @hb: The bitmap to change the size of.
+ * @size: The number of elements to change the bitmap to accommodate.
+ *
+ * truncate or grow an existing bitmap to accommodate a new number of elements.
+ * This may invalidate existing HBitmapIterators.
+ */
+void hbitmap_truncate(HBitmap *hb, uint64_t size);
+
+/**
+ * hbitmap_merge:
+ * @a: The bitmap to store the result in.
+ * @b: The bitmap to merge into @a.
+ * @return true if the merge was successful,
+ *         false if it was not attempted.
+ *
+ * Merge two bitmaps together.
+ * A := A (BITOR) B.
+ * B is left unmodified.
+ */
+bool hbitmap_merge(HBitmap *a, const HBitmap *b);
+
+/**
  * hbitmap_empty:
  * @hb: HBitmap to operate on.
  *
@@ -109,6 +129,14 @@ void hbitmap_set(HBitmap *hb, uint64_t start, uint64_t count);
 void hbitmap_reset(HBitmap *hb, uint64_t start, uint64_t count);
 
 /**
+ * hbitmap_reset_all:
+ * @hb: HBitmap to operate on.
+ *
+ * Reset all bits in an HBitmap.
+ */
+void hbitmap_reset_all(HBitmap *hb);
+
+/**
  * hbitmap_get:
  * @hb: HBitmap to operate on.
  * @item: Bit to query (0-based).
@@ -116,6 +144,121 @@ void hbitmap_reset(HBitmap *hb, uint64_t start, uint64_t count);
  * Return whether the @item-th bit in an HBitmap is set.
  */
 bool hbitmap_get(const HBitmap *hb, uint64_t item);
+
+/**
+ * hbitmap_is_serializable:
+ * @hb: HBitmap which should be (de-)serialized.
+ *
+ * Returns whether the bitmap can actually be (de-)serialized. Other
+ * (de-)serialization functions may only be invoked if this function returns
+ * true.
+ *
+ * Calling (de-)serialization functions does not affect a bitmap's
+ * (de-)serializability.
+ */
+bool hbitmap_is_serializable(const HBitmap *hb);
+
+/**
+ * hbitmap_serialization_align:
+ * @hb: HBitmap to operate on.
+ *
+ * Required alignment of serialization chunks, used by other serialization
+ * functions. For every chunk:
+ * 1. Chunk start should be aligned to this granularity.
+ * 2. Chunk size should be aligned too, except for last chunk (for which
+ *      start + count == hb->size)
+ */
+uint64_t hbitmap_serialization_align(const HBitmap *hb);
+
+/**
+ * hbitmap_serialization_size:
+ * @hb: HBitmap to operate on.
+ * @start: Starting bit
+ * @count: Number of bits
+ *
+ * Return number of bytes hbitmap_(de)serialize_part needs
+ */
+uint64_t hbitmap_serialization_size(const HBitmap *hb,
+                                    uint64_t start, uint64_t count);
+
+/**
+ * hbitmap_serialize_part
+ * @hb: HBitmap to operate on.
+ * @buf: Buffer to store serialized bitmap.
+ * @start: First bit to store.
+ * @count: Number of bits to store.
+ *
+ * Stores HBitmap data corresponding to given region. The format of saved data
+ * is linear sequence of bits, so it can be used by hbitmap_deserialize_part
+ * independently of endianness and size of HBitmap level array elements
+ */
+void hbitmap_serialize_part(const HBitmap *hb, uint8_t *buf,
+                            uint64_t start, uint64_t count);
+
+/**
+ * hbitmap_deserialize_part
+ * @hb: HBitmap to operate on.
+ * @buf: Buffer to restore bitmap data from.
+ * @start: First bit to restore.
+ * @count: Number of bits to restore.
+ * @finish: Whether to call hbitmap_deserialize_finish automatically.
+ *
+ * Restores HBitmap data corresponding to given region. The format is the same
+ * as for hbitmap_serialize_part.
+ *
+ * If @finish is false, caller must call hbitmap_serialize_finish before using
+ * the bitmap.
+ */
+void hbitmap_deserialize_part(HBitmap *hb, uint8_t *buf,
+                              uint64_t start, uint64_t count,
+                              bool finish);
+
+/**
+ * hbitmap_deserialize_zeroes
+ * @hb: HBitmap to operate on.
+ * @start: First bit to restore.
+ * @count: Number of bits to restore.
+ * @finish: Whether to call hbitmap_deserialize_finish automatically.
+ *
+ * Fills the bitmap with zeroes.
+ *
+ * If @finish is false, caller must call hbitmap_serialize_finish before using
+ * the bitmap.
+ */
+void hbitmap_deserialize_zeroes(HBitmap *hb, uint64_t start, uint64_t count,
+                                bool finish);
+
+/**
+ * hbitmap_deserialize_ones
+ * @hb: HBitmap to operate on.
+ * @start: First bit to restore.
+ * @count: Number of bits to restore.
+ * @finish: Whether to call hbitmap_deserialize_finish automatically.
+ *
+ * Fills the bitmap with ones.
+ *
+ * If @finish is false, caller must call hbitmap_serialize_finish before using
+ * the bitmap.
+ */
+void hbitmap_deserialize_ones(HBitmap *hb, uint64_t start, uint64_t count,
+                              bool finish);
+
+/**
+ * hbitmap_deserialize_finish
+ * @hb: HBitmap to operate on.
+ *
+ * Repair HBitmap after calling hbitmap_deserialize_data. Actually, all HBitmap
+ * layers are restored here.
+ */
+void hbitmap_deserialize_finish(HBitmap *hb);
+
+/**
+ * hbitmap_sha256:
+ * @bitmap: HBitmap to operate on.
+ *
+ * Returns SHA256 hash of the last level.
+ */
+char *hbitmap_sha256(const HBitmap *bitmap, Error **errp);
 
 /**
  * hbitmap_free:
@@ -136,10 +279,9 @@ void hbitmap_free(HBitmap *hb);
  * the lowest-numbered bit that is set in @hb, starting at @first.
  *
  * Concurrent setting of bits is acceptable, and will at worst cause the
- * iteration to miss some of those bits.  Resetting bits before the current
- * position of the iterator is also okay.  However, concurrent resetting of
- * bits can lead to unexpected behavior if the iterator has not yet reached
- * those bits.
+ * iteration to miss some of those bits.
+ *
+ * The concurrent resetting of bits is OK.
  */
 void hbitmap_iter_init(HBitmapIter *hbi, const HBitmap *hb, uint64_t first);
 
@@ -150,31 +292,46 @@ void hbitmap_iter_init(HBitmapIter *hbi, const HBitmap *hb, uint64_t first);
  */
 unsigned long hbitmap_iter_skip_words(HBitmapIter *hbi);
 
+/* hbitmap_next_zero:
+ * @hb: The HBitmap to operate on
+ * @start: The bit to start from.
+ *
+ * Find next not dirty bit.
+ */
+int64_t hbitmap_next_zero(const HBitmap *hb, uint64_t start);
+
+/* hbitmap_create_meta:
+ * Create a "meta" hbitmap to track dirtiness of the bits in this HBitmap.
+ * The caller owns the created bitmap and must call hbitmap_free_meta(hb) to
+ * free it.
+ *
+ * Currently, we only guarantee that if a bit in the hbitmap is changed it
+ * will be reflected in the meta bitmap, but we do not yet guarantee the
+ * opposite.
+ *
+ * @hb: The HBitmap to operate on.
+ * @chunk_size: How many bits in @hb does one bit in the meta track.
+ */
+HBitmap *hbitmap_create_meta(HBitmap *hb, int chunk_size);
+
+/* hbitmap_free_meta:
+ * Free the meta bitmap of @hb.
+ *
+ * @hb: The HBitmap whose meta bitmap should be freed.
+ */
+void hbitmap_free_meta(HBitmap *hb);
+
 /**
  * hbitmap_iter_next:
  * @hbi: HBitmapIter to operate on.
+ * @advance: If true, advance the iterator.  Otherwise, the next call
+ *           of this function will return the same result (if that
+ *           position is still dirty).
  *
  * Return the next bit that is set in @hbi's associated HBitmap,
  * or -1 if all remaining bits are zero.
  */
-static inline int64_t hbitmap_iter_next(HBitmapIter *hbi)
-{
-    unsigned long cur = hbi->cur[HBITMAP_LEVELS - 1];
-    int64_t item;
-
-    if (cur == 0) {
-        cur = hbitmap_iter_skip_words(hbi);
-        if (cur == 0) {
-            return -1;
-        }
-    }
-
-    /* The next call will resume work from the next bit.  */
-    hbi->cur[HBITMAP_LEVELS - 1] = cur & (cur - 1);
-    item = ((uint64_t)hbi->pos << BITS_PER_LEVEL) + ctzl(cur);
-
-    return item << hbi->granularity;
-}
+int64_t hbitmap_iter_next(HBitmapIter *hbi, bool advance);
 
 /**
  * hbitmap_iter_next_word:

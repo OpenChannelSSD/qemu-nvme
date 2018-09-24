@@ -6,8 +6,10 @@
  *
  * This code is licensed under the GPL.
  */
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
 #include "net/net.h"
+#include "qemu/log.h"
 #include <zlib.h>
 
 //#define DEBUG_STELLARIS_ENET 1
@@ -228,16 +230,25 @@ static ssize_t stellaris_enet_receive(NetClientState *nc, const uint8_t *buf, si
     if ((s->rctl & SE_RCTL_RXEN) == 0)
         return -1;
     if (s->np >= 31) {
-        DPRINTF("Packet dropped\n");
-        return -1;
+        return 0;
     }
 
     DPRINTF("Received packet len=%zu\n", size);
     n = s->next_packet + s->np;
     if (n >= 31)
         n -= 31;
-    s->np++;
 
+    if (size >= sizeof(s->rx[n].data) - 6) {
+        /* If the packet won't fit into the
+         * emulated 2K RAM, this is reported
+         * as a FIFO overrun error.
+         */
+        s->ris |= SE_INT_FOV;
+        stellaris_enet_update(s);
+        return -1;
+    }
+
+    s->np++;
     s->rx[n].len = size + 6;
     p = s->rx[n].data;
     *(p++) = (size + 6);
@@ -260,13 +271,8 @@ static ssize_t stellaris_enet_receive(NetClientState *nc, const uint8_t *buf, si
     return size;
 }
 
-static int stellaris_enet_can_receive(NetClientState *nc)
+static int stellaris_enet_can_receive(stellaris_enet_state *s)
 {
-    stellaris_enet_state *s = qemu_get_nic_opaque(nc);
-
-    if ((s->rctl & SE_RCTL_RXEN) == 0)
-        return 1;
-
     return (s->np < 31);
 }
 
@@ -307,6 +313,9 @@ static uint64_t stellaris_enet_read(void *opaque, hwaddr offset,
                 s->next_packet = 0;
             s->np--;
             DPRINTF("RX done np=%d\n", s->np);
+            if (!s->np && stellaris_enet_can_receive(s)) {
+                qemu_flush_queued_packets(qemu_get_queue(s->nic));
+            }
         }
         return val;
     }
@@ -332,10 +341,12 @@ static uint64_t stellaris_enet_read(void *opaque, hwaddr offset,
         return s->np;
     case 0x38: /* TR */
         return 0;
-    case 0x3c: /* Undocuented: Timestamp? */
+    case 0x3c: /* Undocumented: Timestamp? */
         return 0;
     default:
-        hw_error("stellaris_enet_read: Bad offset %x\n", (int)offset);
+        qemu_log_mask(LOG_GUEST_ERROR, "stellaris_enet_rd%d: Illegal register"
+                                       " 0x02%" HWADDR_PRIx "\n",
+                      size * 8, offset);
         return 0;
     }
 }
@@ -408,7 +419,10 @@ static void stellaris_enet_write(void *opaque, hwaddr offset,
         s->thr = value;
         break;
     case 0x20: /* MCTL */
-        s->mctl = value;
+        /* TODO: MII registers aren't modelled.
+         * Clear START, indicating that the operation completes immediately.
+         */
+        s->mctl = value & ~1;
         break;
     case 0x24: /* MDV */
         s->mdv = value;
@@ -431,7 +445,9 @@ static void stellaris_enet_write(void *opaque, hwaddr offset,
         /* Ignored.  */
         break;
     default:
-        hw_error("stellaris_enet_write: Bad offset %x\n", (int)offset);
+        qemu_log_mask(LOG_GUEST_ERROR, "stellaris_enet_wr%d: Illegal register "
+                                       "0x02%" HWADDR_PRIx " = 0x%" PRIx64 "\n",
+                      size * 8, offset, value);
     }
 }
 
@@ -451,19 +467,10 @@ static void stellaris_enet_reset(stellaris_enet_state *s)
     s->tx_fifo_len = 0;
 }
 
-static void stellaris_enet_cleanup(NetClientState *nc)
-{
-    stellaris_enet_state *s = qemu_get_nic_opaque(nc);
-
-    s->nic = NULL;
-}
-
 static NetClientInfo net_stellaris_enet_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_NIC,
+    .type = NET_CLIENT_DRIVER_NIC,
     .size = sizeof(NICState),
-    .can_receive = stellaris_enet_can_receive,
     .receive = stellaris_enet_receive,
-    .cleanup = stellaris_enet_cleanup,
 };
 
 static int stellaris_enet_init(SysBusDevice *sbd)

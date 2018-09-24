@@ -23,14 +23,16 @@
  * Contributions after 2012-01-13 are licensed under the terms of the
  * GNU GPL, version 2 or (at your option) any later version.
  */
+#include "qemu/osdep.h"
 #include "hw/hw.h"
+#include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "hw/i386/pc.h"
 #include "hw/pci/pci.h"
 #include "qemu/timer.h"
 #include "sysemu/sysemu.h"
 #include "hw/acpi/acpi.h"
-#include "sysemu/kvm.h"
+#include "hw/acpi/tco.h"
 #include "exec/address-spaces.h"
 
 #include "hw/i386/ich9.h"
@@ -92,9 +94,18 @@ static void ich9_smi_writel(void *opaque, hwaddr addr, uint64_t val,
                             unsigned width)
 {
     ICH9LPCPMRegs *pm = opaque;
+    TCOIORegs *tr = &pm->tco_regs;
+    uint64_t tco_en;
+
     switch (addr) {
     case 0:
-        pm->smi_en = val;
+        tco_en = pm->smi_en & ICH9_PMIO_SMI_EN_TCO_EN;
+        /* once TCO_LOCK bit is set, TCO_EN bit cannot be overwritten */
+        if (tr->tco.cnt1 & TCO_LOCK) {
+            val = (val & ~ICH9_PMIO_SMI_EN_TCO_EN) | tco_en;
+        }
+        pm->smi_en &= ~pm->smi_en_wmask;
+        pm->smi_en |= (val & pm->smi_en_wmask);
         break;
     }
 }
@@ -151,8 +162,55 @@ static const VMStateDescription vmstate_memhp_state = {
     .version_id = 1,
     .minimum_version_id = 1,
     .minimum_version_id_old = 1,
+    .needed = vmstate_test_use_memhp,
     .fields      = (VMStateField[]) {
         VMSTATE_MEMORY_HOTPLUG(acpi_memory_hotplug, ICH9LPCPMRegs),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool vmstate_test_use_tco(void *opaque)
+{
+    ICH9LPCPMRegs *s = opaque;
+    return s->enable_tco;
+}
+
+static const VMStateDescription vmstate_tco_io_state = {
+    .name = "ich9_pm/tco",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .minimum_version_id_old = 1,
+    .needed = vmstate_test_use_tco,
+    .fields      = (VMStateField[]) {
+        VMSTATE_STRUCT(tco_regs, ICH9LPCPMRegs, 1, vmstate_tco_io_sts,
+                       TCOIORegs),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool vmstate_test_use_cpuhp(void *opaque)
+{
+    ICH9LPCPMRegs *s = opaque;
+    return !s->cpu_hotplug_legacy;
+}
+
+static int vmstate_cpuhp_pre_load(void *opaque)
+{
+    ICH9LPCPMRegs *s = opaque;
+    Object *obj = OBJECT(s->gpe_cpu.device);
+    object_property_set_bool(obj, false, "cpu-hotplug-legacy", &error_abort);
+    return 0;
+}
+
+static const VMStateDescription vmstate_cpuhp_state = {
+    .name = "ich9_pm/cpuhp",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .minimum_version_id_old = 1,
+    .needed = vmstate_test_use_cpuhp,
+    .pre_load = vmstate_cpuhp_pre_load,
+    .fields      = (VMStateField[]) {
+        VMSTATE_CPU_HOTPLUG(cpuhp_state, ICH9LPCPMRegs),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -166,7 +224,7 @@ const VMStateDescription vmstate_ich9_pm = {
         VMSTATE_UINT16(acpi_regs.pm1.evt.sts, ICH9LPCPMRegs),
         VMSTATE_UINT16(acpi_regs.pm1.evt.en, ICH9LPCPMRegs),
         VMSTATE_UINT16(acpi_regs.pm1.cnt.cnt, ICH9LPCPMRegs),
-        VMSTATE_TIMER(acpi_regs.tmr.timer, ICH9LPCPMRegs),
+        VMSTATE_TIMER_PTR(acpi_regs.tmr.timer, ICH9LPCPMRegs),
         VMSTATE_INT64(acpi_regs.tmr.overflow_time, ICH9LPCPMRegs),
         VMSTATE_GPE_ARRAY(acpi_regs.gpe.sts, ICH9LPCPMRegs),
         VMSTATE_GPE_ARRAY(acpi_regs.gpe.en, ICH9LPCPMRegs),
@@ -174,12 +232,11 @@ const VMStateDescription vmstate_ich9_pm = {
         VMSTATE_UINT32(smi_sts, ICH9LPCPMRegs),
         VMSTATE_END_OF_LIST()
     },
-    .subsections = (VMStateSubsection[]) {
-        {
-            .vmsd = &vmstate_memhp_state,
-            .needed = vmstate_test_use_memhp,
-        },
-        VMSTATE_END_OF_LIST()
+    .subsections = (const VMStateDescription*[]) {
+        &vmstate_memhp_state,
+        &vmstate_tco_io_state,
+        &vmstate_cpuhp_state,
+        NULL
     }
 };
 
@@ -193,11 +250,12 @@ static void pm_reset(void *opaque)
     acpi_pm_tmr_reset(&pm->acpi_regs);
     acpi_gpe_reset(&pm->acpi_regs);
 
-    if (kvm_enabled()) {
-        /* Mark SMM as already inited to prevent SMM from running. KVM does not
-         * support SMM mode. */
+    pm->smi_en = 0;
+    if (!pm->smm_enabled) {
+        /* Mark SMM as already inited to prevent SMM from running. */
         pm->smi_en |= ICH9_PMIO_SMI_EN_APMC_EN;
     }
+    pm->smi_en_wmask = ~0;
 
     acpi_update_sci(&pm->acpi_regs, pm->irq);
 }
@@ -209,16 +267,8 @@ static void pm_powerdown_req(Notifier *n, void *opaque)
     acpi_pm1_evt_power_down(&pm->acpi_regs);
 }
 
-static void ich9_cpu_added_req(Notifier *n, void *opaque)
-{
-    ICH9LPCPMRegs *pm = container_of(n, ICH9LPCPMRegs, cpu_added_notifier);
-
-    assert(pm != NULL);
-    AcpiCpuHotplug_add(&pm->acpi_regs.gpe, &pm->gpe_cpu, CPU(opaque));
-    acpi_update_sci(&pm->acpi_regs, pm->irq);
-}
-
 void ich9_pm_init(PCIDevice *lpc_pci, ICH9LPCPMRegs *pm,
+                  bool smm_enabled,
                   qemu_irq sci_irq)
 {
     memory_region_init(&pm->io, OBJECT(lpc_pci), "ich9-pm", ICH9_PMIO_SIZE);
@@ -228,7 +278,8 @@ void ich9_pm_init(PCIDevice *lpc_pci, ICH9LPCPMRegs *pm,
 
     acpi_pm_tmr_init(&pm->acpi_regs, ich9_pm_update_sci_fn, &pm->io);
     acpi_pm1_evt_init(&pm->acpi_regs, ich9_pm_update_sci_fn, &pm->io);
-    acpi_pm1_cnt_init(&pm->acpi_regs, &pm->io, 2);
+    acpi_pm1_cnt_init(&pm->acpi_regs, &pm->io, pm->disable_s3, pm->disable_s4,
+                      pm->s4_val);
 
     acpi_gpe_init(&pm->acpi_regs, ICH9_PMIO_GPE0_LEN);
     memory_region_init_io(&pm->io_gpe, OBJECT(lpc_pci), &ich9_gpe_ops, pm,
@@ -239,30 +290,33 @@ void ich9_pm_init(PCIDevice *lpc_pci, ICH9LPCPMRegs *pm,
                           "acpi-smi", 8);
     memory_region_add_subregion(&pm->io, ICH9_PMIO_SMI_EN, &pm->io_smi);
 
+    pm->smm_enabled = smm_enabled;
+
+    pm->enable_tco = true;
+    acpi_pm_tco_init(&pm->tco_regs, &pm->io);
+
     pm->irq = sci_irq;
     qemu_register_reset(pm_reset, pm);
     pm->powerdown_notifier.notify = pm_powerdown_req;
     qemu_register_powerdown_notifier(&pm->powerdown_notifier);
 
-    AcpiCpuHotplug_init(pci_address_space_io(lpc_pci), OBJECT(lpc_pci),
-                        &pm->gpe_cpu, ICH9_CPU_HOTPLUG_IO_BASE);
-    pm->cpu_added_notifier.notify = ich9_cpu_added_req;
-    qemu_register_cpu_added_notifier(&pm->cpu_added_notifier);
+    legacy_acpi_cpu_hotplug_init(pci_address_space_io(lpc_pci),
+        OBJECT(lpc_pci), &pm->gpe_cpu, ICH9_CPU_HOTPLUG_IO_BASE);
 
     if (pm->acpi_memory_hotplug.is_enabled) {
         acpi_memory_hotplug_init(pci_address_space_io(lpc_pci), OBJECT(lpc_pci),
-                                 &pm->acpi_memory_hotplug);
+                                 &pm->acpi_memory_hotplug,
+                                 ACPI_MEMORY_HOTPLUG_BASE);
     }
 }
 
-static void ich9_pm_get_gpe0_blk(Object *obj, Visitor *v,
-                                 void *opaque, const char *name,
-                                 Error **errp)
+static void ich9_pm_get_gpe0_blk(Object *obj, Visitor *v, const char *name,
+                                 void *opaque, Error **errp)
 {
     ICH9LPCPMRegs *pm = opaque;
     uint32_t value = pm->pm_io_base + ICH9_PMIO_GPE0_STS;
 
-    visit_type_uint32(v, &value, name, errp);
+    visit_type_uint32(v, name, &value, errp);
 }
 
 static bool ich9_pm_get_memory_hotplug_support(Object *obj, Error **errp)
@@ -280,10 +334,121 @@ static void ich9_pm_set_memory_hotplug_support(Object *obj, bool value,
     s->pm.acpi_memory_hotplug.is_enabled = value;
 }
 
+static bool ich9_pm_get_cpu_hotplug_legacy(Object *obj, Error **errp)
+{
+    ICH9LPCState *s = ICH9_LPC_DEVICE(obj);
+
+    return s->pm.cpu_hotplug_legacy;
+}
+
+static void ich9_pm_set_cpu_hotplug_legacy(Object *obj, bool value,
+                                           Error **errp)
+{
+    ICH9LPCState *s = ICH9_LPC_DEVICE(obj);
+
+    assert(!value);
+    if (s->pm.cpu_hotplug_legacy && value == false) {
+        acpi_switch_to_modern_cphp(&s->pm.gpe_cpu, &s->pm.cpuhp_state,
+                                   ICH9_CPU_HOTPLUG_IO_BASE);
+    }
+    s->pm.cpu_hotplug_legacy = value;
+}
+
+static void ich9_pm_get_disable_s3(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    ICH9LPCPMRegs *pm = opaque;
+    uint8_t value = pm->disable_s3;
+
+    visit_type_uint8(v, name, &value, errp);
+}
+
+static void ich9_pm_set_disable_s3(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    ICH9LPCPMRegs *pm = opaque;
+    Error *local_err = NULL;
+    uint8_t value;
+
+    visit_type_uint8(v, name, &value, &local_err);
+    if (local_err) {
+        goto out;
+    }
+    pm->disable_s3 = value;
+out:
+    error_propagate(errp, local_err);
+}
+
+static void ich9_pm_get_disable_s4(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    ICH9LPCPMRegs *pm = opaque;
+    uint8_t value = pm->disable_s4;
+
+    visit_type_uint8(v, name, &value, errp);
+}
+
+static void ich9_pm_set_disable_s4(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    ICH9LPCPMRegs *pm = opaque;
+    Error *local_err = NULL;
+    uint8_t value;
+
+    visit_type_uint8(v, name, &value, &local_err);
+    if (local_err) {
+        goto out;
+    }
+    pm->disable_s4 = value;
+out:
+    error_propagate(errp, local_err);
+}
+
+static void ich9_pm_get_s4_val(Object *obj, Visitor *v, const char *name,
+                               void *opaque, Error **errp)
+{
+    ICH9LPCPMRegs *pm = opaque;
+    uint8_t value = pm->s4_val;
+
+    visit_type_uint8(v, name, &value, errp);
+}
+
+static void ich9_pm_set_s4_val(Object *obj, Visitor *v, const char *name,
+                               void *opaque, Error **errp)
+{
+    ICH9LPCPMRegs *pm = opaque;
+    Error *local_err = NULL;
+    uint8_t value;
+
+    visit_type_uint8(v, name, &value, &local_err);
+    if (local_err) {
+        goto out;
+    }
+    pm->s4_val = value;
+out:
+    error_propagate(errp, local_err);
+}
+
+static bool ich9_pm_get_enable_tco(Object *obj, Error **errp)
+{
+    ICH9LPCState *s = ICH9_LPC_DEVICE(obj);
+    return s->pm.enable_tco;
+}
+
+static void ich9_pm_set_enable_tco(Object *obj, bool value, Error **errp)
+{
+    ICH9LPCState *s = ICH9_LPC_DEVICE(obj);
+    s->pm.enable_tco = value;
+}
+
 void ich9_pm_add_properties(Object *obj, ICH9LPCPMRegs *pm, Error **errp)
 {
     static const uint32_t gpe0_len = ICH9_PMIO_GPE0_LEN;
     pm->acpi_memory_hotplug.is_enabled = true;
+    pm->cpu_hotplug_legacy = true;
+    pm->disable_s3 = 0;
+    pm->disable_s4 = 0;
+    pm->s4_val = 2;
 
     object_property_add_uint32_ptr(obj, ACPI_PM_PROP_PM_IO_BASE,
                                    &pm->pm_io_base, errp);
@@ -296,16 +461,86 @@ void ich9_pm_add_properties(Object *obj, ICH9LPCPMRegs *pm, Error **errp)
                              ich9_pm_get_memory_hotplug_support,
                              ich9_pm_set_memory_hotplug_support,
                              NULL);
+    object_property_add_bool(obj, "cpu-hotplug-legacy",
+                             ich9_pm_get_cpu_hotplug_legacy,
+                             ich9_pm_set_cpu_hotplug_legacy,
+                             NULL);
+    object_property_add(obj, ACPI_PM_PROP_S3_DISABLED, "uint8",
+                        ich9_pm_get_disable_s3,
+                        ich9_pm_set_disable_s3,
+                        NULL, pm, NULL);
+    object_property_add(obj, ACPI_PM_PROP_S4_DISABLED, "uint8",
+                        ich9_pm_get_disable_s4,
+                        ich9_pm_set_disable_s4,
+                        NULL, pm, NULL);
+    object_property_add(obj, ACPI_PM_PROP_S4_VAL, "uint8",
+                        ich9_pm_get_s4_val,
+                        ich9_pm_set_s4_val,
+                        NULL, pm, NULL);
+    object_property_add_bool(obj, ACPI_PM_PROP_TCO_ENABLED,
+                             ich9_pm_get_enable_tco,
+                             ich9_pm_set_enable_tco,
+                             NULL);
 }
 
-void ich9_pm_device_plug_cb(ICH9LPCPMRegs *pm, DeviceState *dev, Error **errp)
+void ich9_pm_device_plug_cb(HotplugHandler *hotplug_dev, DeviceState *dev,
+                            Error **errp)
 {
-    if (pm->acpi_memory_hotplug.is_enabled &&
+    ICH9LPCState *lpc = ICH9_LPC_DEVICE(hotplug_dev);
+
+    if (lpc->pm.acpi_memory_hotplug.is_enabled &&
         object_dynamic_cast(OBJECT(dev), TYPE_PC_DIMM)) {
-        acpi_memory_plug_cb(&pm->acpi_regs, pm->irq, &pm->acpi_memory_hotplug,
-                            dev, errp);
+        if (object_dynamic_cast(OBJECT(dev), TYPE_NVDIMM)) {
+            nvdimm_acpi_plug_cb(hotplug_dev, dev);
+        } else {
+            acpi_memory_plug_cb(hotplug_dev, &lpc->pm.acpi_memory_hotplug,
+                                dev, errp);
+        }
+    } else if (object_dynamic_cast(OBJECT(dev), TYPE_CPU)) {
+        if (lpc->pm.cpu_hotplug_legacy) {
+            legacy_acpi_cpu_plug_cb(hotplug_dev, &lpc->pm.gpe_cpu, dev, errp);
+        } else {
+            acpi_cpu_plug_cb(hotplug_dev, &lpc->pm.cpuhp_state, dev, errp);
+        }
     } else {
         error_setg(errp, "acpi: device plug request for not supported device"
+                   " type: %s", object_get_typename(OBJECT(dev)));
+    }
+}
+
+void ich9_pm_device_unplug_request_cb(HotplugHandler *hotplug_dev,
+                                      DeviceState *dev, Error **errp)
+{
+    ICH9LPCState *lpc = ICH9_LPC_DEVICE(hotplug_dev);
+
+    if (lpc->pm.acpi_memory_hotplug.is_enabled &&
+        object_dynamic_cast(OBJECT(dev), TYPE_PC_DIMM)) {
+        acpi_memory_unplug_request_cb(hotplug_dev,
+                                      &lpc->pm.acpi_memory_hotplug, dev,
+                                      errp);
+    } else if (object_dynamic_cast(OBJECT(dev), TYPE_CPU) &&
+               !lpc->pm.cpu_hotplug_legacy) {
+        acpi_cpu_unplug_request_cb(hotplug_dev, &lpc->pm.cpuhp_state,
+                                   dev, errp);
+    } else {
+        error_setg(errp, "acpi: device unplug request for not supported device"
+                   " type: %s", object_get_typename(OBJECT(dev)));
+    }
+}
+
+void ich9_pm_device_unplug_cb(HotplugHandler *hotplug_dev, DeviceState *dev,
+                              Error **errp)
+{
+    ICH9LPCState *lpc = ICH9_LPC_DEVICE(hotplug_dev);
+
+    if (lpc->pm.acpi_memory_hotplug.is_enabled &&
+        object_dynamic_cast(OBJECT(dev), TYPE_PC_DIMM)) {
+        acpi_memory_unplug_cb(&lpc->pm.acpi_memory_hotplug, dev, errp);
+    } else if (object_dynamic_cast(OBJECT(dev), TYPE_CPU) &&
+               !lpc->pm.cpu_hotplug_legacy) {
+        acpi_cpu_unplug_cb(&lpc->pm.cpuhp_state, dev, errp);
+    } else {
+        error_setg(errp, "acpi: device unplug for not supported device"
                    " type: %s", object_get_typename(OBJECT(dev)));
     }
 }
@@ -315,4 +550,7 @@ void ich9_pm_ospm_status(AcpiDeviceIf *adev, ACPIOSTInfoList ***list)
     ICH9LPCState *s = ICH9_LPC_DEVICE(adev);
 
     acpi_memory_ospm_status(&s->pm.acpi_memory_hotplug, list);
+    if (!s->pm.cpu_hotplug_legacy) {
+        acpi_cpu_ospm_status(&s->pm.cpuhp_state, list);
+    }
 }

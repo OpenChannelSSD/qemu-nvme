@@ -25,20 +25,23 @@
 /* Avoid compiler warning because macro is redefined in SDL_syswm.h. */
 #undef WIN32_LEAN_AND_MEAN
 
+#include "qemu/osdep.h"
 #include <SDL.h>
-
-#if SDL_MAJOR_VERSION == 1
 #include <SDL_syswm.h>
 
 #include "qemu-common.h"
+#include "qemu/cutils.h"
 #include "ui/console.h"
 #include "ui/input.h"
 #include "sysemu/sysemu.h"
+#ifndef WIN32
 #include "x_keymap.h"
+#endif
 #include "sdl_zoom.h"
 
 static DisplayChangeListener *dcl;
 static DisplaySurface *surface;
+static DisplayOptions *opts;
 static SDL_Surface *real_screen;
 static SDL_Surface *guest_screen = NULL;
 static int gui_grab; /* if true, all keyboard/mouse events are grabbed */
@@ -48,7 +51,6 @@ static int gui_saved_width;
 static int gui_saved_height;
 static int gui_saved_grab;
 static int gui_fullscreen;
-static int gui_noframe;
 static int gui_key_modifier_pressed;
 static int gui_keysym;
 static int gui_grab_code = KMOD_LALT | KMOD_LCTRL;
@@ -62,16 +64,31 @@ static SDL_Cursor *guest_sprite = NULL;
 static SDL_PixelFormat host_format;
 static int scaling_active = 0;
 static Notifier mouse_mode_notifier;
+static int idle_counter;
+static const guint16 *keycode_map;
+static size_t keycode_maplen;
+
+#define SDL_REFRESH_INTERVAL_BUSY 10
+#define SDL_MAX_IDLE_COUNT (2 * GUI_REFRESH_INTERVAL_DEFAULT \
+                            / SDL_REFRESH_INTERVAL_BUSY + 1)
+
+#if 0
+#define DEBUG_SDL
+#endif
 
 static void sdl_update(DisplayChangeListener *dcl,
                        int x, int y, int w, int h)
 {
-    //    printf("updating x=%d y=%d w=%d h=%d\n", x, y, w, h);
     SDL_Rect rec;
     rec.x = x;
     rec.y = y;
     rec.w = w;
     rec.h = h;
+
+#ifdef DEBUG_SDL
+    printf("SDL: Updating x=%d y=%d w=%d h=%d (scaling: %d)\n",
+           x, y, w, h, scaling_active);
+#endif
 
     if (guest_screen) {
         if (!scaling_active) {
@@ -91,7 +108,9 @@ static void do_sdl_resize(int width, int height, int bpp)
     int flags;
     SDL_Surface *tmp_screen;
 
-    //    printf("resizing to %d %d\n", w, h);
+#ifdef DEBUG_SDL
+    printf("SDL: Resizing to %dx%d bpp %d\n", width, height, bpp);
+#endif
 
     flags = SDL_HWSURFACE | SDL_ASYNCBLIT | SDL_HWACCEL;
     if (gui_fullscreen) {
@@ -99,8 +118,9 @@ static void do_sdl_resize(int width, int height, int bpp)
     } else {
         flags |= SDL_RESIZABLE;
     }
-    if (gui_noframe)
+    if (no_frame) {
         flags |= SDL_NOFRAME;
+    }
 
     tmp_screen = SDL_SetVideoMode(width, height, bpp, flags);
     if (!real_screen) {
@@ -127,12 +147,13 @@ static void do_sdl_resize(int width, int height, int bpp)
 static void sdl_switch(DisplayChangeListener *dcl,
                        DisplaySurface *new_surface)
 {
-    PixelFormat pf = qemu_pixelformat_from_pixman(new_surface->format);
+    PixelFormat pf;
 
     /* temporary hack: allows to call sdl_switch to handle scaling changes */
     if (new_surface) {
         surface = new_surface;
     }
+    pf = qemu_pixelformat_from_pixman(surface->format);
 
     if (!scaling_active) {
         do_sdl_resize(surface_width(surface), surface_height(surface), 0);
@@ -145,12 +166,31 @@ static void sdl_switch(DisplayChangeListener *dcl,
     if (guest_screen != NULL) {
         SDL_FreeSurface(guest_screen);
     }
+
+#ifdef DEBUG_SDL
+    printf("SDL: Creating surface with masks: %08x %08x %08x %08x\n",
+           pf.rmask, pf.gmask, pf.bmask, pf.amask);
+#endif
+
     guest_screen = SDL_CreateRGBSurfaceFrom
         (surface_data(surface),
          surface_width(surface), surface_height(surface),
          surface_bits_per_pixel(surface), surface_stride(surface),
          pf.rmask, pf.gmask,
          pf.bmask, pf.amask);
+}
+
+static bool sdl_check_format(DisplayChangeListener *dcl,
+                             pixman_format_code_t format)
+{
+    /*
+     * We let SDL convert for us a few more formats than,
+     * the native ones. Thes are the ones I have tested.
+     */
+    return (format == PIXMAN_x8r8g8b8 ||
+            format == PIXMAN_b8g8r8x8 ||
+            format == PIXMAN_x1r5g5b5 ||
+            format == PIXMAN_r5g6b5);
 }
 
 /* generic keyboard conversion */
@@ -161,6 +201,9 @@ static kbd_layout_t *kbd_layout = NULL;
 
 static uint8_t sdl_keyevent_to_keycode_generic(const SDL_KeyboardEvent *ev)
 {
+    bool shift = modifiers_state[0x2a] || modifiers_state[0x36];
+    bool altgr = modifiers_state[0xb8];
+    bool ctrl  = modifiers_state[0x1d] || modifiers_state[0x9d];
     int keysym;
     /* workaround for X11+SDL bug with AltGR */
     keysym = ev->keysym.sym;
@@ -170,95 +213,56 @@ static uint8_t sdl_keyevent_to_keycode_generic(const SDL_KeyboardEvent *ev)
     if (keysym == 92 && ev->keysym.scancode == 133) {
         keysym = 0xa5;
     }
-    return keysym2scancode(kbd_layout, keysym) & SCANCODE_KEYMASK;
+    return keysym2scancode(kbd_layout, keysym,
+                           shift, altgr, ctrl) & SCANCODE_KEYMASK;
 }
 
-/* specific keyboard conversions from scan codes */
 
-#if defined(_WIN32)
-
-static uint8_t sdl_keyevent_to_keycode(const SDL_KeyboardEvent *ev)
+static const guint16 *sdl_get_keymap(size_t *maplen)
 {
-    return ev->keysym.scancode;
-}
-
+#if defined(WIN32)
+    *maplen = qemu_input_map_atset1_to_qcode_len;
+    return qemu_input_map_atset1_to_qcode;
 #else
-
 #if defined(SDL_VIDEO_DRIVER_X11)
-#include <X11/XKBlib.h>
-
-static int check_for_evdev(void)
-{
     SDL_SysWMinfo info;
-    XkbDescPtr desc = NULL;
-    int has_evdev = 0;
-    char *keycodes = NULL;
 
     SDL_VERSION(&info.version);
-    if (!SDL_GetWMInfo(&info)) {
-        return 0;
+    if (SDL_GetWMInfo(&info) > 0) {
+        return qemu_xkeymap_mapping_table(
+            info.info.x11.display, maplen);
     }
-    desc = XkbGetKeyboard(info.info.x11.display,
-                          XkbGBN_AllComponentsMask,
-                          XkbUseCoreKbd);
-    if (desc && desc->names) {
-        keycodes = XGetAtomName(info.info.x11.display, desc->names->keycodes);
-        if (keycodes == NULL) {
-            fprintf(stderr, "could not lookup keycode name\n");
-        } else if (strstart(keycodes, "evdev", NULL)) {
-            has_evdev = 1;
-        } else if (!strstart(keycodes, "xfree86", NULL)) {
-            fprintf(stderr, "unknown keycodes `%s', please report to "
-                    "qemu-devel@nongnu.org\n", keycodes);
-        }
-    }
-
-    if (desc) {
-        XkbFreeKeyboard(desc, XkbGBN_AllComponentsMask, True);
-    }
-    if (keycodes) {
-        XFree(keycodes);
-    }
-    return has_evdev;
-}
-#else
-static int check_for_evdev(void)
-{
-	return 0;
-}
 #endif
+    g_warning("Unsupported SDL video driver / platform.\n"
+              "Assuming Linux KBD scancodes, but probably wrong.\n"
+              "Please report to qemu-devel@nongnu.org\n"
+              "including the following information:\n"
+              "\n"
+              "  - Operating system\n"
+              "  - SDL video driver\n");
+    *maplen = qemu_input_map_xorgkbd_to_qcode_len;
+    return qemu_input_map_xorgkbd_to_qcode;
+#endif
+}
 
 static uint8_t sdl_keyevent_to_keycode(const SDL_KeyboardEvent *ev)
 {
-    int keycode;
-    static int has_evdev = -1;
-
-    if (has_evdev == -1)
-        has_evdev = check_for_evdev();
-
-    keycode = ev->keysym.scancode;
-
-    if (keycode < 9) {
-        keycode = 0;
-    } else if (keycode < 97) {
-        keycode -= 8; /* just an offset */
-    } else if (keycode < 158) {
-        /* use conversion table */
-        if (has_evdev)
-            keycode = translate_evdev_keycode(keycode - 97);
-        else
-            keycode = translate_xfree86_keycode(keycode - 97);
-    } else if (keycode == 208) { /* Hiragana_Katakana */
-        keycode = 0x70;
-    } else if (keycode == 211) { /* backslash */
-        keycode = 0x73;
-    } else {
-        keycode = 0;
+    int qcode;
+    if (!keycode_map) {
+        return 0;
     }
-    return keycode;
-}
+    if (ev->keysym.scancode > keycode_maplen) {
+        return 0;
+    }
 
-#endif
+    qcode = keycode_map[ev->keysym.scancode];
+
+    if (qcode > qemu_input_map_qcode_to_qnum_len) {
+        return 0;
+    }
+
+    return qemu_input_map_qcode_to_qnum[qcode];
+}
 
 static void reset_keys(void)
 {
@@ -331,11 +335,11 @@ static void sdl_update_caption(void)
         status = " [Stopped]";
     else if (gui_grab) {
         if (alt_grab)
-            status = " - Press Ctrl-Alt-Shift to exit mouse grab";
+            status = " - Press Ctrl-Alt-Shift-G to exit mouse grab";
         else if (ctrl_grab)
-            status = " - Press Right-Ctrl to exit mouse grab";
+            status = " - Press Right-Ctrl-G to exit mouse grab";
         else
-            status = " - Press Ctrl-Alt to exit mouse grab";
+            status = " - Press Ctrl-Alt-G to exit mouse grab";
     }
 
     if (qemu_name) {
@@ -437,7 +441,7 @@ static void sdl_mouse_mode_change(Notifier *notify, void *data)
 
 static void sdl_send_mouse_event(int dx, int dy, int x, int y, int state)
 {
-    static uint32_t bmap[INPUT_BUTTON_MAX] = {
+    static uint32_t bmap[INPUT_BUTTON__MAX] = {
         [INPUT_BUTTON_LEFT]       = SDL_BUTTON(SDL_BUTTON_LEFT),
         [INPUT_BUTTON_MIDDLE]     = SDL_BUTTON(SDL_BUTTON_MIDDLE),
         [INPUT_BUTTON_RIGHT]      = SDL_BUTTON(SDL_BUTTON_RIGHT),
@@ -453,9 +457,9 @@ static void sdl_send_mouse_event(int dx, int dy, int x, int y, int state)
 
     if (qemu_input_is_absolute()) {
         qemu_input_queue_abs(dcl->con, INPUT_AXIS_X, x,
-                             real_screen->w);
+                             0, real_screen->w);
         qemu_input_queue_abs(dcl->con, INPUT_AXIS_Y, y,
-                             real_screen->h);
+                             0, real_screen->h);
     } else {
         if (guest_cursor) {
             x -= guest_x;
@@ -474,6 +478,10 @@ static void sdl_send_mouse_event(int dx, int dy, int x, int y, int state)
 static void sdl_scale(int width, int height)
 {
     int bpp = real_screen->format->BitsPerPixel;
+
+#ifdef DEBUG_SDL
+    printf("SDL: Scaling to %dx%d bpp %d\n", width, height, bpp);
+#endif
 
     if (bpp != 16 && bpp != 32) {
         bpp = 32;
@@ -533,6 +541,16 @@ static void handle_keydown(SDL_Event *ev)
         switch (keycode) {
         case 0x21: /* 'f' key on US keyboard */
             toggle_full_screen();
+            gui_keysym = 1;
+            break;
+        case 0x22: /* 'g' key */
+            if (!gui_grab) {
+                if (qemu_console_is_graphic(NULL)) {
+                    sdl_grab_start();
+                }
+            } else if (!gui_fullscreen) {
+                sdl_grab_end();
+            }
             gui_keysym = 1;
             break;
         case 0x16: /* 'u' key on US keyboard */
@@ -670,20 +688,6 @@ static void handle_keyup(SDL_Event *ev)
     }
     if (!mod_state && gui_key_modifier_pressed) {
         gui_key_modifier_pressed = 0;
-        if (gui_keysym == 0) {
-            /* exit/enter grab if pressing Ctrl-Alt */
-            if (!gui_grab) {
-                if (qemu_console_is_graphic(NULL)) {
-                    sdl_grab_start();
-                }
-            } else if (!gui_fullscreen) {
-                sdl_grab_end();
-            }
-            /* SDL does not send back all the modifiers key, so we must
-             * correct it. */
-            reset_keys();
-            return;
-        }
         gui_keysym = 0;
     }
     if (qemu_console_is_graphic(NULL) && !gui_keysym) {
@@ -770,6 +774,8 @@ static void handle_activation(SDL_Event *ev)
 static void sdl_refresh(DisplayChangeListener *dcl)
 {
     SDL_Event ev1, *ev = &ev1;
+    bool allow_close = true;
+    int idle = 1;
 
     if (last_vm_running != runstate_is_running()) {
         last_vm_running = runstate_is_running();
@@ -785,22 +791,29 @@ static void sdl_refresh(DisplayChangeListener *dcl)
             sdl_update(dcl, 0, 0, real_screen->w, real_screen->h);
             break;
         case SDL_KEYDOWN:
+            idle = 0;
             handle_keydown(ev);
             break;
         case SDL_KEYUP:
+            idle = 0;
             handle_keyup(ev);
             break;
         case SDL_QUIT:
-            if (!no_quit) {
+            if (opts->has_window_close && !opts->window_close) {
+                allow_close = false;
+            }
+            if (allow_close) {
                 no_shutdown = 0;
-                qemu_system_shutdown_request();
+                qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_UI);
             }
             break;
         case SDL_MOUSEMOTION:
+            idle = 0;
             handle_mousemotion(ev);
             break;
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP:
+            idle = 0;
             handle_mousebutton(ev);
             break;
         case SDL_ACTIVEEVENT:
@@ -814,6 +827,18 @@ static void sdl_refresh(DisplayChangeListener *dcl)
         default:
             break;
         }
+    }
+
+    if (idle) {
+        if (idle_counter < SDL_MAX_IDLE_COUNT) {
+            idle_counter++;
+            if (idle_counter >= SDL_MAX_IDLE_COUNT) {
+                dcl->update_interval = GUI_REFRESH_INTERVAL_DEFAULT;
+            }
+        }
+    } else {
+        idle_counter = 0;
+        dcl->update_interval = SDL_REFRESH_INTERVAL_BUSY;
     }
 }
 
@@ -867,21 +892,25 @@ static void sdl_cleanup(void)
 }
 
 static const DisplayChangeListenerOps dcl_ops = {
-    .dpy_name          = "sdl",
-    .dpy_gfx_update    = sdl_update,
-    .dpy_gfx_switch    = sdl_switch,
-    .dpy_refresh       = sdl_refresh,
-    .dpy_mouse_set     = sdl_mouse_warp,
-    .dpy_cursor_define = sdl_mouse_define,
+    .dpy_name             = "sdl",
+    .dpy_gfx_update       = sdl_update,
+    .dpy_gfx_switch       = sdl_switch,
+    .dpy_gfx_check_format = sdl_check_format,
+    .dpy_refresh          = sdl_refresh,
+    .dpy_mouse_set        = sdl_mouse_warp,
+    .dpy_cursor_define    = sdl_mouse_define,
 };
 
-void sdl_display_init(DisplayState *ds, int full_screen, int no_frame)
+static void sdl1_display_init(DisplayState *ds, DisplayOptions *o)
 {
     int flags;
     uint8_t data = 0;
     const SDL_VideoInfo *vi;
+    SDL_SysWMinfo info;
     char *filename;
 
+    assert(o->type == DISPLAY_TYPE_SDL);
+    opts = o;
 #if defined(__APPLE__)
     /* always use generic keymaps */
     if (!keyboard_layout)
@@ -893,10 +922,10 @@ void sdl_display_init(DisplayState *ds, int full_screen, int no_frame)
             exit(1);
     }
 
-    if (no_frame)
-        gui_noframe = 1;
+    g_printerr("Running QEMU with SDL 1.2 is deprecated, and will be removed\n"
+               "in a future release. Please switch to SDL 2.0 instead\n");
 
-    if (!full_screen) {
+    if (opts->has_full_screen && opts->full_screen) {
         setenv("SDL_VIDEO_ALLOW_SCREENSAVER", "1", 0);
     }
 #ifdef __linux__
@@ -925,6 +954,8 @@ void sdl_display_init(DisplayState *ds, int full_screen, int no_frame)
     vi = SDL_GetVideoInfo();
     host_format = *(vi->vfmt);
 
+    keycode_map = sdl_get_keymap(&keycode_maplen);
+
     /* Load a 32x32x4 image. White pixels are transparent. */
     filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, "qemu-icon.bmp");
     if (filename) {
@@ -937,12 +968,12 @@ void sdl_display_init(DisplayState *ds, int full_screen, int no_frame)
         g_free(filename);
     }
 
-    if (full_screen) {
+    if (opts->has_full_screen && opts->full_screen) {
         gui_fullscreen = 1;
         sdl_grab_start();
     }
 
-    dcl = g_malloc0(sizeof(DisplayChangeListener));
+    dcl = g_new0(DisplayChangeListener, 1);
     dcl->ops = &dcl_ops;
     register_displaychangelistener(dcl);
 
@@ -956,6 +987,41 @@ void sdl_display_init(DisplayState *ds, int full_screen, int no_frame)
     sdl_cursor_hidden = SDL_CreateCursor(&data, &data, 8, 1, 0, 0);
     sdl_cursor_normal = SDL_GetCursor();
 
+    memset(&info, 0, sizeof(info));
+    SDL_VERSION(&info.version);
+    if (SDL_GetWMInfo(&info)) {
+        int i;
+        for (i = 0; ; i++) {
+            /* All consoles share the same window */
+            QemuConsole *con = qemu_console_lookup_by_index(i);
+            if (con) {
+#if defined(SDL_VIDEO_DRIVER_X11)
+                qemu_console_set_window_id(con, info.info.x11.wmwindow);
+#elif defined(SDL_VIDEO_DRIVER_NANOX) || \
+      defined(SDL_VIDEO_DRIVER_WINDIB) || defined(SDL_VIDEO_DRIVER_DDRAW) || \
+      defined(SDL_VIDEO_DRIVER_GAPI) || \
+      defined(SDL_VIDEO_DRIVER_RISCOS)
+                qemu_console_set_window_id(con, (int) (uintptr_t) info.window);
+#else
+                qemu_console_set_window_id(con, info.data);
+#endif
+            } else {
+                break;
+            }
+        }
+    }
+
     atexit(sdl_cleanup);
 }
-#endif
+
+static QemuDisplay qemu_display_sdl1 = {
+    .type       = DISPLAY_TYPE_SDL,
+    .init       = sdl1_display_init,
+};
+
+static void register_sdl1(void)
+{
+    qemu_display_register(&qemu_display_sdl1);
+}
+
+type_init(register_sdl1);

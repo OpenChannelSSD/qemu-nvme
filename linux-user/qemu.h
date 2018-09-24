@@ -1,26 +1,27 @@
 #ifndef QEMU_H
 #define QEMU_H
 
-#include <signal.h>
-#include <string.h>
-
+#include "hostdep.h"
 #include "cpu.h"
+#include "exec/exec-all.h"
 #include "exec/cpu_ldst.h"
 
 #undef DEBUG_REMAP
 #ifdef DEBUG_REMAP
-#include <stdlib.h>
 #endif /* DEBUG_REMAP */
 
 #include "exec/user/abitypes.h"
 
 #include "exec/user/thunk.h"
 #include "syscall_defs.h"
-#include "syscall.h"
+#include "target_syscall.h"
 #include "exec/gdbstub.h"
 #include "qemu/queue.h"
 
-#define THREAD __thread
+/* This is the size of the host kernel's sigset_t, needed where we make
+ * direct system calls that take a sigset_t pointer and a size.
+ */
+#define SIGSET_T_SIZE (_NSIG / 8)
 
 /* This struct is used to hold certain information about the image.
  * Basically, it replicates in user space what would be certain
@@ -36,8 +37,6 @@ struct image_info {
         abi_ulong       start_brk;
         abi_ulong       brk;
         abi_ulong       start_mmap;
-        abi_ulong       mmap;
-        abi_ulong       rss;
         abi_ulong       start_stack;
         abi_ulong       stack_limit;
         abi_ulong       entry;
@@ -47,15 +46,21 @@ struct image_info {
         abi_ulong       auxv_len;
         abi_ulong       arg_start;
         abi_ulong       arg_end;
+        abi_ulong       arg_strings;
+        abi_ulong       env_strings;
+        abi_ulong       file_string;
         uint32_t        elf_flags;
 	int		personality;
-#ifdef CONFIG_USE_FDPIC
+        abi_ulong       alignment;
+
+        /* The fields below are used in FDPIC mode.  */
         abi_ulong       loadmap_addr;
         uint16_t        nsegs;
         void           *loadsegs;
         abi_ulong       pt_dynamic_addr;
+        abi_ulong       interpreter_loadmap_addr;
+        abi_ulong       interpreter_pt_dynamic_addr;
         struct image_info *other_info;
-#endif
 };
 
 #ifdef TARGET_I386
@@ -82,16 +87,9 @@ struct vm86_saved_state {
 
 #define MAX_SIGQUEUE_SIZE 1024
 
-struct sigqueue {
-    struct sigqueue *next;
-    target_siginfo_t info;
-};
-
 struct emulated_sigtable {
     int pending; /* true if signal is pending */
-    struct sigqueue *first;
-    struct sigqueue info; /* in order to always have memory for the
-                             first signal, we put it here */
+    target_siginfo_t info;
 };
 
 /* NOTE: we force a big alignment so that the stack stored after is
@@ -103,9 +101,6 @@ typedef struct TaskState {
     /* FPA state */
     FPA11 fpa;
 # endif
-    int swi_errno;
-#endif
-#ifdef TARGET_UNICORE32
     int swi_errno;
 #endif
 #if defined(TARGET_I386) && !defined(TARGET_X86_64)
@@ -120,21 +115,39 @@ typedef struct TaskState {
     int sim_syscalls;
     abi_ulong tp_value;
 #endif
-#if defined(TARGET_ARM) || defined(TARGET_M68K) || defined(TARGET_UNICORE32)
+#if defined(TARGET_ARM) || defined(TARGET_M68K)
     /* Extra fields for semihosted binaries.  */
-    uint32_t heap_base;
-    uint32_t heap_limit;
+    abi_ulong heap_base;
+    abi_ulong heap_limit;
 #endif
-    uint32_t stack_base;
+    abi_ulong stack_base;
     int used; /* non zero if used */
-    bool sigsegv_blocked; /* SIGSEGV blocked by guest */
     struct image_info *info;
     struct linux_binprm *bprm;
 
+    struct emulated_sigtable sync_signal;
     struct emulated_sigtable sigtab[TARGET_NSIG];
-    struct sigqueue sigqueue_table[MAX_SIGQUEUE_SIZE]; /* siginfo queue */
-    struct sigqueue *first_free; /* first free siginfo queue entry */
-    int signal_pending; /* non zero if a signal may be pending */
+    /* This thread's signal mask, as requested by the guest program.
+     * The actual signal mask of this thread may differ:
+     *  + we don't let SIGSEGV and SIGBUS be blocked while running guest code
+     *  + sometimes we block all signals to avoid races
+     */
+    sigset_t signal_mask;
+    /* The signal mask imposed by a guest sigsuspend syscall, if we are
+     * currently in the middle of such a syscall
+     */
+    sigset_t sigsuspend_mask;
+    /* Nonzero if we're leaving a sigsuspend and sigsuspend_mask is valid. */
+    int in_sigsuspend;
+
+    /* Nonzero if process_pending_signals() needs to do something (either
+     * handle a pending signal or unblock signals).
+     * This flag is written from a signal handler so should be accessed via
+     * the atomic_read() and atomic_write() functions. (It is not accessed
+     * from multiple threads.)
+     */
+    int signal_pending;
+
 } __attribute__((aligned(16))) TaskState;
 
 extern char *exec_path;
@@ -145,12 +158,6 @@ extern const char *qemu_uname_release;
 extern unsigned long mmap_min_addr;
 
 /* ??? See if we can avoid exposing so much of the loader internals.  */
-/*
- * MAX_ARG_PAGES defines the number of pages allocated for arguments
- * and envelope for the new program. 32 should suffice, this gives
- * a maximum env+arg of 128kB w/4KB pages!
- */
-#define MAX_ARG_PAGES 33
 
 /* Read a good amount of data initially, to hopefully get all the
    program headers loaded.  */
@@ -162,7 +169,6 @@ extern unsigned long mmap_min_addr;
  */
 struct linux_binprm {
         char buf[BPRM_BUF_SIZE] __attribute__((aligned));
-        void *page[MAX_ARG_PAGES];
         abi_ulong p;
 	int fd;
         int e_uid, e_gid;
@@ -180,6 +186,14 @@ int loader_exec(int fdexec, const char *filename, char **argv, char **envp,
              struct target_pt_regs * regs, struct image_info *infop,
              struct linux_binprm *);
 
+/* Returns true if the image uses the FDPIC ABI. If this is the case,
+ * we have to provide some information (loadmap, pt_dynamic_info) such
+ * that the program can be relocated adequately. This is also useful
+ * when handling signals.
+ */
+int info_is_fdpic(struct image_info *info);
+
+uint32_t get_elf_eflags(int fd);
 int load_elf_binary(struct linux_binprm *bprm, struct image_info *info);
 int load_flt_binary(struct linux_binprm *bprm, struct image_info *info);
 
@@ -193,9 +207,9 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
                     abi_long arg5, abi_long arg6, abi_long arg7,
                     abi_long arg8);
 void gemu_log(const char *fmt, ...) GCC_FMT_ATTR(1, 2);
-extern THREAD CPUState *thread_cpu;
+extern __thread CPUState *thread_cpu;
 void cpu_loop(CPUArchState *env);
-char *target_strerror(int err);
+const char *target_strerror(int err);
 int get_osversion(void);
 void init_qemu_uname_release(void);
 void fork_start(void);
@@ -216,6 +230,139 @@ unsigned long init_guest_space(unsigned long host_start,
 
 #include "qemu/log.h"
 
+/* safe_syscall.S */
+
+/**
+ * safe_syscall:
+ * @int number: number of system call to make
+ * ...: arguments to the system call
+ *
+ * Call a system call if guest signal not pending.
+ * This has the same API as the libc syscall() function, except that it
+ * may return -1 with errno == TARGET_ERESTARTSYS if a signal was pending.
+ *
+ * Returns: the system call result, or -1 with an error code in errno
+ * (Errnos are host errnos; we rely on TARGET_ERESTARTSYS not clashing
+ * with any of the host errno values.)
+ */
+
+/* A guide to using safe_syscall() to handle interactions between guest
+ * syscalls and guest signals:
+ *
+ * Guest syscalls come in two flavours:
+ *
+ * (1) Non-interruptible syscalls
+ *
+ * These are guest syscalls that never get interrupted by signals and
+ * so never return EINTR. They can be implemented straightforwardly in
+ * QEMU: just make sure that if the implementation code has to make any
+ * blocking calls that those calls are retried if they return EINTR.
+ * It's also OK to implement these with safe_syscall, though it will be
+ * a little less efficient if a signal is delivered at the 'wrong' moment.
+ *
+ * Some non-interruptible syscalls need to be handled using block_signals()
+ * to block signals for the duration of the syscall. This mainly applies
+ * to code which needs to modify the data structures used by the
+ * host_signal_handler() function and the functions it calls, including
+ * all syscalls which change the thread's signal mask.
+ *
+ * (2) Interruptible syscalls
+ *
+ * These are guest syscalls that can be interrupted by signals and
+ * for which we need to either return EINTR or arrange for the guest
+ * syscall to be restarted. This category includes both syscalls which
+ * always restart (and in the kernel return -ERESTARTNOINTR), ones
+ * which only restart if there is no handler (kernel returns -ERESTARTNOHAND
+ * or -ERESTART_RESTARTBLOCK), and the most common kind which restart
+ * if the handler was registered with SA_RESTART (kernel returns
+ * -ERESTARTSYS). System calls which are only interruptible in some
+ * situations (like 'open') also need to be handled this way.
+ *
+ * Here it is important that the host syscall is made
+ * via this safe_syscall() function, and *not* via the host libc.
+ * If the host libc is used then the implementation will appear to work
+ * most of the time, but there will be a race condition where a
+ * signal could arrive just before we make the host syscall inside libc,
+ * and then then guest syscall will not correctly be interrupted.
+ * Instead the implementation of the guest syscall can use the safe_syscall
+ * function but otherwise just return the result or errno in the usual
+ * way; the main loop code will take care of restarting the syscall
+ * if appropriate.
+ *
+ * (If the implementation needs to make multiple host syscalls this is
+ * OK; any which might really block must be via safe_syscall(); for those
+ * which are only technically blocking (ie which we know in practice won't
+ * stay in the host kernel indefinitely) it's OK to use libc if necessary.
+ * You must be able to cope with backing out correctly if some safe_syscall
+ * you make in the implementation returns either -TARGET_ERESTARTSYS or
+ * EINTR though.)
+ *
+ * block_signals() cannot be used for interruptible syscalls.
+ *
+ *
+ * How and why the safe_syscall implementation works:
+ *
+ * The basic setup is that we make the host syscall via a known
+ * section of host native assembly. If a signal occurs, our signal
+ * handler checks the interrupted host PC against the addresse of that
+ * known section. If the PC is before or at the address of the syscall
+ * instruction then we change the PC to point at a "return
+ * -TARGET_ERESTARTSYS" code path instead, and then exit the signal handler
+ * (causing the safe_syscall() call to immediately return that value).
+ * Then in the main.c loop if we see this magic return value we adjust
+ * the guest PC to wind it back to before the system call, and invoke
+ * the guest signal handler as usual.
+ *
+ * This winding-back will happen in two cases:
+ * (1) signal came in just before we took the host syscall (a race);
+ *   in this case we'll take the guest signal and have another go
+ *   at the syscall afterwards, and this is indistinguishable for the
+ *   guest from the timing having been different such that the guest
+ *   signal really did win the race
+ * (2) signal came in while the host syscall was blocking, and the
+ *   host kernel decided the syscall should be restarted;
+ *   in this case we want to restart the guest syscall also, and so
+ *   rewinding is the right thing. (Note that "restart" semantics mean
+ *   "first call the signal handler, then reattempt the syscall".)
+ * The other situation to consider is when a signal came in while the
+ * host syscall was blocking, and the host kernel decided that the syscall
+ * should not be restarted; in this case QEMU's host signal handler will
+ * be invoked with the PC pointing just after the syscall instruction,
+ * with registers indicating an EINTR return; the special code in the
+ * handler will not kick in, and we will return EINTR to the guest as
+ * we should.
+ *
+ * Notice that we can leave the host kernel to make the decision for
+ * us about whether to do a restart of the syscall or not; we do not
+ * need to check SA_RESTART flags in QEMU or distinguish the various
+ * kinds of restartability.
+ */
+#ifdef HAVE_SAFE_SYSCALL
+/* The core part of this function is implemented in assembly */
+extern long safe_syscall_base(int *pending, long number, ...);
+
+#define safe_syscall(...)                                               \
+    ({                                                                  \
+        long ret_;                                                      \
+        int *psp_ = &((TaskState *)thread_cpu->opaque)->signal_pending; \
+        ret_ = safe_syscall_base(psp_, __VA_ARGS__);                    \
+        if (is_error(ret_)) {                                           \
+            errno = -ret_;                                              \
+            ret_ = -1;                                                  \
+        }                                                               \
+        ret_;                                                           \
+    })
+
+#else
+
+/* Fallback for architectures which don't yet provide a safe-syscall assembly
+ * fragment; note that this is racy!
+ * This should go away when all host architectures have been updated.
+ */
+#define safe_syscall syscall
+
+#endif
+
 /* syscall.c */
 int host_to_target_waitstatus(int status);
 
@@ -224,12 +371,23 @@ void print_syscall(int num,
                    abi_long arg1, abi_long arg2, abi_long arg3,
                    abi_long arg4, abi_long arg5, abi_long arg6);
 void print_syscall_ret(int num, abi_long arg1);
+/**
+ * print_taken_signal:
+ * @target_signum: target signal being taken
+ * @tinfo: target_siginfo_t which will be passed to the guest for the signal
+ *
+ * Print strace output indicating that this signal is being taken by the guest,
+ * in a format similar to:
+ * --- SIGSEGV {si_signo=SIGSEGV, si_code=SI_KERNEL, si_addr=0} ---
+ */
+void print_taken_signal(int target_signum, const target_siginfo_t *tinfo);
 extern int do_strace;
 
 /* signal.c */
 void process_pending_signals(CPUArchState *cpu_env);
 void signal_init(void);
-int queue_signal(CPUArchState *env, int sig, target_siginfo_t *info);
+int queue_signal(CPUArchState *env, int sig, int si_type,
+                 target_siginfo_t *info);
 void host_to_target_siginfo(target_siginfo_t *tinfo, const siginfo_t *info);
 void target_to_host_siginfo(siginfo_t *info, const target_siginfo_t *tinfo);
 int target_to_host_signal(int sig);
@@ -238,6 +396,27 @@ long do_sigreturn(CPUArchState *env);
 long do_rt_sigreturn(CPUArchState *env);
 abi_long do_sigaltstack(abi_ulong uss_addr, abi_ulong uoss_addr, abi_ulong sp);
 int do_sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+abi_long do_swapcontext(CPUArchState *env, abi_ulong uold_ctx,
+                        abi_ulong unew_ctx, abi_long ctx_size);
+/**
+ * block_signals: block all signals while handling this guest syscall
+ *
+ * Block all signals, and arrange that the signal mask is returned to
+ * its correct value for the guest before we resume execution of guest code.
+ * If this function returns non-zero, then the caller should immediately
+ * return -TARGET_ERESTARTSYS to the main loop, which will take the pending
+ * signal and restart execution of the syscall.
+ * If block_signals() returns zero, then the caller can continue with
+ * emulation of the system call knowing that no signals can be taken
+ * (and therefore that no race conditions will result).
+ * This should only be called once, because if it is called a second time
+ * it will always return non-zero. (Think of it like a mutex that can't
+ * be recursively locked.)
+ * Signals will be unblocked again by process_pending_signals().
+ *
+ * Return value: non-zero if there was a pending signal, zero if not.
+ */
+int block_signals(void); /* Returns non zero if signal pending */
 
 #ifdef TARGET_I386
 /* vm86.c */
@@ -258,14 +437,9 @@ int target_munmap(abi_ulong start, abi_ulong len);
 abi_long target_mremap(abi_ulong old_addr, abi_ulong old_size,
                        abi_ulong new_size, unsigned long flags,
                        abi_ulong new_addr);
-int target_msync(abi_ulong start, abi_ulong len, int flags);
 extern unsigned long last_brk;
 extern abi_ulong mmap_next_start;
-void mmap_lock(void);
-void mmap_unlock(void);
 abi_ulong mmap_find_vma(abi_ulong, abi_ulong);
-void cpu_list_lock(void);
-void cpu_list_unlock(void);
 void mmap_fork_start(void);
 void mmap_fork_end(int child);
 
@@ -395,7 +569,7 @@ static inline void *lock_user(int type, abi_ulong guest_addr, long len, int copy
 #ifdef DEBUG_REMAP
     {
         void *addr;
-        addr = malloc(len);
+        addr = g_malloc(len);
         if (copy)
             memcpy(addr, g2h(guest_addr), len);
         else
@@ -421,7 +595,7 @@ static inline void unlock_user(void *host_ptr, abi_ulong guest_addr,
         return;
     if (len > 0)
         memcpy(g2h(guest_addr), host_ptr, len);
-    free(host_ptr);
+    g_free(host_ptr);
 #endif
 }
 
@@ -447,12 +621,24 @@ static inline void *lock_user_string(abi_ulong guest_addr)
 
 #include <pthread.h>
 
+static inline int is_error(abi_long ret)
+{
+    return (abi_ulong)ret >= (abi_ulong)(-4096);
+}
+
+/**
+ * preexit_cleanup: housekeeping before the guest exits
+ *
+ * env: the CPU state
+ * code: the exit code
+ */
+void preexit_cleanup(CPUArchState *env, int code);
+
 /* Include target-specific struct and function definitions;
  * they may need access to the target-independent structures
  * above, so include them last.
  */
 #include "target_cpu.h"
-#include "target_signal.h"
 #include "target_structs.h"
 
 #endif /* QEMU_H */

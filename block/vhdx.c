@@ -15,15 +15,21 @@
  *
  */
 
-#include "qemu-common.h"
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "block/block_int.h"
+#include "block/qdict.h"
+#include "sysemu/block-backend.h"
 #include "qemu/module.h"
+#include "qemu/option.h"
 #include "qemu/crc32c.h"
-#include "block/vhdx.h"
-#include "migration/migration.h"
-
-#include <uuid/uuid.h>
-#include <glib.h>
+#include "qemu/bswap.h"
+#include "vhdx.h"
+#include "migration/blocker.h"
+#include "qemu/uuid.h"
+#include "qapi/qmp/qdict.h"
+#include "qapi/qobject-input-visitor.h"
+#include "qapi/qapi-visit-block-core.h"
 
 /* Options for VHDX creation */
 
@@ -36,6 +42,8 @@ typedef enum VHDXImageType {
     VHDX_TYPE_FIXED,
     VHDX_TYPE_DIFFERENCING,   /* Currently unsupported */
 } VHDXImageType;
+
+static QemuOptsList vhdx_create_opts;
 
 /* Several metadata and region table data entries are identified by
  * guids in  a MS-specific GUID format. */
@@ -177,7 +185,7 @@ uint32_t vhdx_checksum_calc(uint32_t crc, uint8_t *buf, size_t size,
 /* Validates the checksum of the buffer, with an in-place CRC.
  *
  * Zero is substituted during crc calculation for the original crc field,
- * and the crc field is restored afterwards.  But the buffer will be modifed
+ * and the crc field is restored afterwards.  But the buffer will be modified
  * during the calculation, so this may not be not suitable for multi-threaded
  * use.
  *
@@ -210,11 +218,11 @@ bool vhdx_checksum_is_valid(uint8_t *buf, size_t size, int crc_offset)
  */
 void vhdx_guid_generate(MSGUID *guid)
 {
-    uuid_t uuid;
+    QemuUUID uuid;
     assert(guid != NULL);
 
-    uuid_generate(uuid);
-    memcpy(guid, uuid, sizeof(MSGUID));
+    qemu_uuid_generate(&uuid);
+    memcpy(guid, &uuid, sizeof(MSGUID));
 }
 
 /* Check for region overlaps inside the VHDX image */
@@ -263,10 +271,10 @@ static void vhdx_region_unregister_all(BDRVVHDXState *s)
 
 static void vhdx_set_shift_bits(BDRVVHDXState *s)
 {
-    s->logical_sector_size_bits = 31 - clz32(s->logical_sector_size);
-    s->sectors_per_block_bits =   31 - clz32(s->sectors_per_block);
-    s->chunk_ratio_bits =         63 - clz64(s->chunk_ratio);
-    s->block_size_bits =          31 - clz32(s->block_size);
+    s->logical_sector_size_bits = ctz32(s->logical_sector_size);
+    s->sectors_per_block_bits =   ctz32(s->sectors_per_block);
+    s->chunk_ratio_bits =         ctz64(s->chunk_ratio);
+    s->block_size_bits =          ctz32(s->block_size);
 }
 
 /*
@@ -295,9 +303,10 @@ static int vhdx_probe(const uint8_t *buf, int buf_size, const char *filename)
  * and then update the header checksum.  Header is converted to proper
  * endianness before being written to the specified file offset
  */
-static int vhdx_write_header(BlockDriverState *bs_file, VHDXHeader *hdr,
+static int vhdx_write_header(BdrvChild *file, VHDXHeader *hdr,
                              uint64_t offset, bool read)
 {
+    BlockDriverState *bs_file = file->bs;
     uint8_t *buffer = NULL;
     int ret;
     VHDXHeader *header_le;
@@ -312,7 +321,7 @@ static int vhdx_write_header(BlockDriverState *bs_file, VHDXHeader *hdr,
     buffer = qemu_blockalign(bs_file, VHDX_HEADER_SIZE);
     if (read) {
         /* if true, we can't assume the extra reserved bytes are 0 */
-        ret = bdrv_pread(bs_file, offset, buffer, VHDX_HEADER_SIZE);
+        ret = bdrv_pread(file, offset, buffer, VHDX_HEADER_SIZE);
         if (ret < 0) {
             goto exit;
         }
@@ -326,7 +335,7 @@ static int vhdx_write_header(BlockDriverState *bs_file, VHDXHeader *hdr,
     vhdx_header_le_export(hdr, header_le);
     vhdx_update_checksum(buffer, VHDX_HEADER_SIZE,
                          offsetof(VHDXHeader, checksum));
-    ret = bdrv_pwrite_sync(bs_file, offset, header_le, sizeof(VHDXHeader));
+    ret = bdrv_pwrite_sync(file, offset, header_le, sizeof(VHDXHeader));
 
 exit:
     qemu_vfree(buffer);
@@ -427,7 +436,8 @@ static void vhdx_parse_header(BlockDriverState *bs, BDRVVHDXState *s,
     /* We have to read the whole VHDX_HEADER_SIZE instead of
      * sizeof(VHDXHeader), because the checksum is over the whole
      * region */
-    ret = bdrv_pread(bs->file, VHDX_HEADER1_OFFSET, buffer, VHDX_HEADER_SIZE);
+    ret = bdrv_pread(bs->file, VHDX_HEADER1_OFFSET, buffer,
+                     VHDX_HEADER_SIZE);
     if (ret < 0) {
         goto fail;
     }
@@ -443,7 +453,8 @@ static void vhdx_parse_header(BlockDriverState *bs, BDRVVHDXState *s,
         }
     }
 
-    ret = bdrv_pread(bs->file, VHDX_HEADER2_OFFSET, buffer, VHDX_HEADER_SIZE);
+    ret = bdrv_pread(bs->file, VHDX_HEADER2_OFFSET, buffer,
+                     VHDX_HEADER_SIZE);
     if (ret < 0) {
         goto fail;
     }
@@ -854,14 +865,8 @@ static void vhdx_calc_bat_entries(BDRVVHDXState *s)
 {
     uint32_t data_blocks_cnt, bitmap_blocks_cnt;
 
-    data_blocks_cnt = s->virtual_disk_size >> s->block_size_bits;
-    if (s->virtual_disk_size - (data_blocks_cnt << s->block_size_bits)) {
-        data_blocks_cnt++;
-    }
-    bitmap_blocks_cnt = data_blocks_cnt >> s->chunk_ratio_bits;
-    if (data_blocks_cnt - (bitmap_blocks_cnt << s->chunk_ratio_bits)) {
-        bitmap_blocks_cnt++;
-    }
+    data_blocks_cnt = DIV_ROUND_UP(s->virtual_disk_size, s->block_size);
+    bitmap_blocks_cnt = DIV_ROUND_UP(data_blocks_cnt, s->chunk_ratio);
 
     if (s->parent_entries) {
         s->bat_entries = bitmap_blocks_cnt * (s->chunk_ratio + 1);
@@ -898,6 +903,12 @@ static int vhdx_open(BlockDriverState *bs, QDict *options, int flags,
     uint32_t i;
     uint64_t signature;
     Error *local_err = NULL;
+
+    bs->file = bdrv_open_child(NULL, options, "file", bs, &child_file,
+                               false, errp);
+    if (!bs->file) {
+        return -EINVAL;
+    }
 
     s->bat = NULL;
     s->first_visible_write = true;
@@ -959,7 +970,7 @@ static int vhdx_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     /* s->bat is freed in vhdx_close() */
-    s->bat = qemu_try_blockalign(bs->file, s->bat_rt.length);
+    s->bat = qemu_try_blockalign(bs->file->bs, s->bat_rt.length);
     if (s->bat == NULL) {
         ret = -ENOMEM;
         goto fail;
@@ -992,20 +1003,18 @@ static int vhdx_open(BlockDriverState *bs, QDict *options, int flags,
         }
     }
 
-    if (flags & BDRV_O_RDWR) {
-        ret = vhdx_update_headers(bs, s, false, NULL);
-        if (ret < 0) {
-            goto fail;
-        }
+    /* Disable migration when VHDX images are used */
+    error_setg(&s->migration_blocker, "The vhdx format used by node '%s' "
+               "does not support live migration",
+               bdrv_get_device_or_node_name(bs));
+    ret = migrate_add_blocker(s->migration_blocker, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        error_free(s->migration_blocker);
+        goto fail;
     }
 
     /* TODO: differencing files */
-
-    /* Disable migration when VHDX images are used */
-    error_set(&s->migration_blocker,
-            QERR_BLOCK_FORMAT_FEATURE_NOT_SUPPORTED,
-            "vhdx", bdrv_get_device_name(bs), "live migration");
-    migrate_add_blocker(s->migration_blocker);
 
     return 0;
 fail:
@@ -1109,17 +1118,18 @@ static coroutine_fn int vhdx_co_readv(BlockDriverState *bs, int64_t sector_num,
             /* check the payload block state */
             switch (s->bat[sinfo.bat_idx] & VHDX_BAT_STATE_BIT_MASK) {
             case PAYLOAD_BLOCK_NOT_PRESENT: /* fall through */
-            case PAYLOAD_BLOCK_UNDEFINED:   /* fall through */
-            case PAYLOAD_BLOCK_UNMAPPED:    /* fall through */
+            case PAYLOAD_BLOCK_UNDEFINED:
+            case PAYLOAD_BLOCK_UNMAPPED:
+            case PAYLOAD_BLOCK_UNMAPPED_v095:
             case PAYLOAD_BLOCK_ZERO:
                 /* return zero */
                 qemu_iovec_memset(&hd_qiov, 0, 0, sinfo.bytes_avail);
                 break;
             case PAYLOAD_BLOCK_FULLY_PRESENT:
                 qemu_co_mutex_unlock(&s->lock);
-                ret = bdrv_co_readv(bs->file,
-                                    sinfo.file_offset >> BDRV_SECTOR_BITS,
-                                    sinfo.sectors_avail, &hd_qiov);
+                ret = bdrv_co_preadv(bs->file, sinfo.file_offset,
+                                     sinfo.sectors_avail * BDRV_SECTOR_SIZE,
+                                     &hd_qiov, 0);
                 qemu_co_mutex_lock(&s->lock);
                 if (ret < 0) {
                     goto exit;
@@ -1155,12 +1165,23 @@ exit:
 static int vhdx_allocate_block(BlockDriverState *bs, BDRVVHDXState *s,
                                     uint64_t *new_offset)
 {
-    *new_offset = bdrv_getlength(bs->file);
+    int64_t current_len;
+
+    current_len = bdrv_getlength(bs->file->bs);
+    if (current_len < 0) {
+        return current_len;
+    }
+
+    *new_offset = current_len;
 
     /* per the spec, the address for a block is in units of 1MB */
     *new_offset = ROUND_UP(*new_offset, 1024 * 1024);
+    if (*new_offset > INT64_MAX) {
+        return -EINVAL;
+    }
 
-    return bdrv_truncate(bs->file, *new_offset + s->block_size);
+    return bdrv_truncate(bs->file, *new_offset + s->block_size,
+                         PREALLOC_MODE_OFF, NULL);
 }
 
 /*
@@ -1173,7 +1194,18 @@ static void vhdx_update_bat_table_entry(BlockDriverState *bs, BDRVVHDXState *s,
 {
     /* The BAT entry is a uint64, with 44 bits for the file offset in units of
      * 1MB, and 3 bits for the block state. */
-    s->bat[sinfo->bat_idx]  = sinfo->file_offset;
+    if ((state == PAYLOAD_BLOCK_ZERO)        ||
+        (state == PAYLOAD_BLOCK_UNDEFINED)   ||
+        (state == PAYLOAD_BLOCK_NOT_PRESENT) ||
+        (state == PAYLOAD_BLOCK_UNMAPPED)) {
+        s->bat[sinfo->bat_idx]  = 0;  /* For PAYLOAD_BLOCK_ZERO, the
+                                         FileOffsetMB field is denoted as
+                                         'reserved' in the v1.0 spec.  If it is
+                                         non-zero, MS Hyper-V will fail to read
+                                         the disk image */
+    } else {
+        s->bat[sinfo->bat_idx]  = sinfo->file_offset;
+    }
 
     s->bat[sinfo->bat_idx] |= state & VHDX_BAT_STATE_BIT_MASK;
 
@@ -1195,7 +1227,8 @@ int vhdx_user_visible_write(BlockDriverState *bs, BDRVVHDXState *s)
 }
 
 static coroutine_fn int vhdx_co_writev(BlockDriverState *bs, int64_t sector_num,
-                                      int nb_sectors, QEMUIOVector *qiov)
+                                       int nb_sectors, QEMUIOVector *qiov,
+                                       int flags)
 {
     int ret = -ENOTSUP;
     BDRVVHDXState *s = bs->opaque;
@@ -1211,6 +1244,7 @@ static coroutine_fn int vhdx_co_writev(BlockDriverState *bs, int64_t sector_num,
     uint64_t bat_prior_offset = 0;
     bool bat_update = false;
 
+    assert(!flags);
     qemu_iovec_init(&hd_qiov, qiov->niov);
 
     qemu_co_mutex_lock(&s->lock);
@@ -1248,7 +1282,7 @@ static coroutine_fn int vhdx_co_writev(BlockDriverState *bs, int64_t sector_num,
                 /* Queue another write of zero buffers if the underlying file
                  * does not zero-fill on file extension */
 
-                if (bdrv_has_zero_init(bs->file) == 0) {
+                if (bdrv_has_zero_init(bs->file->bs) == 0) {
                     use_zero_buffers = true;
 
                     /* zero fill the front, if any */
@@ -1257,7 +1291,7 @@ static coroutine_fn int vhdx_co_writev(BlockDriverState *bs, int64_t sector_num,
                         iov1.iov_base = qemu_blockalign(bs, iov1.iov_len);
                         memset(iov1.iov_base, 0, iov1.iov_len);
                         qemu_iovec_concat_iov(&hd_qiov, &iov1, 1, 0,
-                                              sinfo.block_offset);
+                                              iov1.iov_len);
                         sectors_to_write += iov1.iov_len >> BDRV_SECTOR_BITS;
                     }
 
@@ -1273,15 +1307,15 @@ static coroutine_fn int vhdx_co_writev(BlockDriverState *bs, int64_t sector_num,
                         iov2.iov_base = qemu_blockalign(bs, iov2.iov_len);
                         memset(iov2.iov_base, 0, iov2.iov_len);
                         qemu_iovec_concat_iov(&hd_qiov, &iov2, 1, 0,
-                                              sinfo.block_offset);
+                                              iov2.iov_len);
                         sectors_to_write += iov2.iov_len >> BDRV_SECTOR_BITS;
                     }
                 }
-
                 /* fall through */
             case PAYLOAD_BLOCK_NOT_PRESENT: /* fall through */
-            case PAYLOAD_BLOCK_UNMAPPED:    /* fall through */
-            case PAYLOAD_BLOCK_UNDEFINED:   /* fall through */
+            case PAYLOAD_BLOCK_UNMAPPED:
+            case PAYLOAD_BLOCK_UNMAPPED_v095:
+            case PAYLOAD_BLOCK_UNDEFINED:
                 bat_prior_offset = sinfo.file_offset;
                 ret = vhdx_allocate_block(bs, s, &sinfo.file_offset);
                 if (ret < 0) {
@@ -1315,9 +1349,9 @@ static coroutine_fn int vhdx_co_writev(BlockDriverState *bs, int64_t sector_num,
                 }
                 /* block exists, so we can just overwrite it */
                 qemu_co_mutex_unlock(&s->lock);
-                ret = bdrv_co_writev(bs->file,
-                                    sinfo.file_offset >> BDRV_SECTOR_BITS,
-                                    sectors_to_write, &hd_qiov);
+                ret = bdrv_co_pwritev(bs->file, sinfo.file_offset,
+                                      sectors_to_write * BDRV_SECTOR_SIZE,
+                                      &hd_qiov, 0);
                 qemu_co_mutex_lock(&s->lock);
                 if (ret < 0) {
                     goto error_bat_restore;
@@ -1376,9 +1410,11 @@ exit:
  * There are 2 headers, and the highest sequence number will represent
  * the active header
  */
-static int vhdx_create_new_headers(BlockDriverState *bs, uint64_t image_size,
+static int vhdx_create_new_headers(BlockBackend *blk, uint64_t image_size,
                                    uint32_t log_size)
 {
+    BlockDriverState *bs = blk_bs(blk);
+    BdrvChild *child;
     int ret = 0;
     VHDXHeader *hdr = NULL;
 
@@ -1393,12 +1429,18 @@ static int vhdx_create_new_headers(BlockDriverState *bs, uint64_t image_size,
     vhdx_guid_generate(&hdr->file_write_guid);
     vhdx_guid_generate(&hdr->data_write_guid);
 
-    ret = vhdx_write_header(bs, hdr, VHDX_HEADER1_OFFSET, false);
+    /* XXX Ugly way to get blk->root, but that's a feature, not a bug. This
+     * hack makes it obvious that vhdx_write_header() bypasses the BlockBackend
+     * here, which it really shouldn't be doing. */
+    child = QLIST_FIRST(&bs->parents);
+    assert(!QLIST_NEXT(child, next_parent));
+
+    ret = vhdx_write_header(child, hdr, VHDX_HEADER1_OFFSET, false);
     if (ret < 0) {
         goto exit;
     }
     hdr->sequence_number++;
-    ret = vhdx_write_header(bs, hdr, VHDX_HEADER2_OFFSET, false);
+    ret = vhdx_write_header(child, hdr, VHDX_HEADER2_OFFSET, false);
     if (ret < 0) {
         goto exit;
     }
@@ -1431,7 +1473,7 @@ exit:
  * The first 64KB of the Metadata section is reserved for the metadata
  * header and entries; beyond that, the metadata items themselves reside.
  */
-static int vhdx_create_new_metadata(BlockDriverState *bs,
+static int vhdx_create_new_metadata(BlockBackend *blk,
                                     uint64_t image_size,
                                     uint32_t block_size,
                                     uint32_t sector_size,
@@ -1442,7 +1484,7 @@ static int vhdx_create_new_metadata(BlockDriverState *bs,
     uint32_t offset = 0;
     void *buffer = NULL;
     void *entry_buffer;
-    VHDXMetadataTableHeader *md_table;;
+    VHDXMetadataTableHeader *md_table;
     VHDXMetadataTableEntry  *md_table_entry;
 
     /* Metadata entries */
@@ -1527,13 +1569,13 @@ static int vhdx_create_new_metadata(BlockDriverState *bs,
                                    VHDX_META_FLAGS_IS_VIRTUAL_DISK;
     vhdx_metadata_entry_le_export(&md_table_entry[4]);
 
-    ret = bdrv_pwrite(bs, metadata_offset, buffer, VHDX_HEADER_BLOCK_SIZE);
+    ret = blk_pwrite(blk, metadata_offset, buffer, VHDX_HEADER_BLOCK_SIZE, 0);
     if (ret < 0) {
         goto exit;
     }
 
-    ret = bdrv_pwrite(bs, metadata_offset + (64 * KiB), entry_buffer,
-                      VHDX_METADATA_ENTRY_BUFFER_SIZE);
+    ret = blk_pwrite(blk, metadata_offset + (64 * KiB), entry_buffer,
+                     VHDX_METADATA_ENTRY_BUFFER_SIZE, 0);
     if (ret < 0) {
         goto exit;
     }
@@ -1553,10 +1595,10 @@ exit:
  *  Fixed images: default state of the BAT is fully populated, with
  *                file offsets and state PAYLOAD_BLOCK_FULLY_PRESENT.
  */
-static int vhdx_create_bat(BlockDriverState *bs, BDRVVHDXState *s,
+static int vhdx_create_bat(BlockBackend *blk, BDRVVHDXState *s,
                            uint64_t image_size, VHDXImageType type,
                            bool use_zero_blocks, uint64_t file_offset,
-                           uint32_t length)
+                           uint32_t length, Error **errp)
 {
     int ret = 0;
     uint64_t data_file_offset;
@@ -1577,26 +1619,29 @@ static int vhdx_create_bat(BlockDriverState *bs, BDRVVHDXState *s,
     if (type == VHDX_TYPE_DYNAMIC) {
         /* All zeroes, so we can just extend the file - the end of the BAT
          * is the furthest thing we have written yet */
-        ret = bdrv_truncate(bs, data_file_offset);
+        ret = blk_truncate(blk, data_file_offset, PREALLOC_MODE_OFF, errp);
         if (ret < 0) {
             goto exit;
         }
     } else if (type == VHDX_TYPE_FIXED) {
-        ret = bdrv_truncate(bs, data_file_offset + image_size);
+        ret = blk_truncate(blk, data_file_offset + image_size,
+                           PREALLOC_MODE_OFF, errp);
         if (ret < 0) {
             goto exit;
         }
     } else {
+        error_setg(errp, "Unsupported image type");
         ret = -ENOTSUP;
         goto exit;
     }
 
     if (type == VHDX_TYPE_FIXED ||
                 use_zero_blocks ||
-                bdrv_has_zero_init(bs) == 0) {
+                bdrv_has_zero_init(blk_bs(blk)) == 0) {
         /* for a fixed file, the default BAT entry is not zero */
         s->bat = g_try_malloc0(length);
         if (length && s->bat == NULL) {
+            error_setg(errp, "Failed to allocate memory for the BAT");
             ret = -ENOMEM;
             goto exit;
         }
@@ -1609,13 +1654,14 @@ static int vhdx_create_bat(BlockDriverState *bs, BDRVVHDXState *s,
             sinfo.file_offset = data_file_offset +
                                 (sector_num << s->logical_sector_size_bits);
             sinfo.file_offset = ROUND_UP(sinfo.file_offset, MiB);
-            vhdx_update_bat_table_entry(bs, s, &sinfo, &unused, &unused,
+            vhdx_update_bat_table_entry(blk_bs(blk), s, &sinfo, &unused, &unused,
                                         block_state);
             cpu_to_le64s(&s->bat[sinfo.bat_idx]);
             sector_num += s->sectors_per_block;
         }
-        ret = bdrv_pwrite(bs, file_offset, s->bat, length);
+        ret = blk_pwrite(blk, file_offset, s->bat, length, 0);
         if (ret < 0) {
+            error_setg_errno(errp, -ret, "Failed to write the BAT");
             goto exit;
         }
     }
@@ -1634,14 +1680,15 @@ exit:
  * to create the BAT itself, we will also cause the BAT to be
  * created.
  */
-static int vhdx_create_new_region_table(BlockDriverState *bs,
+static int vhdx_create_new_region_table(BlockBackend *blk,
                                         uint64_t image_size,
                                         uint32_t block_size,
                                         uint32_t sector_size,
                                         uint32_t log_size,
                                         bool use_zero_blocks,
                                         VHDXImageType type,
-                                        uint64_t *metadata_offset)
+                                        uint64_t *metadata_offset,
+                                        Error **errp)
 {
     int ret = 0;
     uint32_t offset = 0;
@@ -1709,22 +1756,24 @@ static int vhdx_create_new_region_table(BlockDriverState *bs,
 
     /* The region table gives us the data we need to create the BAT,
      * so do that now */
-    ret = vhdx_create_bat(bs, s, image_size, type, use_zero_blocks,
-                          bat_file_offset, bat_length);
+    ret = vhdx_create_bat(blk, s, image_size, type, use_zero_blocks,
+                          bat_file_offset, bat_length, errp);
     if (ret < 0) {
         goto exit;
     }
 
     /* Now write out the region headers to disk */
-    ret = bdrv_pwrite(bs, VHDX_REGION_TABLE_OFFSET, buffer,
-                      VHDX_HEADER_BLOCK_SIZE);
+    ret = blk_pwrite(blk, VHDX_REGION_TABLE_OFFSET, buffer,
+                     VHDX_HEADER_BLOCK_SIZE, 0);
     if (ret < 0) {
+        error_setg_errno(errp, -ret, "Failed to write first region table");
         goto exit;
     }
 
-    ret = bdrv_pwrite(bs, VHDX_REGION_TABLE2_OFFSET, buffer,
-                      VHDX_HEADER_BLOCK_SIZE);
+    ret = blk_pwrite(blk, VHDX_REGION_TABLE2_OFFSET, buffer,
+                     VHDX_HEADER_BLOCK_SIZE, 0);
     if (ret < 0) {
+        error_setg_errno(errp, -ret, "Failed to write second region table");
         goto exit;
     }
 
@@ -1751,57 +1800,75 @@ exit:
  *    .---- ~ ----------- ~ ------------ ~ ---------------- ~ -----------.
  *   1MB
  */
-static int vhdx_create(const char *filename, QemuOpts *opts, Error **errp)
+static int coroutine_fn vhdx_co_create(BlockdevCreateOptions *opts,
+                                       Error **errp)
 {
+    BlockdevCreateOptionsVhdx *vhdx_opts;
+    BlockBackend *blk = NULL;
+    BlockDriverState *bs = NULL;
+
     int ret = 0;
-    uint64_t image_size = (uint64_t) 2 * GiB;
-    uint32_t log_size   = 1 * MiB;
-    uint32_t block_size = 0;
+    uint64_t image_size;
+    uint32_t log_size;
+    uint32_t block_size;
     uint64_t signature;
     uint64_t metadata_offset;
     bool use_zero_blocks = false;
 
     gunichar2 *creator = NULL;
     glong creator_items;
-    BlockDriverState *bs;
-    char *type = NULL;
     VHDXImageType image_type;
-    Error *local_err = NULL;
 
-    image_size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
-                          BDRV_SECTOR_SIZE);
-    log_size = qemu_opt_get_size_del(opts, VHDX_BLOCK_OPT_LOG_SIZE, 0);
-    block_size = qemu_opt_get_size_del(opts, VHDX_BLOCK_OPT_BLOCK_SIZE, 0);
-    type = qemu_opt_get_del(opts, BLOCK_OPT_SUBFMT);
-    use_zero_blocks = qemu_opt_get_bool_del(opts, VHDX_BLOCK_OPT_ZERO, false);
+    assert(opts->driver == BLOCKDEV_DRIVER_VHDX);
+    vhdx_opts = &opts->u.vhdx;
 
+    /* Validate options and set default values */
+    image_size = vhdx_opts->size;
     if (image_size > VHDX_MAX_IMAGE_SIZE) {
-        error_setg_errno(errp, EINVAL, "Image size too large; max of 64TB");
-        ret = -EINVAL;
-        goto exit;
+        error_setg(errp, "Image size too large; max of 64TB");
+        return -EINVAL;
     }
 
-    if (type == NULL) {
-        type = g_strdup("dynamic");
-    }
-
-    if (!strcmp(type, "dynamic")) {
-        image_type = VHDX_TYPE_DYNAMIC;
-    } else if (!strcmp(type, "fixed")) {
-        image_type = VHDX_TYPE_FIXED;
-    } else if (!strcmp(type, "differencing")) {
-        error_setg_errno(errp, ENOTSUP,
-                         "Differencing files not yet supported");
-        ret = -ENOTSUP;
-        goto exit;
+    if (!vhdx_opts->has_log_size) {
+        log_size = DEFAULT_LOG_SIZE;
     } else {
-        ret = -EINVAL;
-        goto exit;
+        if (vhdx_opts->log_size > UINT32_MAX) {
+            error_setg(errp, "Log size must be smaller than 4 GB");
+            return -EINVAL;
+        }
+        log_size = vhdx_opts->log_size;
+    }
+    if (log_size < MiB || (log_size % MiB) != 0) {
+        error_setg(errp, "Log size must be a multiple of 1 MB");
+        return -EINVAL;
+    }
+
+    if (!vhdx_opts->has_block_state_zero) {
+        use_zero_blocks = true;
+    } else {
+        use_zero_blocks = vhdx_opts->block_state_zero;
+    }
+
+    if (!vhdx_opts->has_subformat) {
+        vhdx_opts->subformat = BLOCKDEV_VHDX_SUBFORMAT_DYNAMIC;
+    }
+
+    switch (vhdx_opts->subformat) {
+    case BLOCKDEV_VHDX_SUBFORMAT_DYNAMIC:
+        image_type = VHDX_TYPE_DYNAMIC;
+        break;
+    case BLOCKDEV_VHDX_SUBFORMAT_FIXED:
+        image_type = VHDX_TYPE_FIXED;
+        break;
+    default:
+        g_assert_not_reached();
     }
 
     /* These are pretty arbitrary, and mainly designed to keep the BAT
      * size reasonable to load into RAM */
-    if (block_size == 0) {
+    if (vhdx_opts->has_block_size) {
+        block_size = vhdx_opts->block_size;
+    } else {
         if (image_size > 32 * TiB) {
             block_size = 64 * MiB;
         } else if (image_size > (uint64_t) 100 * GiB) {
@@ -1813,28 +1880,31 @@ static int vhdx_create(const char *filename, QemuOpts *opts, Error **errp)
         }
     }
 
-
-    /* make the log size close to what was specified, but must be
-     * min 1MB, and multiple of 1MB */
-    log_size = ROUND_UP(log_size, MiB);
-
-    block_size = ROUND_UP(block_size, MiB);
-    block_size = block_size > VHDX_BLOCK_SIZE_MAX ? VHDX_BLOCK_SIZE_MAX :
-                                                    block_size;
-
-    ret = bdrv_create_file(filename, opts, &local_err);
-    if (ret < 0) {
-        error_propagate(errp, local_err);
-        goto exit;
+    if (block_size < MiB || (block_size % MiB) != 0) {
+        error_setg(errp, "Block size must be a multiple of 1 MB");
+        return -EINVAL;
+    }
+    if (!is_power_of_2(block_size)) {
+        error_setg(errp, "Block size must be a power of two");
+        return -EINVAL;
+    }
+    if (block_size > VHDX_BLOCK_SIZE_MAX) {
+        error_setg(errp, "Block size must not exceed %d", VHDX_BLOCK_SIZE_MAX);
+        return -EINVAL;
     }
 
-    bs = NULL;
-    ret = bdrv_open(&bs, filename, NULL, NULL, BDRV_O_RDWR | BDRV_O_PROTOCOL,
-                    NULL, &local_err);
-    if (ret < 0) {
-        error_propagate(errp, local_err);
-        goto exit;
+    /* Create BlockBackend to write to the image */
+    bs = bdrv_open_blockdev_ref(vhdx_opts->file, errp);
+    if (bs == NULL) {
+        return -EIO;
     }
+
+    blk = blk_new(BLK_PERM_WRITE | BLK_PERM_RESIZE, BLK_PERM_ALL);
+    ret = blk_insert_bs(blk, bs, errp);
+    if (ret < 0) {
+        goto delete_and_exit;
+    }
+    blk_set_allow_write_beyond_eof(blk, true);
 
     /* Create (A) */
 
@@ -1843,46 +1913,144 @@ static int vhdx_create(const char *filename, QemuOpts *opts, Error **errp)
     creator = g_utf8_to_utf16("QEMU v" QEMU_VERSION, -1, NULL,
                               &creator_items, NULL);
     signature = cpu_to_le64(VHDX_FILE_SIGNATURE);
-    ret = bdrv_pwrite(bs, VHDX_FILE_ID_OFFSET, &signature, sizeof(signature));
+    ret = blk_pwrite(blk, VHDX_FILE_ID_OFFSET, &signature, sizeof(signature),
+                     0);
     if (ret < 0) {
+        error_setg_errno(errp, -ret, "Failed to write file signature");
         goto delete_and_exit;
     }
     if (creator) {
-        ret = bdrv_pwrite(bs, VHDX_FILE_ID_OFFSET + sizeof(signature),
-                          creator, creator_items * sizeof(gunichar2));
+        ret = blk_pwrite(blk, VHDX_FILE_ID_OFFSET + sizeof(signature),
+                         creator, creator_items * sizeof(gunichar2), 0);
         if (ret < 0) {
+            error_setg_errno(errp, -ret, "Failed to write creator field");
             goto delete_and_exit;
         }
     }
 
 
     /* Creates (B),(C) */
-    ret = vhdx_create_new_headers(bs, image_size, log_size);
+    ret = vhdx_create_new_headers(blk, image_size, log_size);
     if (ret < 0) {
+        error_setg_errno(errp, -ret, "Failed to write image headers");
         goto delete_and_exit;
     }
 
     /* Creates (D),(E),(G) explicitly. (F) created as by-product */
-    ret = vhdx_create_new_region_table(bs, image_size, block_size, 512,
+    ret = vhdx_create_new_region_table(blk, image_size, block_size, 512,
                                        log_size, use_zero_blocks, image_type,
-                                       &metadata_offset);
+                                       &metadata_offset, errp);
     if (ret < 0) {
         goto delete_and_exit;
     }
 
     /* Creates (H) */
-    ret = vhdx_create_new_metadata(bs, image_size, block_size, 512,
+    ret = vhdx_create_new_metadata(blk, image_size, block_size, 512,
                                    metadata_offset, image_type);
     if (ret < 0) {
+        error_setg_errno(errp, -ret, "Failed to initialize metadata");
         goto delete_and_exit;
     }
 
-
+    ret = 0;
 delete_and_exit:
+    blk_unref(blk);
     bdrv_unref(bs);
-exit:
-    g_free(type);
     g_free(creator);
+    return ret;
+}
+
+static int coroutine_fn vhdx_co_create_opts(const char *filename,
+                                            QemuOpts *opts,
+                                            Error **errp)
+{
+    BlockdevCreateOptions *create_options = NULL;
+    QDict *qdict;
+    Visitor *v;
+    BlockDriverState *bs = NULL;
+    Error *local_err = NULL;
+    int ret;
+
+    static const QDictRenames opt_renames[] = {
+        { VHDX_BLOCK_OPT_LOG_SIZE,      "log-size" },
+        { VHDX_BLOCK_OPT_BLOCK_SIZE,    "block-size" },
+        { VHDX_BLOCK_OPT_ZERO,          "block-state-zero" },
+        { NULL, NULL },
+    };
+
+    /* Parse options and convert legacy syntax */
+    qdict = qemu_opts_to_qdict_filtered(opts, NULL, &vhdx_create_opts, true);
+
+    if (!qdict_rename_keys(qdict, opt_renames, errp)) {
+        ret = -EINVAL;
+        goto fail;
+    }
+
+    /* Create and open the file (protocol layer) */
+    ret = bdrv_create_file(filename, opts, &local_err);
+    if (ret < 0) {
+        error_propagate(errp, local_err);
+        goto fail;
+    }
+
+    bs = bdrv_open(filename, NULL, NULL,
+                   BDRV_O_RDWR | BDRV_O_RESIZE | BDRV_O_PROTOCOL, errp);
+    if (bs == NULL) {
+        ret = -EIO;
+        goto fail;
+    }
+
+    /* Now get the QAPI type BlockdevCreateOptions */
+    qdict_put_str(qdict, "driver", "vhdx");
+    qdict_put_str(qdict, "file", bs->node_name);
+
+    v = qobject_input_visitor_new_flat_confused(qdict, errp);
+    if (!v) {
+        ret = -EINVAL;
+        goto fail;
+    }
+
+    visit_type_BlockdevCreateOptions(v, NULL, &create_options, &local_err);
+    visit_free(v);
+
+    if (local_err) {
+        error_propagate(errp, local_err);
+        ret = -EINVAL;
+        goto fail;
+    }
+
+    /* Silently round up sizes:
+     * The image size is rounded to 512 bytes. Make the block and log size
+     * close to what was specified, but must be at least 1MB, and a multiple of
+     * 1 MB. Also respect VHDX_BLOCK_SIZE_MAX for block sizes. block_size = 0
+     * means auto, which is represented by a missing key in QAPI. */
+    assert(create_options->driver == BLOCKDEV_DRIVER_VHDX);
+    create_options->u.vhdx.size =
+        ROUND_UP(create_options->u.vhdx.size, BDRV_SECTOR_SIZE);
+
+    if (create_options->u.vhdx.has_log_size) {
+        create_options->u.vhdx.log_size =
+            ROUND_UP(create_options->u.vhdx.log_size, MiB);
+    }
+    if (create_options->u.vhdx.has_block_size) {
+        create_options->u.vhdx.block_size =
+            ROUND_UP(create_options->u.vhdx.block_size, MiB);
+
+        if (create_options->u.vhdx.block_size == 0) {
+            create_options->u.vhdx.has_block_size = false;
+        }
+        if (create_options->u.vhdx.block_size > VHDX_BLOCK_SIZE_MAX) {
+            create_options->u.vhdx.block_size = VHDX_BLOCK_SIZE_MAX;
+        }
+    }
+
+    /* Create the vhdx image (format layer) */
+    ret = vhdx_co_create(create_options, errp);
+
+fail:
+    qobject_unref(qdict);
+    bdrv_unref(bs);
+    qapi_free_BlockdevCreateOptions(create_options);
     return ret;
 }
 
@@ -1893,8 +2061,9 @@ exit:
  * r/w and any log has already been replayed, so there is nothing (currently)
  * for us to do here
  */
-static int vhdx_check(BlockDriverState *bs, BdrvCheckResult *result,
-                       BdrvCheckMode fix)
+static int coroutine_fn vhdx_co_check(BlockDriverState *bs,
+                                      BdrvCheckResult *result,
+                                      BdrvCheckMode fix)
 {
     BDRVVHDXState *s = bs->opaque;
 
@@ -1935,7 +2104,9 @@ static QemuOptsList vhdx_create_opts = {
        {
            .name = VHDX_BLOCK_OPT_ZERO,
            .type = QEMU_OPT_BOOL,
-           .help = "Force use of payload blocks of type 'ZERO'.  Non-standard."
+           .help = "Force use of payload blocks of type 'ZERO'. "\
+                   "Non-standard, but default.  Do not set to 'off' when "\
+                   "using 'qemu-img convert' with subformat=dynamic."
        },
        { NULL }
     }
@@ -1948,11 +2119,14 @@ static BlockDriver bdrv_vhdx = {
     .bdrv_open              = vhdx_open,
     .bdrv_close             = vhdx_close,
     .bdrv_reopen_prepare    = vhdx_reopen_prepare,
+    .bdrv_child_perm        = bdrv_format_default_perms,
     .bdrv_co_readv          = vhdx_co_readv,
     .bdrv_co_writev         = vhdx_co_writev,
-    .bdrv_create            = vhdx_create,
+    .bdrv_co_create         = vhdx_co_create,
+    .bdrv_co_create_opts    = vhdx_co_create_opts,
     .bdrv_get_info          = vhdx_get_info,
-    .bdrv_check             = vhdx_check,
+    .bdrv_co_check          = vhdx_co_check,
+    .bdrv_has_zero_init     = bdrv_has_zero_init_1,
 
     .create_opts            = &vhdx_create_opts,
 };

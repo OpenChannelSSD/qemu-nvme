@@ -1,3 +1,4 @@
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "ui/console.h"
 
@@ -18,11 +19,11 @@ static QEMUCursor *cursor_parse_xpm(const char *xpm[])
     if (sscanf(xpm[line], "%u %u %u %u",
                &width, &height, &colors, &chars) != 4) {
         fprintf(stderr, "%s: header parse error: \"%s\"\n",
-                __FUNCTION__, xpm[line]);
+                __func__, xpm[line]);
         return NULL;
     }
     if (chars != 1) {
-        fprintf(stderr, "%s: chars != 1 not supported\n", __FUNCTION__);
+        fprintf(stderr, "%s: chars != 1 not supported\n", __func__);
         return NULL;
     }
     line++;
@@ -40,7 +41,7 @@ static QEMUCursor *cursor_parse_xpm(const char *xpm[])
             }
         }
         fprintf(stderr, "%s: color parse error: \"%s\"\n",
-                __FUNCTION__, xpm[line]);
+                __func__, xpm[line]);
         return NULL;
     }
 
@@ -80,18 +81,12 @@ void cursor_print_ascii_art(QEMUCursor *c, const char *prefix)
 
 QEMUCursor *cursor_builtin_hidden(void)
 {
-    QEMUCursor *c;
-
-    c = cursor_parse_xpm(cursor_hidden_xpm);
-    return c;
+    return cursor_parse_xpm(cursor_hidden_xpm);
 }
 
 QEMUCursor *cursor_builtin_left_ptr(void)
 {
-    QEMUCursor *c;
-
-    c = cursor_parse_xpm(cursor_left_ptr_xpm);
-    return c;
+    return cursor_parse_xpm(cursor_left_ptr_xpm);
 }
 
 QEMUCursor *cursor_alloc(int width, int height)
@@ -123,7 +118,7 @@ void cursor_put(QEMUCursor *c)
 
 int cursor_get_mono_bpl(QEMUCursor *c)
 {
-    return (c->width + 7) / 8;
+    return DIV_ROUND_UP(c->width, 8);
 }
 
 void cursor_set_mono(QEMUCursor *c,

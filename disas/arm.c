@@ -22,9 +22,8 @@
 /* Start of qemu specific additions.  Mostly this is stub definitions
    for things we don't care about.  */
 
+#include "qemu/osdep.h"
 #include "disas/bfd.h"
-#define ATTRIBUTE_UNUSED __attribute__((unused))
-#define ISSPACE(x) ((x) == ' ' || (x) == '\t' || (x) == '\n')
 
 #define ARM_EXT_V1	 0
 #define ARM_EXT_V2	 0
@@ -71,16 +70,18 @@ static void floatformat_to_double (unsigned char *data, double *dest)
     *dest = u.f;
 }
 
+static int arm_read_memory(bfd_vma memaddr, bfd_byte *b, int length,
+                           struct disassemble_info *info)
+{
+    assert((info->flags & INSN_ARM_BE32) == 0 || length == 2 || length == 4);
+
+    if ((info->flags & INSN_ARM_BE32) != 0 && length == 2) {
+        memaddr ^= 2;
+    }
+    return info->read_memory_func(memaddr, b, length, info);
+}
+
 /* End of qemu specific additions.  */
-
-/* FIXME: Belongs in global header.  */
-#ifndef strneq
-#define strneq(a,b,n)	(strncmp ((a), (b), (n)) == 0)
-#endif
-
-#ifndef NUM_ELEM
-#define NUM_ELEM(a)     (sizeof (a) / sizeof (a)[0])
-#endif
 
 struct opcode32
 {
@@ -1528,7 +1529,6 @@ static const char *const iwmmxt_cregnames[] =
 /* Default to GCC register name set.  */
 static unsigned int regname_selected = 1;
 
-#define NUM_ARM_REGNAMES  NUM_ELEM (regnames)
 #define arm_regnames      regnames[regname_selected].reg_names
 
 static bfd_boolean force_thumb = false;
@@ -1548,10 +1548,6 @@ enum map_type {
   MAP_THUMB,
   MAP_DATA
 };
-
-enum map_type last_type;
-int last_mapping_sym = -1;
-bfd_vma last_mapping_addr = 0;
 
 /* Decode a bitfield of the form matching regexp (N(-N)?,)*N(-N)?.
    Returns pointer to following character of the format string and
@@ -1666,7 +1662,7 @@ print_insn_coprocessor (bfd_vma pc, struct disassemble_info *info, long given,
 	}
       else
 	{
-	  /* Only match unconditional instuctions against unconditional
+          /* Only match unconditional instructions against unconditional
 	     patterns.  */
 	  if ((given & 0xf0000000) == 0xf0000000)
 	    {
@@ -1783,7 +1779,7 @@ print_insn_coprocessor (bfd_vma pc, struct disassemble_info *info, long given,
 
 			/* Is ``imm'' a negative number?  */
 			if (imm & 0x40)
-			  imm |= (-1 << 7);
+			  imm |= (~0u << 7);
 
 			func (stream, "%d", imm);
 		      }
@@ -1820,7 +1816,7 @@ print_insn_coprocessor (bfd_vma pc, struct disassemble_info *info, long given,
 			  func (stream, "e");
 			  break;
 			default:
-			  func (stream, _("<illegal precision>"));
+			  func (stream, "<illegal precision>");
 			  break;
 			}
 		      break;
@@ -3825,7 +3821,7 @@ find_ifthen_state (bfd_vma pc, struct disassemble_info *info,
 	  return;
 	}
       addr -= 2;
-      status = info->read_memory_func (addr, (bfd_byte *)b, 2, info);
+      status = arm_read_memory (addr, (bfd_byte *)b, 2, info);
       if (status)
 	return;
 
@@ -3878,135 +3874,11 @@ print_insn_arm (bfd_vma pc, struct disassemble_info *info)
   int           is_data = false;
   unsigned int	size = 4;
   void	 	(*printer) (bfd_vma, struct disassemble_info *, long);
-#if 0
-  bfd_boolean   found = false;
-
-  if (info->disassembler_options)
-    {
-      parse_disassembler_options (info->disassembler_options);
-
-      /* To avoid repeated parsing of these options, we remove them here.  */
-      info->disassembler_options = NULL;
-    }
-
-  /* First check the full symtab for a mapping symbol, even if there
-     are no usable non-mapping symbols for this address.  */
-  if (info->symtab != NULL
-      && bfd_asymbol_flavour (*info->symtab) == bfd_target_elf_flavour)
-    {
-      bfd_vma addr;
-      int n;
-      int last_sym = -1;
-      enum map_type type = MAP_ARM;
-
-      if (pc <= last_mapping_addr)
-	last_mapping_sym = -1;
-      is_thumb = (last_type == MAP_THUMB);
-      found = false;
-      /* Start scanning at the start of the function, or wherever
-	 we finished last time.  */
-      n = info->symtab_pos + 1;
-      if (n < last_mapping_sym)
-	n = last_mapping_sym;
-
-      /* Scan up to the location being disassembled.  */
-      for (; n < info->symtab_size; n++)
-	{
-	  addr = bfd_asymbol_value (info->symtab[n]);
-	  if (addr > pc)
-	    break;
-	  if ((info->section == NULL
-	       || info->section == info->symtab[n]->section)
-	      && get_sym_code_type (info, n, &type))
-	    {
-	      last_sym = n;
-	      found = true;
-	    }
-	}
-
-      if (!found)
-	{
-	  n = info->symtab_pos;
-	  if (n < last_mapping_sym - 1)
-	    n = last_mapping_sym - 1;
-
-	  /* No mapping symbol found at this address.  Look backwards
-	     for a preceding one.  */
-	  for (; n >= 0; n--)
-	    {
-	      if (get_sym_code_type (info, n, &type))
-		{
-		  last_sym = n;
-		  found = true;
-		  break;
-		}
-	    }
-	}
-
-      last_mapping_sym = last_sym;
-      last_type = type;
-      is_thumb = (last_type == MAP_THUMB);
-      is_data = (last_type == MAP_DATA);
-
-      /* Look a little bit ahead to see if we should print out
-	 two or four bytes of data.  If there's a symbol,
-	 mapping or otherwise, after two bytes then don't
-	 print more.  */
-      if (is_data)
-	{
-	  size = 4 - (pc & 3);
-	  for (n = last_sym + 1; n < info->symtab_size; n++)
-	    {
-	      addr = bfd_asymbol_value (info->symtab[n]);
-	      if (addr > pc)
-		{
-		  if (addr - pc < size)
-		    size = addr - pc;
-		  break;
-		}
-	    }
-	  /* If the next symbol is after three bytes, we need to
-	     print only part of the data, so that we can use either
-	     .byte or .short.  */
-	  if (size == 3)
-	    size = (pc & 1) ? 1 : 2;
-	}
-    }
-
-  if (info->symbols != NULL)
-    {
-      if (bfd_asymbol_flavour (*info->symbols) == bfd_target_coff_flavour)
-	{
-	  coff_symbol_type * cs;
-
-	  cs = coffsymbol (*info->symbols);
-	  is_thumb = (   cs->native->u.syment.n_sclass == C_THUMBEXT
-		      || cs->native->u.syment.n_sclass == C_THUMBSTAT
-		      || cs->native->u.syment.n_sclass == C_THUMBLABEL
-		      || cs->native->u.syment.n_sclass == C_THUMBEXTFUNC
-		      || cs->native->u.syment.n_sclass == C_THUMBSTATFUNC);
-	}
-      else if (bfd_asymbol_flavour (*info->symbols) == bfd_target_elf_flavour
-	       && !found)
-	{
-	  /* If no mapping symbol has been found then fall back to the type
-	     of the function symbol.  */
-	  elf_symbol_type *  es;
-	  unsigned int       type;
-
-	  es = *(elf_symbol_type **)(info->symbols);
-	  type = ELF_ST_TYPE (es->internal_elf_sym.st_info);
-
-	  is_thumb = (type == STT_ARM_TFUNC) || (type == STT_ARM_16BIT);
-	}
-    }
-#else
   int little;
 
   little = (info->endian == BFD_ENDIAN_LITTLE);
   is_thumb |= (pc & 1);
   pc &= ~(bfd_vma)1;
-#endif
 
   if (force_thumb)
     is_thumb = true;
@@ -4021,7 +3893,7 @@ print_insn_arm (bfd_vma pc, struct disassemble_info *info)
       info->bytes_per_chunk = size;
       printer = print_insn_data;
 
-      status = info->read_memory_func (pc, (bfd_byte *)b, size, info);
+      status = arm_read_memory (pc, (bfd_byte *)b, size, info);
       given = 0;
       if (little)
 	for (i = size - 1; i >= 0; i--)
@@ -4038,11 +3910,11 @@ print_insn_arm (bfd_vma pc, struct disassemble_info *info)
       info->bytes_per_chunk = 4;
       size = 4;
 
-      status = info->read_memory_func (pc, (bfd_byte *)b, 4, info);
+      status = arm_read_memory (pc, (bfd_byte *)b, 4, info);
       if (little)
-	given = (b[0]) | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
+	given = (b[0]) | (b[1] << 8) | (b[2] << 16) | ((unsigned)b[3] << 24);
       else
-	given = (b[3]) | (b[2] << 8) | (b[1] << 16) | (b[0] << 24);
+	given = (b[3]) | (b[2] << 8) | (b[1] << 16) | ((unsigned)b[0] << 24);
     }
   else
     {
@@ -4054,7 +3926,7 @@ print_insn_arm (bfd_vma pc, struct disassemble_info *info)
       info->bytes_per_chunk = 2;
       size = 2;
 
-      status = info->read_memory_func (pc, (bfd_byte *)b, 2, info);
+      status = arm_read_memory (pc, (bfd_byte *)b, 2, info);
       if (little)
 	given = (b[0]) | (b[1] << 8);
       else
@@ -4068,7 +3940,7 @@ print_insn_arm (bfd_vma pc, struct disassemble_info *info)
 	      || (given & 0xF800) == 0xF000
 	      || (given & 0xF800) == 0xE800)
 	    {
-	      status = info->read_memory_func (pc + 2, (bfd_byte *)b, 2, info);
+	      status = arm_read_memory (pc + 2, (bfd_byte *)b, 2, info);
 	      if (little)
 		given = (b[0]) | (b[1] << 8) | (given << 16);
 	      else

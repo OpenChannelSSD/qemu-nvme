@@ -21,11 +21,12 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#include "config-host.h"
+#include "qemu/osdep.h"
 
 #include "net/net.h"
 #include "clients.h"
 #include "monitor/monitor.h"
+#include "qapi/error.h"
 #include "qemu-common.h"
 #include "qemu/error-report.h"
 #include "qemu/option.h"
@@ -37,11 +38,8 @@ typedef struct NetSocketState {
     NetClientState nc;
     int listen_fd;
     int fd;
-    int state; /* 0 = getting length, 1 = getting data */
-    unsigned int index;
-    unsigned int packet_len;
+    SocketReadState rs;
     unsigned int send_index;      /* number of bytes sent (only SOCK_STREAM) */
-    uint8_t buf[NET_BUFSIZE];
     struct sockaddr_in dgram_dst; /* contains inet host and port destination iff connectionless (SOCK_DGRAM) */
     IOHandler *send_fn;           /* differs between SOCK_STREAM/SOCK_DGRAM */
     bool read_poll;               /* waiting to receive data? */
@@ -51,21 +49,12 @@ typedef struct NetSocketState {
 static void net_socket_accept(void *opaque);
 static void net_socket_writable(void *opaque);
 
-/* Only read packets from socket when peer can receive them */
-static int net_socket_can_send(void *opaque)
-{
-    NetSocketState *s = opaque;
-
-    return qemu_can_send_packet(&s->nc);
-}
-
 static void net_socket_update_fd_handler(NetSocketState *s)
 {
-    qemu_set_fd_handler2(s->fd,
-                         s->read_poll  ? net_socket_can_send : NULL,
-                         s->read_poll  ? s->send_fn : NULL,
-                         s->write_poll ? net_socket_writable : NULL,
-                         s);
+    qemu_set_fd_handler(s->fd,
+                        s->read_poll ? s->send_fn : NULL,
+                        s->write_poll ? net_socket_writable : NULL,
+                        s);
 }
 
 static void net_socket_read_poll(NetSocketState *s, bool enable)
@@ -142,18 +131,37 @@ static ssize_t net_socket_receive_dgram(NetClientState *nc, const uint8_t *buf, 
     return ret;
 }
 
+static void net_socket_send_completed(NetClientState *nc, ssize_t len)
+{
+    NetSocketState *s = DO_UPCAST(NetSocketState, nc, nc);
+
+    if (!s->read_poll) {
+        net_socket_read_poll(s, true);
+    }
+}
+
+static void net_socket_rs_finalize(SocketReadState *rs)
+{
+    NetSocketState *s = container_of(rs, NetSocketState, rs);
+
+    if (qemu_send_packet_async(&s->nc, rs->buf,
+                               rs->packet_len,
+                               net_socket_send_completed) == 0) {
+        net_socket_read_poll(s, false);
+    }
+}
+
 static void net_socket_send(void *opaque)
 {
     NetSocketState *s = opaque;
-    int size, err;
-    unsigned l;
+    int size;
+    int ret;
     uint8_t buf1[NET_BUFSIZE];
     const uint8_t *buf;
 
     size = qemu_recv(s->fd, buf1, sizeof(buf1), 0);
     if (size < 0) {
-        err = socket_error();
-        if (err != EWOULDBLOCK)
+        if (errno != EWOULDBLOCK)
             goto eoc;
     } else if (size == 0) {
         /* end of connection */
@@ -166,57 +174,18 @@ static void net_socket_send(void *opaque)
         closesocket(s->fd);
 
         s->fd = -1;
-        s->state = 0;
-        s->index = 0;
-        s->packet_len = 0;
+        net_socket_rs_init(&s->rs, net_socket_rs_finalize, false);
         s->nc.link_down = true;
-        memset(s->buf, 0, sizeof(s->buf));
         memset(s->nc.info_str, 0, sizeof(s->nc.info_str));
 
         return;
     }
     buf = buf1;
-    while (size > 0) {
-        /* reassemble a packet from the network */
-        switch(s->state) {
-        case 0:
-            l = 4 - s->index;
-            if (l > size)
-                l = size;
-            memcpy(s->buf + s->index, buf, l);
-            buf += l;
-            size -= l;
-            s->index += l;
-            if (s->index == 4) {
-                /* got length */
-                s->packet_len = ntohl(*(uint32_t *)s->buf);
-                s->index = 0;
-                s->state = 1;
-            }
-            break;
-        case 1:
-            l = s->packet_len - s->index;
-            if (l > size)
-                l = size;
-            if (s->index + l <= sizeof(s->buf)) {
-                memcpy(s->buf + s->index, buf, l);
-            } else {
-                fprintf(stderr, "serious error: oversized packet received,"
-                    "connection terminated.\n");
-                s->state = 0;
-                goto eoc;
-            }
 
-            s->index += l;
-            buf += l;
-            size -= l;
-            if (s->index >= s->packet_len) {
-                qemu_send_packet(&s->nc, s->buf, s->packet_len);
-                s->index = 0;
-                s->state = 0;
-            }
-            break;
-        }
+    ret = net_fill_rstate(&s->rs, buf, size);
+
+    if (ret == -1) {
+        goto eoc;
     }
 }
 
@@ -225,7 +194,7 @@ static void net_socket_send_dgram(void *opaque)
     NetSocketState *s = opaque;
     int size;
 
-    size = qemu_recv(s->fd, s->buf, sizeof(s->buf), 0);
+    size = qemu_recv(s->fd, s->rs.buf, sizeof(s->rs.buf), 0);
     if (size < 0)
         return;
     if (size == 0) {
@@ -234,10 +203,15 @@ static void net_socket_send_dgram(void *opaque)
         net_socket_write_poll(s, false);
         return;
     }
-    qemu_send_packet(&s->nc, s->buf, size);
+    if (qemu_send_packet_async(&s->nc, s->rs.buf, size,
+                               net_socket_send_completed) == 0) {
+        net_socket_read_poll(s, false);
+    }
 }
 
-static int net_socket_mcast_create(struct sockaddr_in *mcastaddr, struct in_addr *localaddr)
+static int net_socket_mcast_create(struct sockaddr_in *mcastaddr,
+                                   struct in_addr *localaddr,
+                                   Error **errp)
 {
     struct ip_mreq imr;
     int fd;
@@ -249,16 +223,16 @@ static int net_socket_mcast_create(struct sockaddr_in *mcastaddr, struct in_addr
 #endif
 
     if (!IN_MULTICAST(ntohl(mcastaddr->sin_addr.s_addr))) {
-        fprintf(stderr, "qemu: error: specified mcastaddr \"%s\" (0x%08x) "
-                "does not contain a multicast address\n",
-                inet_ntoa(mcastaddr->sin_addr),
-                (int)ntohl(mcastaddr->sin_addr.s_addr));
+        error_setg(errp, "specified mcastaddr %s (0x%08x) "
+                   "does not contain a multicast address",
+                   inet_ntoa(mcastaddr->sin_addr),
+                   (int)ntohl(mcastaddr->sin_addr.s_addr));
         return -1;
-
     }
+
     fd = qemu_socket(PF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
-        perror("socket(PF_INET, SOCK_DGRAM)");
+        error_setg_errno(errp, errno, "can't create datagram socket");
         return -1;
     }
 
@@ -270,13 +244,15 @@ static int net_socket_mcast_create(struct sockaddr_in *mcastaddr, struct in_addr
     val = 1;
     ret = qemu_setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
     if (ret < 0) {
-        perror("setsockopt(SOL_SOCKET, SO_REUSEADDR)");
+        error_setg_errno(errp, errno,
+                         "can't set socket option SO_REUSEADDR");
         goto fail;
     }
 
     ret = bind(fd, (struct sockaddr *)mcastaddr, sizeof(*mcastaddr));
     if (ret < 0) {
-        perror("bind");
+        error_setg_errno(errp, errno, "can't bind ip=%s to socket",
+                         inet_ntoa(mcastaddr->sin_addr));
         goto fail;
     }
 
@@ -291,7 +267,9 @@ static int net_socket_mcast_create(struct sockaddr_in *mcastaddr, struct in_addr
     ret = qemu_setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
                           &imr, sizeof(struct ip_mreq));
     if (ret < 0) {
-        perror("setsockopt(IP_ADD_MEMBERSHIP)");
+        error_setg_errno(errp, errno,
+                         "can't add socket to multicast group %s",
+                         inet_ntoa(imr.imr_multiaddr));
         goto fail;
     }
 
@@ -300,7 +278,8 @@ static int net_socket_mcast_create(struct sockaddr_in *mcastaddr, struct in_addr
     ret = qemu_setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP,
                           &loop, sizeof(loop));
     if (ret < 0) {
-        perror("setsockopt(SOL_IP, IP_MULTICAST_LOOP)");
+        error_setg_errno(errp, errno,
+                         "can't force multicast message to loopback");
         goto fail;
     }
 
@@ -309,7 +288,8 @@ static int net_socket_mcast_create(struct sockaddr_in *mcastaddr, struct in_addr
         ret = qemu_setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF,
                               localaddr, sizeof(*localaddr));
         if (ret < 0) {
-            perror("setsockopt(IP_MULTICAST_IF)");
+            error_setg_errno(errp, errno,
+                             "can't set the default network send interface");
             goto fail;
         }
     }
@@ -339,7 +319,7 @@ static void net_socket_cleanup(NetClientState *nc)
 }
 
 static NetClientInfo net_dgram_socket_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_SOCKET,
+    .type = NET_CLIENT_DRIVER_SOCKET,
     .size = sizeof(NetSocketState),
     .receive = net_socket_receive_dgram,
     .cleanup = net_socket_cleanup,
@@ -348,11 +328,12 @@ static NetClientInfo net_dgram_socket_info = {
 static NetSocketState *net_socket_fd_init_dgram(NetClientState *peer,
                                                 const char *model,
                                                 const char *name,
-                                                int fd, int is_connected)
+                                                int fd, int is_connected,
+                                                const char *mcast,
+                                                Error **errp)
 {
     struct sockaddr_in saddr;
     int newfd;
-    socklen_t saddr_len;
     NetClientState *nc;
     NetSocketState *s;
 
@@ -361,49 +342,45 @@ static NetSocketState *net_socket_fd_init_dgram(NetClientState *peer,
      * by ONLY ONE process: we must "clone" this dgram socket --jjo
      */
 
-    if (is_connected) {
-        if (getsockname(fd, (struct sockaddr *) &saddr, &saddr_len) == 0) {
+    if (is_connected && mcast != NULL) {
+            if (parse_host_port(&saddr, mcast, errp) < 0) {
+                goto err;
+            }
             /* must be bound */
             if (saddr.sin_addr.s_addr == 0) {
-                fprintf(stderr, "qemu: error: init_dgram: fd=%d unbound, "
-                        "cannot setup multicast dst addr\n", fd);
+                error_setg(errp, "can't setup multicast destination address");
                 goto err;
             }
             /* clone dgram socket */
-            newfd = net_socket_mcast_create(&saddr, NULL);
+            newfd = net_socket_mcast_create(&saddr, NULL, errp);
             if (newfd < 0) {
-                /* error already reported by net_socket_mcast_create() */
                 goto err;
             }
             /* clone newfd to fd, close newfd */
             dup2(newfd, fd);
             close(newfd);
 
-        } else {
-            fprintf(stderr,
-                    "qemu: error: init_dgram: fd=%d failed getsockname(): %s\n",
-                    fd, strerror(errno));
-            goto err;
-        }
     }
 
     nc = qemu_new_net_client(&net_dgram_socket_info, peer, model, name);
-
-    snprintf(nc->info_str, sizeof(nc->info_str),
-            "socket: fd=%d (%s mcast=%s:%d)",
-            fd, is_connected ? "cloned" : "",
-            inet_ntoa(saddr.sin_addr), ntohs(saddr.sin_port));
 
     s = DO_UPCAST(NetSocketState, nc, nc);
 
     s->fd = fd;
     s->listen_fd = -1;
     s->send_fn = net_socket_send_dgram;
+    net_socket_rs_init(&s->rs, net_socket_rs_finalize, false);
     net_socket_read_poll(s, true);
 
     /* mcast: save bound address as dst */
-    if (is_connected) {
+    if (is_connected && mcast != NULL) {
         s->dgram_dst = saddr;
+        snprintf(nc->info_str, sizeof(nc->info_str),
+                 "socket: fd=%d (cloned mcast=%s:%d)",
+                 fd, inet_ntoa(saddr.sin_addr), ntohs(saddr.sin_port));
+    } else {
+        snprintf(nc->info_str, sizeof(nc->info_str),
+                 "socket: fd=%d", fd);
     }
 
     return s;
@@ -421,7 +398,7 @@ static void net_socket_connect(void *opaque)
 }
 
 static NetClientInfo net_socket_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_SOCKET,
+    .type = NET_CLIENT_DRIVER_SOCKET,
     .size = sizeof(NetSocketState),
     .receive = net_socket_receive,
     .cleanup = net_socket_cleanup,
@@ -443,6 +420,7 @@ static NetSocketState *net_socket_fd_init_stream(NetClientState *peer,
 
     s->fd = fd;
     s->listen_fd = -1;
+    net_socket_rs_init(&s->rs, net_socket_rs_finalize, false);
 
     /* Disable Nagle algorithm on TCP sockets to reduce latency */
     socket_set_nodelay(fd);
@@ -457,26 +435,27 @@ static NetSocketState *net_socket_fd_init_stream(NetClientState *peer,
 
 static NetSocketState *net_socket_fd_init(NetClientState *peer,
                                           const char *model, const char *name,
-                                          int fd, int is_connected)
+                                          int fd, int is_connected,
+                                          const char *mc, Error **errp)
 {
     int so_type = -1, optlen=sizeof(so_type);
 
     if(getsockopt(fd, SOL_SOCKET, SO_TYPE, (char *)&so_type,
         (socklen_t *)&optlen)< 0) {
-        fprintf(stderr, "qemu: error: getsockopt(SO_TYPE) for fd=%d failed\n",
-                fd);
+        error_setg(errp, "can't get socket option SO_TYPE");
         closesocket(fd);
         return NULL;
     }
     switch(so_type) {
     case SOCK_DGRAM:
-        return net_socket_fd_init_dgram(peer, model, name, fd, is_connected);
+        return net_socket_fd_init_dgram(peer, model, name, fd, is_connected,
+                                        mc, errp);
     case SOCK_STREAM:
         return net_socket_fd_init_stream(peer, model, name, fd, is_connected);
     default:
-        /* who knows ... this could be a eg. a pty, do warn and continue as stream */
-        fprintf(stderr, "qemu: warning: socket type=%d for fd=%d is not SOCK_DGRAM or SOCK_STREAM\n", so_type, fd);
-        return net_socket_fd_init_stream(peer, model, name, fd, is_connected);
+        error_report("socket type=%d for fd=%d must be either"
+                     " SOCK_DGRAM or SOCK_STREAM", so_type, fd);
+        closesocket(fd);
     }
     return NULL;
 }
@@ -510,19 +489,21 @@ static void net_socket_accept(void *opaque)
 static int net_socket_listen_init(NetClientState *peer,
                                   const char *model,
                                   const char *name,
-                                  const char *host_str)
+                                  const char *host_str,
+                                  Error **errp)
 {
     NetClientState *nc;
     NetSocketState *s;
     struct sockaddr_in saddr;
     int fd, ret;
 
-    if (parse_host_port(&saddr, host_str) < 0)
+    if (parse_host_port(&saddr, host_str, errp) < 0) {
         return -1;
+    }
 
     fd = qemu_socket(PF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        perror("socket");
+        error_setg_errno(errp, errno, "can't create stream socket");
         return -1;
     }
     qemu_set_nonblock(fd);
@@ -531,13 +512,14 @@ static int net_socket_listen_init(NetClientState *peer,
 
     ret = bind(fd, (struct sockaddr *)&saddr, sizeof(saddr));
     if (ret < 0) {
-        perror("bind");
+        error_setg_errno(errp, errno, "can't bind ip=%s to socket",
+                         inet_ntoa(saddr.sin_addr));
         closesocket(fd);
         return -1;
     }
     ret = listen(fd, 0);
     if (ret < 0) {
-        perror("listen");
+        error_setg_errno(errp, errno, "can't listen on socket");
         closesocket(fd);
         return -1;
     }
@@ -547,6 +529,7 @@ static int net_socket_listen_init(NetClientState *peer,
     s->fd = -1;
     s->listen_fd = fd;
     s->nc.link_down = true;
+    net_socket_rs_init(&s->rs, net_socket_rs_finalize, false);
 
     qemu_set_fd_handler(s->listen_fd, net_socket_accept, NULL, s);
     return 0;
@@ -555,18 +538,20 @@ static int net_socket_listen_init(NetClientState *peer,
 static int net_socket_connect_init(NetClientState *peer,
                                    const char *model,
                                    const char *name,
-                                   const char *host_str)
+                                   const char *host_str,
+                                   Error **errp)
 {
     NetSocketState *s;
-    int fd, connected, ret, err;
+    int fd, connected, ret;
     struct sockaddr_in saddr;
 
-    if (parse_host_port(&saddr, host_str) < 0)
+    if (parse_host_port(&saddr, host_str, errp) < 0) {
         return -1;
+    }
 
     fd = qemu_socket(PF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        perror("socket");
+        error_setg_errno(errp, errno, "can't create stream socket");
         return -1;
     }
     qemu_set_nonblock(fd);
@@ -575,16 +560,14 @@ static int net_socket_connect_init(NetClientState *peer,
     for(;;) {
         ret = connect(fd, (struct sockaddr *)&saddr, sizeof(saddr));
         if (ret < 0) {
-            err = socket_error();
-            if (err == EINTR || err == EWOULDBLOCK) {
-            } else if (err == EINPROGRESS) {
+            if (errno == EINTR || errno == EWOULDBLOCK) {
+                /* continue */
+            } else if (errno == EINPROGRESS ||
+                       errno == EALREADY ||
+                       errno == EINVAL) {
                 break;
-#ifdef _WIN32
-            } else if (err == WSAEALREADY || err == WSAEINVAL) {
-                break;
-#endif
             } else {
-                perror("connect");
+                error_setg_errno(errp, errno, "can't connect socket");
                 closesocket(fd);
                 return -1;
             }
@@ -593,9 +576,11 @@ static int net_socket_connect_init(NetClientState *peer,
             break;
         }
     }
-    s = net_socket_fd_init(peer, model, name, fd, connected);
-    if (!s)
+    s = net_socket_fd_init(peer, model, name, fd, connected, NULL, errp);
+    if (!s) {
         return -1;
+    }
+
     snprintf(s->nc.info_str, sizeof(s->nc.info_str),
              "socket: connect to %s:%d",
              inet_ntoa(saddr.sin_addr), ntohs(saddr.sin_port));
@@ -606,31 +591,38 @@ static int net_socket_mcast_init(NetClientState *peer,
                                  const char *model,
                                  const char *name,
                                  const char *host_str,
-                                 const char *localaddr_str)
+                                 const char *localaddr_str,
+                                 Error **errp)
 {
     NetSocketState *s;
     int fd;
     struct sockaddr_in saddr;
     struct in_addr localaddr, *param_localaddr;
 
-    if (parse_host_port(&saddr, host_str) < 0)
+    if (parse_host_port(&saddr, host_str, errp) < 0) {
         return -1;
+    }
 
     if (localaddr_str != NULL) {
-        if (inet_aton(localaddr_str, &localaddr) == 0)
+        if (inet_aton(localaddr_str, &localaddr) == 0) {
+            error_setg(errp, "localaddr '%s' is not a valid IPv4 address",
+                       localaddr_str);
             return -1;
+        }
         param_localaddr = &localaddr;
     } else {
         param_localaddr = NULL;
     }
 
-    fd = net_socket_mcast_create(&saddr, param_localaddr);
-    if (fd < 0)
+    fd = net_socket_mcast_create(&saddr, param_localaddr, errp);
+    if (fd < 0) {
         return -1;
+    }
 
-    s = net_socket_fd_init(peer, model, name, fd, 0);
-    if (!s)
+    s = net_socket_fd_init(peer, model, name, fd, 0, NULL, errp);
+    if (!s) {
         return -1;
+    }
 
     s->dgram_dst = saddr;
 
@@ -645,40 +637,44 @@ static int net_socket_udp_init(NetClientState *peer,
                                  const char *model,
                                  const char *name,
                                  const char *rhost,
-                                 const char *lhost)
+                                 const char *lhost,
+                                 Error **errp)
 {
     NetSocketState *s;
     int fd, ret;
     struct sockaddr_in laddr, raddr;
 
-    if (parse_host_port(&laddr, lhost) < 0) {
+    if (parse_host_port(&laddr, lhost, errp) < 0) {
         return -1;
     }
 
-    if (parse_host_port(&raddr, rhost) < 0) {
+    if (parse_host_port(&raddr, rhost, errp) < 0) {
         return -1;
     }
 
     fd = qemu_socket(PF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
-        perror("socket(PF_INET, SOCK_DGRAM)");
+        error_setg_errno(errp, errno, "can't create datagram socket");
         return -1;
     }
 
     ret = socket_set_fast_reuse(fd);
     if (ret < 0) {
+        error_setg_errno(errp, errno,
+                         "can't set socket option SO_REUSEADDR");
         closesocket(fd);
         return -1;
     }
     ret = bind(fd, (struct sockaddr *)&laddr, sizeof(laddr));
     if (ret < 0) {
-        perror("bind");
+        error_setg_errno(errp, errno, "can't bind ip=%s to socket",
+                         inet_ntoa(laddr.sin_addr));
         closesocket(fd);
         return -1;
     }
     qemu_set_nonblock(fd);
 
-    s = net_socket_fd_init(peer, model, name, fd, 0);
+    s = net_socket_fd_init(peer, model, name, fd, 0, NULL, errp);
     if (!s) {
         return -1;
     }
@@ -691,50 +687,52 @@ static int net_socket_udp_init(NetClientState *peer,
     return 0;
 }
 
-int net_init_socket(const NetClientOptions *opts, const char *name,
-                    NetClientState *peer)
+int net_init_socket(const Netdev *netdev, const char *name,
+                    NetClientState *peer, Error **errp)
 {
     const NetdevSocketOptions *sock;
 
-    assert(opts->kind == NET_CLIENT_OPTIONS_KIND_SOCKET);
-    sock = opts->socket;
+    assert(netdev->type == NET_CLIENT_DRIVER_SOCKET);
+    sock = &netdev->u.socket;
 
     if (sock->has_fd + sock->has_listen + sock->has_connect + sock->has_mcast +
         sock->has_udp != 1) {
-        error_report("exactly one of fd=, listen=, connect=, mcast= or udp="
-                     " is required");
+        error_setg(errp, "exactly one of listen=, connect=, mcast= or udp="
+                   " is required");
         return -1;
     }
 
     if (sock->has_localaddr && !sock->has_mcast && !sock->has_udp) {
-        error_report("localaddr= is only valid with mcast= or udp=");
+        error_setg(errp, "localaddr= is only valid with mcast= or udp=");
         return -1;
     }
 
     if (sock->has_fd) {
         int fd;
 
-        fd = monitor_handle_fd_param(cur_mon, sock->fd);
+        fd = monitor_fd_param(cur_mon, sock->fd, errp);
         if (fd == -1) {
             return -1;
         }
         qemu_set_nonblock(fd);
-        if (!net_socket_fd_init(peer, "socket", name, fd, 1)) {
+        if (!net_socket_fd_init(peer, "socket", name, fd, 1, sock->mcast,
+                                errp)) {
             return -1;
         }
         return 0;
     }
 
     if (sock->has_listen) {
-        if (net_socket_listen_init(peer, "socket", name, sock->listen) == -1) {
+        if (net_socket_listen_init(peer, "socket", name, sock->listen, errp)
+            < 0) {
             return -1;
         }
         return 0;
     }
 
     if (sock->has_connect) {
-        if (net_socket_connect_init(peer, "socket", name, sock->connect) ==
-            -1) {
+        if (net_socket_connect_init(peer, "socket", name, sock->connect, errp)
+            < 0) {
             return -1;
         }
         return 0;
@@ -744,7 +742,7 @@ int net_init_socket(const NetClientOptions *opts, const char *name,
         /* if sock->localaddr is missing, it has been initialized to "all bits
          * zero" */
         if (net_socket_mcast_init(peer, "socket", name, sock->mcast,
-            sock->localaddr) == -1) {
+                                  sock->localaddr, errp) < 0) {
             return -1;
         }
         return 0;
@@ -752,11 +750,11 @@ int net_init_socket(const NetClientOptions *opts, const char *name,
 
     assert(sock->has_udp);
     if (!sock->has_localaddr) {
-        error_report("localaddr= is mandatory with udp=");
+        error_setg(errp, "localaddr= is mandatory with udp=");
         return -1;
     }
-    if (net_socket_udp_init(peer, "socket", name, sock->udp, sock->localaddr) ==
-        -1) {
+    if (net_socket_udp_init(peer, "socket", name, sock->udp, sock->localaddr,
+                            errp) < 0) {
         return -1;
     }
     return 0;

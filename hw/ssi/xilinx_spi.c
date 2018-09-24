@@ -24,18 +24,19 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
 #include "sysemu/sysemu.h"
 #include "qemu/log.h"
 #include "qemu/fifo8.h"
 
-#include "hw/ssi.h"
+#include "hw/ssi/ssi.h"
 
 #ifdef XILINX_SPI_ERR_DEBUG
 #define DB_PRINT(...) do { \
     fprintf(stderr,  ": %s: ", __func__); \
     fprintf(stderr, ## __VA_ARGS__); \
-    } while (0);
+    } while (0)
 #else
     #define DB_PRINT(...)
 #endif
