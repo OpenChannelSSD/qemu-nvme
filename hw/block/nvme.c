@@ -209,7 +209,7 @@ static inline int lnvm_lba_to_chunk_no(LnvmCtrl *ln, uint64_t lba)
     if (chk >= ln->params.chk_per_lun ||
             lun >= ln->params.num_lun ||
             ch >= ln->params.num_ch) {
-        fprintf(stderr, "nvme: accessing unmapped chunk: ch:%lu, lun:%lu, chk:%lu, cno: %lu\n", ch, lun, chk, cno);
+        trace_nvme_err_invalid_chunk(ch, lun, chk, cno);
         return -1;
     }
 
