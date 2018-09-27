@@ -60,7 +60,7 @@ static uint64_t load_kernel(const char *kernel_filename)
     if (load_elf_ram_sym(kernel_filename, NULL, NULL,
             &kernel_entry, NULL, &kernel_high, 0, EM_RISCV, 1, 0,
             NULL, true, htif_symbol_callback) < 0) {
-        error_report("qemu: could not load kernel '%s'", kernel_filename);
+        error_report("could not load kernel '%s'", kernel_filename);
         exit(1);
     }
     return kernel_entry;
@@ -90,7 +90,7 @@ static void create_fdt(SpikeState *s, const struct MemmapEntry *memmap,
 
     qemu_fdt_add_subnode(fdt, "/soc");
     qemu_fdt_setprop(fdt, "/soc", "ranges", NULL, 0);
-    qemu_fdt_setprop_string(fdt, "/soc", "compatible", "ucbbar,spike-bare-soc");
+    qemu_fdt_setprop_string(fdt, "/soc", "compatible", "simple-bus");
     qemu_fdt_setprop_cell(fdt, "/soc", "#size-cells", 0x2);
     qemu_fdt_setprop_cell(fdt, "/soc", "#address-cells", 0x2);
 

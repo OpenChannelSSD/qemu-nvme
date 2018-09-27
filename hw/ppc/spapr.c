@@ -607,6 +607,7 @@ static void spapr_populate_cpus_dt_node(void *fdt, sPAPRMachineState *spapr)
         spapr_populate_cpu_dt(cs, fdt, offset, spapr);
     }
 
+    g_free(rev);
 }
 
 static uint32_t spapr_pc_dimm_node(MemoryDeviceInfoList *list, ram_addr_t addr)
@@ -1266,7 +1267,7 @@ static void *spapr_build_fdt(sPAPRMachineState *spapr,
     }
 
     QLIST_FOREACH(phb, &spapr->phbs, list) {
-        ret = spapr_populate_pci_dt(phb, PHANDLE_XICP, fdt);
+        ret = spapr_populate_pci_dt(phb, PHANDLE_XICP, fdt, smc->irq->nr_msis);
         if (ret < 0) {
             error_report("couldn't setup PCI devices in fdt");
             exit(1);
@@ -2479,6 +2480,8 @@ static void spapr_init_cpus(sPAPRMachineState *spapr)
             object_property_set_int(core, core_id, CPU_CORE_PROP_CORE_ID,
                                     &error_fatal);
             object_property_set_bool(core, true, "realized", &error_fatal);
+
+            object_unref(core);
         }
     }
 }
@@ -3968,6 +3971,7 @@ static void spapr_machine_3_0_class_options(MachineClass *mc)
     SET_MACHINE_COMPAT(mc, SPAPR_COMPAT_3_0);
 
     smc->legacy_irq_allocation = true;
+    smc->irq = &spapr_irq_xics_legacy;
 }
 
 DEFINE_SPAPR_MACHINE(3_0, "3.0", false);
