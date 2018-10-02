@@ -3917,8 +3917,8 @@ int main(int argc, char **argv, char **envp)
     }
 
 #ifdef CONFIG_SECCOMP
-    if (qemu_opts_foreach(qemu_find_opts("sandbox"),
-                          parse_sandbox, NULL, NULL)) {
+    olist = qemu_find_opts_err("sandbox", NULL);
+    if (olist && qemu_opts_foreach(olist, parse_sandbox, NULL, NULL)) {
         exit(1);
     }
 #endif
@@ -4530,6 +4530,7 @@ int main(int argc, char **argv, char **envp)
         if (load_snapshot(loadvm, &local_err) < 0) {
             error_report_err(local_err);
             autostart = 0;
+            exit(1);
         }
     }
 
