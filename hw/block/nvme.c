@@ -164,7 +164,7 @@ union lnvm_addr {
     uint64_t v;
 };
 
-inline union lnvm_addr lnvm_lba_to_addr(LnvmCtrl *ln, uint64_t lba) {
+static inline union lnvm_addr lnvm_lba_to_addr(LnvmCtrl *ln, uint64_t lba) {
     union lnvm_addr gen = { .v = 0 };
 
     gen.pugrp = (lba & ln->lbaf.ch_mask)  >> ln->lbaf.ch_offset;
