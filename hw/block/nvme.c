@@ -1222,6 +1222,7 @@ static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba, hw
             fprintf(stderr, "nvme: invalid chunk state during reset (wp: %" PRIu64 "))\n", chunk_meta->wp);
             lnvm_print_lba(ln, lba);
             fprintf(stderr, "  state: %d\n", chunk_meta->state);
+            return -EINVAL;
         }
     }
 
