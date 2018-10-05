@@ -4020,11 +4020,7 @@ static void lnvm_exit(NvmeCtrl *n)
 
     for (i = 0; i < n->num_namespaces; i++) {
         lnvm_chunk_meta_save(&n->namespaces[i]);
-        if (n->namespaces[i].resetfail) {
-            free(n->namespaces[i].resetfail);
-        }
     }
-
 
     fclose(ln->metadata);
 }
@@ -4053,10 +4049,6 @@ static void nvme_exit(PCIDevice *pci_dev)
     }
 
     msix_uninit_exclusive_bar(pci_dev);
-    memory_region_unref(&n->iomem);
-    if (n->cmbsz) {
-        memory_region_unref(&n->ctrl_mem);
-    }
 }
 
 static Property nvme_props[] = {
