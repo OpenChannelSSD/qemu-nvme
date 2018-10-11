@@ -575,6 +575,7 @@ enum NvmeStatusCodes {
 };
 
 enum LnvmStatusCodes {
+    LNVM_CHUNK_EARLY_CLOSE      = 0x02f1,
     LNVM_OUT_OF_ORDER_WRITE     = 0x02f2,
 };
 

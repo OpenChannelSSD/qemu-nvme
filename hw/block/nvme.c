@@ -597,10 +597,11 @@ static void lnvm_inject_w_err(LnvmCtrl *ln, NvmeRequest *req, NvmeCqe *cqe)
 
             if (req_fail) {
                 bitmap_set(&cqe->res64, i, 1);
-                req->status = 0x40ff; /* FAIL WRITE status code */
+                req->status = LNVM_CHUNK_EARLY_CLOSE;
 
                 /* Rewind the wp since we've already advanced it */
                 chunk_meta->wp--;
+                chunk_meta->state = LNVM_CHUNK_CLOSED;
 
                 /* Fail the next erase */
                 ns->resetfail[lnvm_lba_to_chunk_no(ln, lba)] = 100;
@@ -1024,10 +1025,15 @@ static uint16_t lnvm_rw_check_chunk_read(NvmeCtrl *n, LnvmCtrl *ln,
 
         // a read can only be valid if the chunk is open or closed
         if (state == LNVM_CHUNK_OPEN || state == LNVM_CHUNK_CLOSED) {
-            uint64_t wpp = wp < mw_cunits ? 0 : wp;
-            if (state == LNVM_CHUNK_OPEN && wpp) {
+            uint64_t wpp =  wp;
+
+            if (state == LNVM_CHUNK_OPEN) {
                 // if the chunk is open, adjust for MW_CUNITS
-                wpp = wp-mw_cunits;
+                if (wpp < mw_cunits) {
+                    return 1;
+                } else {
+                    wpp -=  mw_cunits;
+                }
             }
 
             if (end_sectr < wpp) {
