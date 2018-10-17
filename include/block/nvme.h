@@ -254,9 +254,9 @@ enum NvmeIoCommands {
     NVME_CMD_WRITE_ZEROS        = 0x08,
     NVME_CMD_DSM                = 0x09,
 
-    LNVM_CMD_VECT_ERASE_ASYNC  = 0x90,
-    LNVM_CMD_VECT_WRITE        = 0x91,
-    LNVM_CMD_VECT_READ         = 0x92,
+    LNVM_CMD_VECT_ERASE         = 0x90,
+    LNVM_CMD_VECT_WRITE         = 0x91,
+    LNVM_CMD_VECT_READ          = 0x92,
 };
 
 enum LnvmMetaState {
@@ -577,6 +577,8 @@ enum NvmeStatusCodes {
 enum LnvmStatusCodes {
     LNVM_CHUNK_EARLY_CLOSE      = 0x02f1,
     LNVM_OUT_OF_ORDER_WRITE     = 0x02f2,
+    LNVM_OFFLINE_CHUNK          = 0x02c0,
+    LNVM_INVALID_RESET          = 0x02c1,
 };
 
 typedef struct NvmeFwSlotInfoLog {

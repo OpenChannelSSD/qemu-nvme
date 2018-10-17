@@ -466,6 +466,7 @@ static uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
             trace_nvme_err_invalid_prp2_missing();
             goto unmap;
         }
+
         if (len > n->page_size) {
             uint64_t prp_list[n->max_prp_ents];
             uint32_t nents, prp_trans;
@@ -1199,7 +1200,7 @@ static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba, hw
     chunk_meta = lnvm_chunk_get_state(ns, ln, lba);
     if (!chunk_meta) {
         fprintf(stderr, "nvme: trying to reset non-existing chunk\n");
-        return -EINVAL;
+        return LNVM_INVALID_RESET | NVME_DNR;
     }
 
     if (ns->resetfail) {
@@ -1211,38 +1212,37 @@ static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba, hw
             chunk_meta->state = LNVM_CHUNK_BAD;
             chunk_meta->wp = 0xffff;
             fprintf(stderr, "nvme: injecting erase failure\n");
-            return -EINVAL;
+            return LNVM_INVALID_RESET | NVME_DNR;
         }
     }
 
-    if (!(chunk_meta->state & LNVM_CHUNK_CLOSED) ||
-                      (chunk_meta->state & (LNVM_CHUNK_OPEN ||
-                                            LNVM_CHUNK_BAD ||
-                                            LNVM_CHUNK_FREE))) {
+    if (chunk_meta->state & (LNVM_CHUNK_FREE | LNVM_CHUNK_CLOSED)) {
         if (chunk_meta->state & LNVM_CHUNK_FREE) {
             fprintf(stderr, "nvme: double reset\n  ");
             lnvm_print_lba(ln, lba);
-        } else if (chunk_meta->state & LNVM_CHUNK_OPEN) {
-            fprintf(stderr, "nvme: early reset (wp: %" PRIu64 ")\n  ", chunk_meta->wp);
-            lnvm_print_lba(ln, lba);
-        } else {
-            fprintf(stderr, "nvme: invalid chunk state during reset (wp: %" PRIu64 "))\n", chunk_meta->wp);
-            lnvm_print_lba(ln, lba);
-            fprintf(stderr, "  state: %d\n", chunk_meta->state);
-            return -EINVAL;
+
+            if (!(ln->params.mccap & LNVM_PARAMS_MCCAP_MULTIPLE_RESETS)) {
+                return LNVM_INVALID_RESET | NVME_DNR;
+            }
         }
+
+        chunk_meta->state = LNVM_CHUNK_FREE;
+        chunk_meta->wear_index++;
+        chunk_meta->wp = 0;
+
+        if (mptr)
+            nvme_addr_write(ns->ctrl, mptr, chunk_meta, sizeof(*chunk_meta));
+
+        //TODO: Should we save to file here?
+
+        return 0;
     }
 
-    chunk_meta->state = LNVM_CHUNK_FREE;
-    chunk_meta->wear_index++;
-    chunk_meta->wp = 0;
+    fprintf(stderr, "nvme: invalid chunk state during reset (wp: %" PRIu64 "))\n", chunk_meta->wp);
+    lnvm_print_lba(ln, lba);
+    fprintf(stderr, "  state: %d\n", chunk_meta->state);
 
-    if (mptr)
-        nvme_addr_write(ns->ctrl, mptr, chunk_meta, sizeof(*chunk_meta));
-
-    //TODO: Should we save to file here?
-
-    return 0;
+    return chunk_meta->state & LNVM_CHUNK_BAD ? LNVM_OFFLINE_CHUNK : LNVM_INVALID_RESET;
 }
 
 static uint16_t lnvm_rw_free_rq(uint64_t *aio_offset_list)
@@ -1661,8 +1661,10 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             if (nlb < ln->params.sec_per_chk || nlb > ln->params.sec_per_chk)
                 fprintf(stderr, "nvme: reset: invalid reset size. (%u != %u)\n", nlb, ln->params.sec_per_chk);
 
-            if (lnvm_chunk_set_free(ns, &n->lnvm_ctrl, dev_slba, 0))
-                req->status = 0x40C1; /* Invalid reset */
+            int err = lnvm_chunk_set_free(ns, &n->lnvm_ctrl, dev_slba, 0);
+            if (err) {
+                return err;
+            }
 
             req->aiocb = blk_aio_pdiscard(n->conf.blk,
                     ns->start_block + (slba << data_shift),
@@ -2056,24 +2058,7 @@ static int lnvm_writefail_load(NvmeNamespace *ns)
     return 0;
 }
 
-static void lnvm_erase_io_complete_cb(void *opaque, int ret)
-{
-    NvmeRequest *req = opaque;
-    NvmeSQueue *sq = req->sq;
-    NvmeCtrl *n = sq->ctrl;
-    NvmeCQueue *cq = n->cq[sq->cqid];
-
-    block_acct_done(blk_get_stats(n->conf.blk), &req->acct);
-    if (!ret) {
-        req->status = NVME_SUCCESS;
-    } else {
-        req->status = 0x40ff;
-    }
-
-    nvme_enqueue_req_completion(cq, req);
-}
-
-static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+static uint16_t lnvm_erase(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
@@ -2097,20 +2082,19 @@ static uint16_t lnvm_erase_async(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->ns = ns;
 
     for (i = 0; i < nlb; i++) {
-        if (lnvm_chunk_set_free(ns, ln, psl[i], mptr)) {
-            fprintf(stderr, "lnvm_erase_async: failed:\n  ");
+        int err = lnvm_chunk_set_free(ns, ln, psl[i], mptr);
+        if (err) {
+            fprintf(stderr, "lnvm_reset failed:\n  ");
             lnvm_print_lba(ln, psl[0]);
-            req->status = 0x40ff;
 
-            return NVME_INVALID_FIELD | NVME_DNR;
+            return err;
         }
 
         if (mptr)
             mptr += sizeof(LnvmCS);
     }
 
-    lnvm_erase_io_complete_cb(req, 0);
-    return NVME_NO_COMPLETE;
+    return NVME_SUCCESS;
 }
 
 static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
@@ -2143,8 +2127,8 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             return nvme_dsm(n, ns, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
-    case LNVM_CMD_VECT_ERASE_ASYNC:
-        return lnvm_erase_async(n, ns, cmd, req);
+    case LNVM_CMD_VECT_ERASE:
+        return lnvm_erase(n, ns, cmd, req);
     default:
         trace_nvme_err_invalid_opc(cmd->opcode);
         return NVME_INVALID_OPCODE | NVME_DNR;
