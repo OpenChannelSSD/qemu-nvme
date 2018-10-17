@@ -760,6 +760,7 @@ typedef struct LnvmParams {
     /* configurable device characteristics */
     uint32_t    sec_size;
     uint8_t     max_sec_per_rq;
+    uint32_t    mccap;
     /* configurable parameters for LnvmIdGroup */
     uint32_t    num_ch;
     uint32_t    num_lun;
@@ -778,6 +779,10 @@ typedef struct LnvmParams {
     uint32_t    lun_units;
     uint32_t    total_units;
 } QEMU_PACKED LnvmParams;
+
+enum LnvmParamsMccap {
+    LNVM_PARAMS_MCCAP_MULTIPLE_RESETS = 0x1 << 1,
+};
 
 enum LnvmLogPage {
     LNVM_REPORT_CHUNK = 0xCA,

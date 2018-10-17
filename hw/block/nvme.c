@@ -57,6 +57,7 @@
  *  meta=<int>       : Meta-data size, Default:16
  *  oncs=<oncs>      : Optional NVMe command support, Default:DSM
  *  oacs=<oacs>      : Optional Admin command support, Default:Format
+ *  lmccap=<int>     : Media and Controller Capabilities (MCCAP), Default: 0
  *  lsec_per_chk=<int> : Number of sectors in a chunk. Default: 65536
  *  lsec_size        : Sector Size. Default: 4096
  *  lws_min=<int>      : Mininum write size for device in sectors. Default: 4
@@ -3706,6 +3707,7 @@ static int lnvm_init(NvmeCtrl *n, Error **errp)
         chnl_chks = ns->ns_blks / ln->params.sec_per_chk;
 
         ln->id_ctrl.major_verid = 2;
+        ln->id_ctrl.mccap = cpu_to_le32(ln->params.mccap);
 
         geo = &ln->id_ctrl.geo;
         geo->num_ch = cpu_to_le16(ln->params.num_ch);
@@ -4089,6 +4091,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x1f1f),
+    DEFINE_PROP_UINT32("lmccap", NvmeCtrl, lnvm_ctrl.params.mccap, 0x0),
     DEFINE_PROP_UINT32("lsec_size", NvmeCtrl, lnvm_ctrl.params.sec_size, 4096),
     DEFINE_PROP_UINT32("lsecs_per_chk", NvmeCtrl, lnvm_ctrl.params.sec_per_chk, 4096),
     DEFINE_PROP_UINT8("lmax_sec_per_rq", NvmeCtrl, lnvm_ctrl.params.max_sec_per_rq, 64),
