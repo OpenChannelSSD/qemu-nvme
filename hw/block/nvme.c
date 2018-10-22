@@ -1242,7 +1242,8 @@ static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba, hw
     lnvm_print_lba(ln, lba);
     fprintf(stderr, "  state: %d\n", chunk_meta->state);
 
-    return chunk_meta->state & LNVM_CHUNK_BAD ? LNVM_OFFLINE_CHUNK : LNVM_INVALID_RESET;
+    return NVME_DNR | ((chunk_meta->state & LNVM_CHUNK_BAD) ?
+        LNVM_OFFLINE_CHUNK : LNVM_INVALID_RESET);
 }
 
 static uint16_t lnvm_rw_free_rq(uint64_t *aio_offset_list)
