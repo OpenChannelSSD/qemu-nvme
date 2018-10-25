@@ -1393,7 +1393,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->ns = ns;
 
     if (req->is_write) {
-        if (nlb < wrt->ws_min) {
+        if (nlb < wrt->ws_min || nlb % wrt->ws_min != 0) {
             fprintf(stderr, "lnvm_rw_check_write failed: request does not respect "
                    "device write constraints (ws: %d, ws_min: %d)\n  ",
                    nlb, wrt->ws_min);
