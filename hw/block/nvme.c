@@ -1257,8 +1257,8 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
                 uint64_t *psl, uint64_t data_shift, uint32_t nlb)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
-    void *msl;
-    uint64_t meta = le64_to_cpu(lrw->metadata);
+    void *msl = NULL;
+    uint64_t meta = ln->lba_meta_size ? le64_to_cpu(lrw->metadata) : 0;
     uint64_t lba_off;
     uint8_t i;
     uint16_t err;
@@ -1277,14 +1277,17 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
         }
     }
 
-    msl = g_malloc0(ln->lba_meta_size * nlb);
-    if (!msl) {
-        err = -ENOMEM;
-        goto fail_free_lnvm_lba_list;
-    }
+    if (meta) {
+        msl = g_malloc0(ln->lba_meta_size * nlb);
+        if (!msl) {
+            err = -ENOMEM;
+            goto fail_free_lnvm_lba_list;
+        }
 
-    if (meta && req->is_write)
-        nvme_addr_read(n, meta, (void *)msl, nlb * ln->lba_meta_size);
+        if (req->is_write) {
+            nvme_addr_read(n, meta, (void *)msl, nlb * ln->lba_meta_size);
+        }
+    }
 
     /* If several LUNs are set up, the lba list sent by the host will not be
      * sequential. In this case, we need to pass on the list of lbas to the dma
@@ -1369,7 +1372,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint64_t slba = le64_to_cpu(rw->slba);
     uint64_t prp1 = le64_to_cpu(rw->prp1);
     uint64_t prp2 = le64_to_cpu(rw->prp2);
-    uint64_t meta = le64_to_cpu(rw->mptr);
+    uint64_t meta = ln->lba_meta_size ? le64_to_cpu(rw->mptr) : 0;
     const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
     const uint8_t data_shift = ns->id_ns.lbaf[lba_index].ds;
     uint64_t data_size = nlb << data_shift;
