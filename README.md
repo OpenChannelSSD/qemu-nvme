@@ -22,7 +22,7 @@ That'll install the OCSSD enabled qemu binary into $HOME/qemu-nvme.
 The device must have a backend file to store its data. Create a backend file by
 (e.g., 8GB)
 
-    dd if=/dev/zero of=ocssd_backend.img bs=1M count=8096
+    dd if=/dev/zero of=ocssd_backend.img bs=1M count=8192
 
 The qemu arguments must be extended with:
 
@@ -56,8 +56,3 @@ you are going to use.
     CONFIG_BLK_DEV_INTEGRITY=y
     CONFIG_HOTPLUG_PCI_PCIE=y
     CONFIG_HOTPLUG_PCI_ACPI=y
-
-## Current limitations
-
-  - The driver does not support multiple groups. This should however be easy to
-    implement.

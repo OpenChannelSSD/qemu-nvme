@@ -30,49 +30,60 @@
  *
  * Advanced optional options:
  *
- *  namespaces=<int> : Namespaces to make out of the backing storage, Default:1
- *  num_queues=<int> : Number of possible IO Queues, Default:64
- *  cmb_size_mb=<int> : Size of CMB in MBs, Default:0
- *  entries=<int>    : Maximum number of Queue entires possible, Default:0x7ff
- *  max_cqes=<int>   : Maximum completion queue entry size, Default:0x4
- *  max_sqes=<int>   : Maximum submission queue entry size, Default:0x6
- *  mpsmin=<int>     : Minimum page size supported, Default:0
- *  mpsmax=<int>     : Maximum page size supported, Default:0
- *  stride=<int>     : Doorbell stride, Default:0
- *  aerl=<int>       : Async event request limit, Default:3
- *  acl=<int>        : Abort command limit, Default:3
- *  elpe=<int>       : Error log page entries, Default:3
- *  mdts=<int>       : Maximum data transfer size, Default:5
- *  cqr=<int>        : Contiguous queues required, Default:1
- *  vwc=<int>        : Volatile write cache enabled, Default:0
- *  intc=<int>       : Interrupt configuration disabled, Default:0
- *  intc_thresh=<int>: Interrupt coalesce threshold, Default:0
- *  intc_ttime=<int> : Interrupt coalesce time 100's of usecs, Default:0
- *  nlbaf=<int>      : Number of logical block formats, Default:1
- *  lba_index=<int>  : Default namespace block format index, Default:0
- *  extended=<int>   : Use extended-lba for meta-data, Default:0
- *  dpc=<int>        : Data protection capabilities, Default:0
- *  dps=<int>        : Data protection settings, Default:0
- *  mc=<int>         : Meta-data capabilities, Default:2
- *  meta=<int>       : Meta-data size, Default:16
- *  oncs=<oncs>      : Optional NVMe command support, Default:DSM
- *  oacs=<oacs>      : Optional Admin command support, Default:Format
- *  lmccap=<int>     : Media and Controller Capabilities (MCCAP), Default: 0
- *  lsec_per_chk=<int> : Number of sectors in a chunk. Default: 65536
- *  lsec_size        : Sector Size. Default: 4096
- *  lws_min=<int>      : Mininum write size for device in sectors. Default: 4
- *  lws_opt=<int>      : Optimal write size for device in sectors. Default: 8
- *  lmw_cunits=<int>   : Number of written sectors required in chunk before read. Default: 32
- *  lmax_sec_per_rq=<int> : Maximum number of sectors per I/O request. Default: 64
- *  lnum_grp=<int>      : Number of controller group. Default: 1. ONLY 1 supported!
- *  lnum_pu=<int>     : Number of parallel units per group, Default:1
- *  lchunktable=<file> : Load state table from file destination (Provide path
- *  to file. If no file is provided a state table will be generated.
- *  lresetfail=<file> : Reset fail injection configuration file
- *  lmetadata=<file>   : Load metadata from file destination
- *  lfmetasize=<int>    : LightNVM metaa (OOB) size. Default: 16
- *  ldebug             : Enable LightNVM debugging. Default: 0 (disabled)
- *  lstrict            : Enable strict checks. Necessary for pblk (disabled)
+ *  namespaces=<int>      : Namespaces to make out of the backing storage,
+ *                          Default:1
+ *  num_queues=<int>      : Number of possible IO Queues,
+ *                          Default:64
+ *  cmb_size_mb=<int>     : Size of CMB in MBs, Default:0
+ *  entries=<int>         : Maximum number of Queue entires possible,
+ *                          Default:0x7ff
+ *  max_cqes=<int>        : Maximum completion queue entry size, Default:0x4
+ *  max_sqes=<int>        : Maximum submission queue entry size, Default:0x6
+ *  mpsmin=<int>          : Minimum page size supported, Default:0
+ *  mpsmax=<int>          : Maximum page size supported, Default:0
+ *  stride=<int>          : Doorbell stride, Default:0
+ *  aerl=<int>            : Async event request limit, Default:3
+ *  acl=<int>             : Abort command limit, Default:3
+ *  elpe=<int>            : Error log page entries, Default:3
+ *  mdts=<int>            : Maximum data transfer size, Default:5
+ *  cqr=<int>             : Contiguous queues required, Default:1
+ *  vwc=<int>             : Volatile write cache enabled, Default:0
+ *  intc=<int>            : Interrupt configuration disabled, Default:0
+ *  intc_thresh=<int>     : Interrupt coalesce threshold, Default:0
+ *  intc_ttime=<int>      : Interrupt coalesce time 100's of usecs, Default:0
+ *  nlbaf=<int>           : Number of logical block formats, Default:1
+ *  lba_index=<int>       : Default namespace block format index, Default:0
+ *  extended=<int>        : Use extended-lba for meta-data, Default:0
+ *  dpc=<int>             : Data protection capabilities, Default:0
+ *  dps=<int>             : Data protection settings, Default:0
+ *  mc=<int>              : Meta-data capabilities, Default:2
+ *  meta=<int>            : Meta-data size, Default:16
+ *  oncs=<oncs>           : Optional NVMe command support, Default:DSM
+ *  oacs=<oacs>           : Optional Admin command support, Default:Format
+ *  lmccap=<int>          : Media and Controller Capabilities (MCCAP),
+ *                          Default: 0
+ *  lnum_grp=<int>        : Number of controller group. Default: 1
+ *  lnum_pu=<int>         : Number of parallel units per group, Default:1
+ *  lnum_sec=<int>        : Number of sectors in a chunk. Default: 4096
+ *  lsec_size             : Sector Size. Default: 4096
+ *  lws_min=<int>         : Mininum write size for device in sectors.
+ *                          Default: 4
+ *  lws_opt=<int>         : Optimal write size for device in sectors.
+ *                          Default: 8
+ *  lmw_cunits=<int>      : Number of written sectors required in chunk before
+ *                          read. Default: 32
+ *  lmax_sec_per_rq=<int> : Maximum number of sectors per I/O request.
+ *                          Default: 64
+
+ *  lchunktable=<file>    : Load state table from file destination (Provide
+ *                          path to file. If no file is provided a state table
+ *                          will be generated.
+ *  lresetfail=<file>     : Reset fail injection configuration file
+ *  lmetadata=<file>      : Load metadata from file destination
+ *  lfmetasize=<int>      : LightNVM metaa (OOB) size. Default: 16
+ *  ldebug                : Enable LightNVM debugging. Default: 0 (disabled)
+ *  lstrict               : Enable strict checks. Necessary for pblk.
+ *                          Default: 0 (disabled)
  *
  *
  * The logical block formats all start at 512 byte blocks and double for the
@@ -168,7 +179,7 @@ union lnvm_addr {
 static inline union lnvm_addr lnvm_lba_to_addr(LnvmCtrl *ln, uint64_t lba) {
     union lnvm_addr gen = { .v = 0 };
 
-    gen.pugrp = (lba & ln->lbaf.ch_mask)  >> ln->lbaf.ch_offset;
+    gen.pugrp = (lba & ln->lbaf.grp_mask) >> ln->lbaf.grp_offset;
     gen.punit = (lba & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
     gen.chunk = (lba & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
     gen.sectr = (lba & ln->lbaf.sec_mask) >> ln->lbaf.sec_offset;
@@ -176,7 +187,7 @@ static inline union lnvm_addr lnvm_lba_to_addr(LnvmCtrl *ln, uint64_t lba) {
     return gen;
 }
 
-static uint64_t lnvm_lba_addr(unsigned int ch, unsigned int lun,
+static uint64_t lnvm_lba_addr(unsigned int grp, unsigned int lun,
                               unsigned int chk, unsigned int sec, LnvmCtrl *ln)
 {
     uint64_t lba = 0;
@@ -184,7 +195,7 @@ static uint64_t lnvm_lba_addr(unsigned int ch, unsigned int lun,
     lba = lba | sec << ln->lbaf.sec_offset;
     lba = lba | chk << ln->lbaf.chk_offset;
     lba = lba | lun << ln->lbaf.lun_offset;
-    lba = lba | ch << ln->lbaf.ch_offset;
+    lba = lba | grp << ln->lbaf.grp_offset;
 
     return lba;
 }
@@ -207,23 +218,24 @@ static inline int64_t lnvm_lba_to_off(LnvmCtrl *ln, uint64_t lba)
     union lnvm_addr gen = lnvm_lba_to_addr(ln, lba);
 
     return gen.sectr + gen.chunk * ln->params.chk_units +
-                                              gen.punit * ln->params.lun_units;
+        gen.punit * ln->params.lun_units +
+        gen.pugrp * ln->params.grp_units;
 }
 
 static inline int lnvm_lba_to_chunk_no(LnvmCtrl *ln, uint64_t lba)
 {
-    uint64_t ch = (lba & ln->lbaf.ch_mask) >> ln->lbaf.ch_offset;
+    uint64_t grp = (lba & ln->lbaf.grp_mask) >> ln->lbaf.grp_offset;
     uint64_t lun = (lba & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
     uint64_t chk = (lba & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
     uint64_t cno = chk;
 
     cno += lun * ln->params.chk_per_lun;
-    cno += ch * ln->params.chk_per_ch;
+    cno += grp * ln->params.chk_per_grp;
 
     if (chk >= ln->params.chk_per_lun ||
             lun >= ln->params.num_lun ||
-            ch >= ln->params.num_ch) {
-        trace_nvme_err_invalid_chunk(ch, lun, chk, cno);
+            grp >= ln->params.num_grp) {
+        trace_nvme_err_invalid_chunk(grp, lun, chk, cno);
         return -1;
     }
 
@@ -231,11 +243,11 @@ static inline int lnvm_lba_to_chunk_no(LnvmCtrl *ln, uint64_t lba)
 }
 
 static inline uint64_t lnvm_chunk_no_to_lba(LnvmCtrl *ln, int64_t cno) {
-    uint64_t ch = cno / ln->params.chk_per_ch;
-    uint64_t lun = cno % ln->params.chk_per_ch / ln->params.chk_per_lun;
+    uint64_t grp = cno / ln->params.chk_per_grp;
+    uint64_t lun = cno % ln->params.chk_per_grp / ln->params.chk_per_lun;
     uint64_t chk = cno % ln->params.chk_per_lun;
 
-    return ch << ln->lbaf.ch_offset |
+    return grp << ln->lbaf.grp_offset |
         lun << ln->lbaf.lun_offset |
         chk << ln->lbaf.chk_offset;
 }
@@ -274,7 +286,7 @@ static int lnvm_chunk_advance_wp(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba,
     }
 
     chunk_meta->wp += nlb;
-    if (chunk_meta->wp == ln->params.sec_per_chk) {
+    if (chunk_meta->wp == ln->params.num_sec) {
         chunk_meta->state &= ~LNVM_CHUNK_OPEN;
         chunk_meta->state |= LNVM_CHUNK_CLOSED;
     }
@@ -1655,10 +1667,10 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
             /* TODO: implement multi-trim */
             if (!nlb)
-                nlb = ln->params.sec_per_chk;
+                nlb = ln->params.num_sec;
 
-            if (nlb < ln->params.sec_per_chk || nlb > ln->params.sec_per_chk)
-                fprintf(stderr, "nvme: reset: invalid reset size. (%u != %u)\n", nlb, ln->params.sec_per_chk);
+            if (nlb < ln->params.num_sec || nlb > ln->params.num_sec)
+                fprintf(stderr, "nvme: reset: invalid reset size. (%u != %u)\n", nlb, ln->params.num_sec);
 
             int err = lnvm_chunk_set_free(ns, &n->lnvm_ctrl, dev_slba, 0);
             if (err) {
@@ -1704,7 +1716,7 @@ static void lnvm_chunk_meta_init(LnvmCtrl *ln, LnvmCS *chunk_meta,
         chunk_meta[i].type = LNVM_CHUNK_TYPE_SEQ;
         chunk_meta[i].wear_index = 0;
         chunk_meta[i].slba = lnvm_chunk_no_to_lba(ln, i);
-        chunk_meta[i].cnlb = ln->params.sec_per_chk;
+        chunk_meta[i].cnlb = ln->params.num_sec;
         chunk_meta[i].wp = 0;
     }
 }
@@ -1747,7 +1759,7 @@ static void lnvm_chunk_meta_save(NvmeNamespace *ns)
         }
     }
 
-    for (ch = 0; ch < ln->params.num_ch; ch++) {
+    for (ch = 0; ch < ln->params.num_grp; ch++) {
         for (lun = 0; lun < ln->params.num_lun; lun++) {
             for (chk = 0; chk < ln->id_ctrl.geo.num_chk; chk++) {
                 index = ln->id_ctrl.geo.num_chk *
@@ -1824,10 +1836,10 @@ static int get_state_id(char *state)
 }
 
 
-static int get_ch_lun_chk(char *chunkinfo, unsigned int *ch,
+static int get_ch_lun_chk(char *chunkinfo, unsigned int *grp,
                           unsigned int *lun, unsigned int *chk)
 {
-    if (!get_unsigned(chunkinfo, "grp=", ch)) {
+    if (!get_unsigned(chunkinfo, "grp=", grp)) {
         return 0;
     }
 
@@ -1842,7 +1854,7 @@ static int get_ch_lun_chk(char *chunkinfo, unsigned int *ch,
     return 1;
 }
 
-static int get_chunk_meta_index(unsigned int ch, unsigned int lun,
+static int get_chunk_meta_index(unsigned int grp, unsigned int lun,
                         unsigned int chk, NvmeNamespace *ns)
 {
     struct LnvmCtrl *ln = &ns->ctrl->lnvm_ctrl;
@@ -1855,23 +1867,23 @@ static int get_chunk_meta_index(unsigned int ch, unsigned int lun,
         return -1;
     }
 
-    if (ch >= ln->params.num_ch) {
+    if (grp >= ln->params.num_grp) {
         return -1;
     }
 
-    return ln->id_ctrl.geo.num_chk * (ch * ln->params.num_lun + lun) + chk;
+    return ln->id_ctrl.geo.num_chk * (grp * ln->params.num_lun + lun) + chk;
 }
 
 static int update_chunk(char *chunkinfo, NvmeNamespace *ns)
 {
     LnvmCS *chunk_meta;
-    unsigned int ch, lun, chk, wp, wi;
+    unsigned int grp, lun, chk, wp, wi;
     char status[16] = {0};
     char type[16] = {0};
     int state_id;
     int i;
 
-    if (!get_ch_lun_chk(chunkinfo, &ch, &lun, &chk)) {
+    if (!get_ch_lun_chk(chunkinfo, &grp, &lun, &chk)) {
         return 1;
     }
 
@@ -1899,7 +1911,7 @@ static int update_chunk(char *chunkinfo, NvmeNamespace *ns)
         return 1;
     }
 
-    i = get_chunk_meta_index(ch, lun, chk, ns);
+    i = get_chunk_meta_index(grp, lun, chk, ns);
     if (i < 0) {
         return 1;
     }
@@ -2746,13 +2758,12 @@ static uint64_t ns_calc_blks(NvmeNamespace *ns, uint8_t lba_idx)
     NvmeIdNs *id_ns = &ns->id_ns;
     LnvmCtrl *ln = &n->lnvm_ctrl;
     uint32_t lba_ds = (1 << id_ns->lbaf[lba_idx].ds);
-    uint64_t tblks, tchks, chks_per_lun;
+    uint64_t tblks, tchks;
 
     tblks = n->ns_size / lba_ds;
-    tchks = tblks / ln->params.sec_per_chk;
-    chks_per_lun = tchks / ln->params.num_lun;
+    tchks = tblks / ln->params.num_sec;
 
-    return chks_per_lun * ln->params.num_lun * ln->params.sec_per_chk;
+    return tchks * ln->params.num_sec;
 }
 
 static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
@@ -3674,28 +3685,25 @@ static int lnvm_init(NvmeCtrl *n, Error **errp)
     NvmeNamespace *ns;
     NvmeIdNs *id_ns;
     unsigned int i;
-    uint64_t chnl_chks;
+    uint64_t max_chks;
     int ret = 0;
 
     ln = &n->lnvm_ctrl;
-
-    if (ln->params.num_ch != 1)
-        error_setg(errp, "nvme: Only 1 channel is supported\n");
 
     for (i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
         ns->ctrl = n;
         id_ns = &ns->id_ns;
-        chnl_chks = ns->ns_blks / ln->params.sec_per_chk;
+        max_chks = ns->ns_blks / ln->params.num_sec;
 
         ln->id_ctrl.major_verid = 2;
         ln->id_ctrl.mccap = cpu_to_le32(ln->params.mccap);
 
         geo = &ln->id_ctrl.geo;
-        geo->num_ch = cpu_to_le16(ln->params.num_ch);
+        geo->num_grp = cpu_to_le16(ln->params.num_grp);
         geo->num_lun = cpu_to_le16(ln->params.num_lun);
-        geo->num_chk = cpu_to_le32(chnl_chks / ln->params.num_lun);
-        geo->clba = cpu_to_le32(ln->params.sec_per_chk);
+        geo->num_chk = cpu_to_le32(max_chks / (ln->params.num_lun * ln->params.num_grp));
+        geo->clba = cpu_to_le32(ln->params.num_sec);
 
         wrt = &ln->id_ctrl.wrt;
         wrt->ws_min = cpu_to_le32(ln->params.ws_min);
@@ -3712,8 +3720,9 @@ static int lnvm_init(NvmeCtrl *n, Error **errp)
 
         /* We divide the address space linearly to be able to fit into the 4KB
          * sectors in which the nvme driver divides the backend file. We do the
-         * division in LUNS - CHUNKS - SECTORS. For now, we assume a single
-         * channel.
+         * division in LUNS - CHUNKS - SECTORS. Multiple groups are
+         * conceptually stacked upon each other in units of the example layout
+         * below.
          *
          * For example 4 LUN configuration is layed out as:
          * -------------- -------------- -------------- --------------
@@ -3726,34 +3735,36 @@ static int lnvm_init(NvmeCtrl *n, Error **errp)
          */
 
         /* calculated values */
-        ln->params.sec_per_lun = ln->params.sec_per_chk * geo->num_chk;
-        ln->params.total_secs = ln->params.sec_per_lun * geo->num_lun;
+        ln->params.sec_per_lun = ln->params.num_sec * geo->num_chk;
+        ln->params.sec_per_grp = ln->params.sec_per_lun * geo->num_lun;
+        ln->params.total_secs = ln->params.sec_per_grp * geo->num_grp;
         ln->params.chk_per_lun = geo->num_chk;
-        ln->params.chk_per_ch = geo->num_chk * geo->num_lun;
-        ln->params.total_chks = ln->params.chk_per_ch * geo->num_ch;
+        ln->params.chk_per_grp = ln->params.chk_per_lun * geo->num_lun;
+        ln->params.total_chks = ln->params.chk_per_grp * geo->num_grp;
 
         /* Calculated unit values for ordering */
-        ln->params.chk_units = ln->params.sec_per_chk;
+        ln->params.chk_units = ln->params.num_sec;
         ln->params.lun_units = ln->params.chk_units * geo->num_chk;
-        ln->params.total_units = ln->params.lun_units * geo->num_lun;
+        ln->params.grp_units = ln->params.lun_units * geo->num_lun;
+        ln->params.total_units = ln->params.grp_units * geo->num_grp;
 
-
-        ln->id_ctrl.lbaf.sec_len = 32 - clz32(ln->params.sec_per_chk - 1);
-        ln->id_ctrl.lbaf.chk_len = 32 - clz32((chnl_chks / ln->params.num_lun) - 1);
+        /* calculate optimal LBAF */
+        ln->id_ctrl.lbaf.sec_len = 32 - clz32(ln->params.num_sec - 1);
+        ln->id_ctrl.lbaf.chk_len = 32 - clz32(geo->num_chk - 1);
         ln->id_ctrl.lbaf.lun_len = 32 - clz32(ln->params.num_lun - 1);
-        ln->id_ctrl.lbaf.ch_len = 32 - clz32(ln->params.num_ch - 1);
+        ln->id_ctrl.lbaf.grp_len = 32 - clz32(ln->params.num_grp - 1);
 
-        /* Address format: CH | LUN | CHK | SEC */
+        /* Address format: GRP | LUN | CHK | SEC */
         ln->lbaf.sec_offset = 0;
         ln->lbaf.chk_offset = ln->id_ctrl.lbaf.sec_len;
         ln->lbaf.lun_offset = ln->id_ctrl.lbaf.sec_len + ln->id_ctrl.lbaf.chk_len;
-        ln->lbaf.ch_offset = ln->id_ctrl.lbaf.sec_len +
+        ln->lbaf.grp_offset = ln->id_ctrl.lbaf.sec_len +
                                 ln->id_ctrl.lbaf.chk_len +
                                 ln->id_ctrl.lbaf.lun_len;
 
         /* Address component selection MASK */
-        ln->lbaf.ch_mask = ((1 << ln->id_ctrl.lbaf.ch_len) - 1) <<
-                                                        ln->lbaf.ch_offset;
+        ln->lbaf.grp_mask = ((1 << ln->id_ctrl.lbaf.grp_len) - 1) <<
+                                                        ln->lbaf.grp_offset;
         ln->lbaf.lun_mask = ((1 << ln->id_ctrl.lbaf.lun_len) -1) <<
                                                         ln->lbaf.lun_offset;
         ln->lbaf.chk_mask = ((1 << ln->id_ctrl.lbaf.chk_len) - 1) <<
@@ -3761,13 +3772,15 @@ static int lnvm_init(NvmeCtrl *n, Error **errp)
         ln->lbaf.sec_mask = ((1 << ln->id_ctrl.lbaf.sec_len) - 1) <<
                                                         ln->lbaf.sec_offset;
 
-        id_ns->nuse = id_ns->ncap = id_ns->nsze = 1ULL << (ln->id_ctrl.lbaf.sec_len + ln->id_ctrl.lbaf.chk_len + ln->id_ctrl.lbaf.lun_len + ln->id_ctrl.lbaf.ch_len);
+        id_ns->nuse = id_ns->ncap = id_ns->nsze =
+            1ULL << (ln->id_ctrl.lbaf.sec_len + ln->id_ctrl.lbaf.chk_len +
+            ln->id_ctrl.lbaf.lun_len + ln->id_ctrl.lbaf.grp_len);
 
         ns->chunk_meta = g_malloc0(ln->params.total_chks * sizeof(LnvmCS));
         if (!ns->chunk_meta)
             return -ENOMEM;
 
-        memset(ns->chunk_meta, 0, ln->params.total_chks* sizeof(LnvmCS));
+        memset(ns->chunk_meta, 0, ln->params.total_chks * sizeof(LnvmCS));
         ret = lnvm_chunk_meta_load(ns, ln->params.total_chks);
         if (ret)
             return ret;
@@ -3785,7 +3798,7 @@ static int lnvm_init(NvmeCtrl *n, Error **errp)
             }
         }
 
-    ns->writefail = NULL;
+        ns->writefail = NULL;
         if (ln->writefail_fname) {
             ns->writefail = g_malloc0(ns->ns_blks * sizeof(uint8_t));
             if (!ns->writefail) {
@@ -4074,14 +4087,14 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT32("lmccap", NvmeCtrl, lnvm_ctrl.params.mccap, 0x0),
-    DEFINE_PROP_UINT32("lsec_size", NvmeCtrl, lnvm_ctrl.params.sec_size, 4096),
-    DEFINE_PROP_UINT32("lsecs_per_chk", NvmeCtrl, lnvm_ctrl.params.sec_per_chk, 4096),
     DEFINE_PROP_UINT8("lmax_sec_per_rq", NvmeCtrl, lnvm_ctrl.params.max_sec_per_rq, 64),
     DEFINE_PROP_UINT8("lws_min", NvmeCtrl, lnvm_ctrl.params.ws_min, 4),
     DEFINE_PROP_UINT8("lws_opt", NvmeCtrl, lnvm_ctrl.params.ws_opt, 8),
     DEFINE_PROP_UINT8("lmw_cunits", NvmeCtrl, lnvm_ctrl.params.mw_cunits, 32),
-    DEFINE_PROP_UINT32("lnum_ch", NvmeCtrl, lnvm_ctrl.params.num_ch, 1),
+    DEFINE_PROP_UINT32("lnum_grp", NvmeCtrl, lnvm_ctrl.params.num_grp, 1),
     DEFINE_PROP_UINT32("lnum_pu", NvmeCtrl, lnvm_ctrl.params.num_lun, 1),
+    DEFINE_PROP_UINT32("lnum_sec", NvmeCtrl, lnvm_ctrl.params.num_sec, 4096),
+    DEFINE_PROP_UINT32("lsec_size", NvmeCtrl, lnvm_ctrl.params.sec_size, 4096),
     DEFINE_PROP_STRING("lchunktable_txt", NvmeCtrl, lnvm_ctrl.chunk_fname),
     DEFINE_PROP_STRING("lresetfail", NvmeCtrl, lnvm_ctrl.resetfail_fname),
     DEFINE_PROP_STRING("lwritefail", NvmeCtrl, lnvm_ctrl.writefail_fname),

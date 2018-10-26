@@ -688,18 +688,18 @@ typedef struct NvmeIdCtrl {
 } NvmeIdCtrl;
 
 typedef struct LnvmAddrF {
-    uint64_t    ch_mask;
+    uint64_t    grp_mask;
     uint64_t    lun_mask;
     uint64_t    chk_mask;
     uint64_t    sec_mask;
-    uint8_t     ch_offset;
+    uint8_t     grp_offset;
     uint8_t     lun_offset;
     uint8_t     chk_offset;
     uint8_t     sec_offset;
 } LnvmAddrF;
 
 typedef struct Lnvm_IdGeo {
-    uint16_t        num_ch;
+    uint16_t        num_grp;
     uint16_t        num_lun;
     uint32_t        num_chk;
     uint32_t        clba;
@@ -724,7 +724,7 @@ typedef struct Lnvm_IdPerf {
 } Lnvm_IdPerf;
 
 typedef struct LnvmIdLBAF {
-  uint8_t         ch_len;
+  uint8_t         grp_len;
   uint8_t         lun_len;
   uint8_t         chk_len;
   uint8_t         sec_len;
@@ -764,21 +764,23 @@ typedef struct LnvmParams {
     uint8_t     max_sec_per_rq;
     uint32_t    mccap;
     /* configurable parameters for LnvmIdGroup */
-    uint32_t    num_ch;
+    uint32_t    num_grp;
     uint32_t    num_lun;
-    uint32_t    sec_per_chk;
+    uint32_t    num_sec;
     uint8_t     ws_min;
     uint8_t     ws_opt;
     uint8_t     mw_cunits;
     /* calculated values */
     uint32_t    sec_per_lun;
+    uint32_t    sec_per_grp;
     uint32_t    total_secs;
     uint32_t    chk_per_lun;
-    uint32_t    chk_per_ch;
+    uint32_t    chk_per_grp;
     uint32_t    total_chks;
     /* Calculated unit values for ordering */
     uint32_t    chk_units;
     uint32_t    lun_units;
+    uint32_t	grp_units;
     uint32_t    total_units;
 } QEMU_PACKED LnvmParams;
 
