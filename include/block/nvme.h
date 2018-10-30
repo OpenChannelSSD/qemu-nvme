@@ -786,6 +786,9 @@ typedef struct LnvmParams {
 
 enum LnvmParamsMccap {
     LNVM_PARAMS_MCCAP_MULTIPLE_RESETS = 0x1 << 1,
+
+    /* OCSSD 2.0 spec de-facto extension */
+    LNVM_PARAMS_MCCAP_EARLY_RESET = 0x1 << 2,
 };
 
 enum LnvmLogPage {

@@ -109,6 +109,7 @@ typedef struct LnvmCtrl {
     uint8_t        bbt_gen_freq;
     uint8_t        meta_auto_gen;
     uint8_t        debug;
+    uint8_t        early_reset;
     uint8_t        state_auto_gen;
     char           *meta_fname;
     char           *chunk_fname;

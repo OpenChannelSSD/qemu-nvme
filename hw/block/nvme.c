@@ -82,6 +82,8 @@
  *  lmetadata=<file>      : Load metadata from file destination.
  *  lmetasize=<int>       : LightNVM meta (OOB) size, Default: 16
  *  ldebug                : Enable LightNVM debugging, Default: 0 (disabled)
+ *  learly_reset          : Allow early resets (reset open chunks),
+ *                          Default: 1 (enabled)
  *
  *
  * The logical block formats all start at 512 byte blocks and double for the
@@ -1224,14 +1226,28 @@ static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba, hw
         }
     }
 
-    if (chunk_meta->state & (LNVM_CHUNK_FREE | LNVM_CHUNK_CLOSED)) {
-        if (chunk_meta->state & LNVM_CHUNK_FREE) {
-            fprintf(stderr, "nvme: double reset\n  ");
+    if (chunk_meta->state & (LNVM_CHUNK_FREE | LNVM_CHUNK_OPEN | LNVM_CHUNK_CLOSED)) {
+        switch (chunk_meta->state) {
+        case LNVM_CHUNK_FREE:
+            fprintf(stderr, "nvme: double reset:\n  ");
             lnvm_print_lba(ln, lba);
 
-            if (!(ln->params.mccap & LNVM_PARAMS_MCCAP_MULTIPLE_RESETS)) {
+            if (!(ln->id_ctrl.mccap & LNVM_PARAMS_MCCAP_MULTIPLE_RESETS)) {
                 return LNVM_INVALID_RESET | NVME_DNR;
             }
+
+            break;
+
+        case LNVM_CHUNK_OPEN:
+            fprintf(stderr, "nvme: early reset (wp: %" PRIu64 "):\n  ",
+                chunk_meta->wp);
+            lnvm_print_lba(ln, lba);
+
+            if (!(ln->id_ctrl.mccap & LNVM_PARAMS_MCCAP_EARLY_RESET)) {
+                return LNVM_INVALID_RESET | NVME_DNR;
+            }
+
+            break;
         }
 
         chunk_meta->state = LNVM_CHUNK_FREE;
@@ -1246,12 +1262,10 @@ static int lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba, hw
         return 0;
     }
 
-    fprintf(stderr, "nvme: invalid chunk state during reset (wp: %" PRIu64 "))\n", chunk_meta->wp);
+    fprintf(stderr, "nvme: invalid reset (offline chunk):\n  ");
     lnvm_print_lba(ln, lba);
-    fprintf(stderr, "  state: %d\n", chunk_meta->state);
 
-    return NVME_DNR | ((chunk_meta->state & LNVM_CHUNK_BAD) ?
-        LNVM_OFFLINE_CHUNK : LNVM_INVALID_RESET);
+    return NVME_DNR | LNVM_OFFLINE_CHUNK;
 }
 
 static uint16_t lnvm_rw_free_rq(uint64_t *aio_offset_list)
@@ -3697,6 +3711,10 @@ static int lnvm_init(NvmeCtrl *n, Error **errp)
         ln->id_ctrl.major_verid = 2;
         ln->id_ctrl.mccap = cpu_to_le32(ln->params.mccap);
 
+        if (ln->early_reset) {
+            ln->id_ctrl.mccap |= LNVM_PARAMS_MCCAP_EARLY_RESET;
+        }
+
         geo = &ln->id_ctrl.geo;
         geo->num_grp = cpu_to_le16(ln->params.num_grp);
         geo->num_lun = cpu_to_le16(ln->params.num_lun);
@@ -4098,6 +4116,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_STRING("lwritefail", NvmeCtrl, lnvm_ctrl.writefail_fname),
     DEFINE_PROP_STRING("lmetadata", NvmeCtrl, lnvm_ctrl.meta_fname),
     DEFINE_PROP_UINT8("ldebug", NvmeCtrl, lnvm_ctrl.debug, 0),
+    DEFINE_PROP_UINT8("learly_reset", NvmeCtrl, lnvm_ctrl.early_reset, 1),
     DEFINE_PROP_END_OF_LIST(),
 };
 
