@@ -32,8 +32,7 @@
  *
  *  namespaces=<int>      : Namespaces to make out of the backing storage,
  *                          Default:1
- *  num_queues=<int>      : Number of possible IO Queues,
- *                          Default:64
+ *  num_queues=<int>      : Number of possible IO Queues, Default:64
  *  cmb_size_mb=<int>     : Size of CMB in MBs, Default:0
  *  entries=<int>         : Maximum number of Queue entires possible,
  *                          Default:0x7ff
@@ -62,28 +61,27 @@
  *  oacs=<oacs>           : Optional Admin command support, Default:Format
  *  lmccap=<int>          : Media and Controller Capabilities (MCCAP),
  *                          Default: 0
- *  lnum_grp=<int>        : Number of controller group. Default: 1
+ *  lnum_grp=<int>        : Number of controller group, Default: 1
  *  lnum_pu=<int>         : Number of parallel units per group, Default:1
- *  lnum_sec=<int>        : Number of sectors in a chunk. Default: 4096
- *  lsec_size             : Sector Size. Default: 4096
- *  lws_min=<int>         : Mininum write size for device in sectors.
+ *  lnum_sec=<int>        : Number of sectors in a chunk, Default: 4096
+ *  lsec_size             : Sector size, Default: 4096
+ *  lws_min=<int>         : Mininum write size for device in sectors,
  *                          Default: 4
- *  lws_opt=<int>         : Optimal write size for device in sectors.
+ *  lws_opt=<int>         : Optimal write size for device in sectors,
  *                          Default: 8
  *  lmw_cunits=<int>      : Number of written sectors required in chunk before
- *                          read. Default: 32
- *  lmax_sec_per_rq=<int> : Maximum number of sectors per I/O request.
+ *                          read, Default: 32
+ *  lmax_sec_per_rq=<int> : Maximum number of sectors per I/O request,
  *                          Default: 64
 
  *  lchunktable=<file>    : Load state table from file destination (Provide
  *                          path to file. If no file is provided a state table
  *                          will be generated.
- *  lresetfail=<file>     : Reset fail injection configuration file
- *  lmetadata=<file>      : Load metadata from file destination
- *  lfmetasize=<int>      : LightNVM metaa (OOB) size. Default: 16
- *  ldebug                : Enable LightNVM debugging. Default: 0 (disabled)
- *  lstrict               : Enable strict checks. Necessary for pblk.
- *                          Default: 0 (disabled)
+ *  lresetfail=<file>     : Reset fail injection configuration file.
+ *  lwritefail=<file>     : Write fail injection configuration file.
+ *  lmetadata=<file>      : Load metadata from file destination.
+ *  lmetasize=<int>       : LightNVM meta (OOB) size, Default: 16
+ *  ldebug                : Enable LightNVM debugging, Default: 0 (disabled)
  *
  *
  * The logical block formats all start at 512 byte blocks and double for the
@@ -4100,7 +4098,6 @@ static Property nvme_props[] = {
     DEFINE_PROP_STRING("lwritefail", NvmeCtrl, lnvm_ctrl.writefail_fname),
     DEFINE_PROP_STRING("lmetadata", NvmeCtrl, lnvm_ctrl.meta_fname),
     DEFINE_PROP_UINT8("ldebug", NvmeCtrl, lnvm_ctrl.debug, 0),
-    DEFINE_PROP_UINT8("lstrict", NvmeCtrl, lnvm_ctrl.strict, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
