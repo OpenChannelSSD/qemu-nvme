@@ -1488,7 +1488,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             }
             qemu_sglist_destroy(&req->qsg);
         } else {
-            if (qemu_iovec_to_buf(&req->iov, 0, predef, data_size) != data_size) {
+            if (qemu_iovec_from_buf(&req->iov, 0, predef, data_size) != data_size) {
                 status = NVME_INVALID_FIELD | NVME_DNR;
             }
             qemu_iovec_destroy(&req->iov);
