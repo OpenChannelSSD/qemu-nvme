@@ -296,25 +296,32 @@ static int lnvm_chunk_advance_wp(NvmeNamespace *ns, LnvmCtrl *ln, uint64_t lba,
 
 static void nvme_process_sq(void *opaque);
 
+static inline uint8_t nvme_addr_is_cmb(NvmeCtrl *n, hwaddr addr)
+{
+    return n->cmbsz && addr >= n->ctrl_mem.addr &&
+        addr < n ->ctrl_mem.addr + int128_get64(n->ctrl_mem.size);
+}
+
 static void nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size)
 {
-    if (n->cmbsz && addr >= n->ctrl_mem.addr &&
-                addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size))) {
+    if (nvme_addr_is_cmb(n, addr)) {
         memcpy(buf, (void *)&n->cmbuf[addr - n->ctrl_mem.addr], size);
-    } else {
-        pci_dma_read(&n->parent_obj, addr, buf, size);
+
+        return;
     }
+
+    pci_dma_read(&n->parent_obj, addr, buf, size);
 }
 
 static void nvme_addr_write(NvmeCtrl *n, hwaddr addr, void *buf, int size)
 {
-    if (n->cmbsz && addr >= n->ctrl_mem.addr &&
-                addr < (n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size))) {
+    if (nvme_addr_is_cmb(n, addr)) {
         memcpy((void *)&n->cmbuf[addr - n->ctrl_mem.addr], buf, size);
+
         return;
-    } else {
-        pci_dma_write(&n->parent_obj, addr, buf, size);
     }
+
+    pci_dma_write(&n->parent_obj, addr, buf, size);
 }
 
 static int nvme_check_sqid(NvmeCtrl *n, uint16_t sqid)
@@ -463,8 +470,7 @@ static uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
     if (unlikely(!prp1)) {
         trace_nvme_err_invalid_prp();
         return NVME_INVALID_FIELD | NVME_DNR;
-    } else if (n->cmbsz && prp1 >= n->ctrl_mem.addr &&
-               prp1 < n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size)) {
+    } else if (nvme_addr_is_cmb(n, prp1)) {
         qsg->nsg = 0;
         qemu_iovec_init(iov, num_prps);
         qemu_iovec_add(iov, (void *)&n->cmbuf[prp1 - n->ctrl_mem.addr], trans_len);
