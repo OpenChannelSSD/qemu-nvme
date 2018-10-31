@@ -71,9 +71,6 @@
  *                          Default: 8
  *  lmw_cunits=<int>      : Number of written sectors required in chunk before
  *                          read, Default: 32
- *  lmax_sec_per_rq=<int> : Maximum number of sectors per I/O request,
- *                          Default: 64
-
  *  lchunktable=<file>    : Load state table from file destination (Provide
  *                          path to file. If no file is provided a state table
  *                          will be generated.
@@ -152,11 +149,7 @@
 #define NVME_OP_ABORTED         0xff
 #define NVME_DLFEAT_VAL         0x00
 
-#define LNVM_MAX_GRPS_PR_IDENT (20)
-#define LNVM_FEAT_EXT_START 64
-#define LNVM_FEAT_EXT_END 127
-#define LNVM_PBA_UNMAPPED UINT64_MAX
-#define LNVM_LBA_UNMAPPED UINT64_MAX
+#define LNVM_CMD_MAX_LBAS 64
 
 #define NVME_GUEST_ERR(trace, fmt, ...) \
     do { \
@@ -942,7 +935,7 @@ static uint16_t lnvm_rw_check_write_req(NvmeCtrl *n, LnvmCtrl *ln,
     // WS_MIN logical blocks must be written sequentially within each
     // involved chunk. use this to bound the number of chunks that can be
     // successfully written to per request.
-    uint8_t max_chunks_per_req = 64 / wrt->ws_min;
+    uint8_t max_chunks_per_req = LNVM_CMD_MAX_LBAS / wrt->ws_min;
 
     struct _state *m = g_malloc0(sizeof(struct _state) * max_chunks_per_req);
 
@@ -1291,7 +1284,7 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
     uint8_t i;
     uint16_t err;
 
-    *aio_offset_list = g_malloc0(sizeof(uint64_t) * ln->params.max_sec_per_rq);
+    *aio_offset_list = g_malloc0(sizeof(uint64_t) * LNVM_CMD_MAX_LBAS);
     if (!*aio_offset_list)
         return -ENOMEM;
 
@@ -1552,7 +1545,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
-    uint64_t psl[ln->params.max_sec_per_rq];
+    uint64_t psl[LNVM_CMD_MAX_LBAS];
     uint64_t *aio_offset_list;
     uint32_t nlb  = le16_to_cpu(lrw->nlb) + 1;
     uint64_t prp1 = le64_to_cpu(lrw->prp1);
@@ -1564,7 +1557,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint16_t ctrl = 0;
     uint16_t err;
 
-    if (nlb > ln->params.max_sec_per_rq) {
+    if (nlb > LNVM_CMD_MAX_LBAS) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                 offsetof(LnvmRwCmd, slba), lrw->slba + nlb, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -2094,7 +2087,7 @@ static uint16_t lnvm_erase(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     LnvmRwCmd *dm = (LnvmRwCmd *)cmd;
     hwaddr mptr = le64_to_cpu(cmd->mptr);
     uint64_t spba = le64_to_cpu(dm->slba);
-    uint64_t psl[ln->params.max_sec_per_rq];
+    uint64_t psl[LNVM_CMD_MAX_LBAS];
     uint32_t nlb = le16_to_cpu(dm->nlb) + 1;
     int i;
 
@@ -4109,7 +4102,6 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT16("vid", NvmeCtrl, vid, 0x1d1d),
     DEFINE_PROP_UINT16("did", NvmeCtrl, did, 0x1f1f),
     DEFINE_PROP_UINT32("lmccap", NvmeCtrl, lnvm_ctrl.params.mccap, 0x0),
-    DEFINE_PROP_UINT8("lmax_sec_per_rq", NvmeCtrl, lnvm_ctrl.params.max_sec_per_rq, 64),
     DEFINE_PROP_UINT8("lws_min", NvmeCtrl, lnvm_ctrl.params.ws_min, 4),
     DEFINE_PROP_UINT8("lws_opt", NvmeCtrl, lnvm_ctrl.params.ws_opt, 8),
     DEFINE_PROP_UINT8("lmw_cunits", NvmeCtrl, lnvm_ctrl.params.mw_cunits, 32),

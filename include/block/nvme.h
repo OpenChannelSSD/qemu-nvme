@@ -761,7 +761,6 @@ typedef struct LnvmBbt {
 typedef struct LnvmParams {
     /* configurable device characteristics */
     uint32_t    sec_size;
-    uint8_t     max_sec_per_rq;
     uint32_t    mccap;
     /* configurable parameters for LnvmIdGroup */
     uint32_t    num_grp;
