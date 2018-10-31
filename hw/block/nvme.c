@@ -808,7 +808,6 @@ static void nvme_rw_cb(void *opaque, int ret)
 static uint16_t nvme_flush(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
-    req->has_sg = false;
     block_acct_start(blk_get_stats(n->conf.blk), &req->acct, 0,
          BLOCK_ACCT_FLUSH);
     req->aiocb = blk_aio_flush(n->conf.blk, nvme_rw_cb, req);
@@ -832,7 +831,6 @@ static uint16_t nvme_write_zeros(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return NVME_LBA_RANGE | NVME_DNR;
     }
 
-    req->has_sg = false;
     block_acct_start(blk_get_stats(n->conf.blk), &req->acct, 0,
                      BLOCK_ACCT_WRITE);
     req->aiocb = blk_aio_pwrite_zeroes(n->conf.blk, data_offset, data_count,
@@ -1390,7 +1388,6 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     req->slba = lnvm_lba_to_off(ln, slba);
-    req->meta_size = 0;
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
     req->ns = ns;
@@ -1549,7 +1546,6 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         psl[0] = slba;
 
     ctrl = le16_to_cpu(lrw->control);
-    req->lnvm_slba = le64_to_cpu(lrw->slba);
     req->is_write = (lrw->opcode == LNVM_CMD_VECT_WRITE);
 
     req->is_predefined = g_malloc0(nlb*sizeof(*req->is_predefined));
@@ -1585,7 +1581,6 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     req->slba = lnvm_lba_to_off(ln, psl[0]);
-    req->meta_size = 0;
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
     req->ns = ns;
@@ -2080,7 +2075,6 @@ static uint16_t lnvm_erase(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     req->slba = spba;
-    req->meta_size = 0;
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
     req->ns = ns;

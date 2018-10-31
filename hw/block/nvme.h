@@ -17,12 +17,6 @@ typedef struct NvmeRequest {
     uint16_t                is_write;
     uint16_t                nlb;
     uint8_t                 *is_predefined;
-    uint16_t                ctrl;
-    uint64_t                meta_size;
-    uint64_t                mptr;
-    void                    *meta_buf;
-    uint64_t                lnvm_slba;
-    bool                    has_sg;
     uint64_t                *lnvm_lba_list;
     NvmeCqe                 cqe;
     BlockAcctCookie         acct;
