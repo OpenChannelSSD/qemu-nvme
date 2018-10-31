@@ -931,14 +931,14 @@ static uint16_t lnvm_rw_check_write_req(NvmeCtrl *n, LnvmCtrl *ln,
     for (int i = 0; i < nlb; i++) {
         union lnvm_addr chunk_slba = lnvm_lba_to_addr(ln, psl[i]);
 
-        // set sector offset to zero such that the address is the chunk slba
-        chunk_slba.sectr = 0;
-
         if (chunk_slba.v == -1) {
             // write to non-existing LBA
             err = NVME_WRITE_FAULT | NVME_DNR;
             goto fail;
         }
+
+        // set sector offset to zero such that the address is the chunk slba
+        chunk_slba.sectr = 0;
 
         for (int j = 0; j < max_chunks_per_req; j++) {
             if (m[j].ws) {
@@ -986,7 +986,7 @@ static uint16_t lnvm_rw_check_write_req(NvmeCtrl *n, LnvmCtrl *ln,
             break;
         }
 
-        if (m[i].ws < wrt->ws_min && (m[i].ws % wrt->ws_min != 0)) {
+        if (m[i].ws < wrt->ws_min || (m[i].ws % wrt->ws_min != 0)) {
             fprintf(stderr, "lnvm_rw_check_write failed: request does not respect "
                    "device write constraints (ws: %d, ws_min: %d)\n  ",
                    m[i].ws, wrt->ws_min);
