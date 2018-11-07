@@ -173,7 +173,7 @@ union lnvm_addr {
 static inline union lnvm_addr lnvm_lba_to_addr(LnvmCtrl *ln, uint64_t lba) {
     union lnvm_addr gen = { .v = 0 };
 
-    gen.pugrp = (lba & ln->lbaf.grp_mask) >> ln->lbaf.grp_offset;
+    gen.pugrp = lba >> ln->lbaf.grp_offset;
     gen.punit = (lba & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
     gen.chunk = (lba & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
     gen.sectr = (lba & ln->lbaf.sec_mask) >> ln->lbaf.sec_offset;
@@ -218,7 +218,7 @@ static inline int64_t lnvm_lba_to_sectr_off(LnvmCtrl *ln, uint64_t lba)
 
 static inline int lnvm_lba_to_chunk_no(LnvmCtrl *ln, uint64_t lba)
 {
-    uint64_t grp = (lba & ln->lbaf.grp_mask) >> ln->lbaf.grp_offset;
+    uint64_t grp = lba >> ln->lbaf.grp_offset;
     uint64_t lun = (lba & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
     uint64_t chk = (lba & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
     uint64_t cno = chk;
