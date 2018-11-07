@@ -1,7 +1,18 @@
 #ifndef HW_NVME_H
 #define HW_NVME_H
 
+#include "qemu/queue.h"
+
+#include "block/accounting.h"
+#include "block/aio.h"
 #include "block/nvme.h"
+
+#include "sysemu/dma.h"
+#include "qemu/typedefs.h"
+
+#include "hw/block/block.h"
+#include "hw/pci/pci.h"
+
 #include "lightnvm.h"
 
 typedef struct NvmeAsyncEvent {
@@ -9,24 +20,56 @@ typedef struct NvmeAsyncEvent {
     NvmeAerResult result;
 } NvmeAsyncEvent;
 
-typedef struct NvmeRequest {
-    struct NvmeSQueue       *sq;
-    struct NvmeNamespace    *ns;
-    BlockAIOCB               *aiocb;
-    uint8_t                 cmd_opcode;
-    uint16_t                status;
-    uint64_t                slba;
-    uint16_t                is_write;
-    uint16_t                nlb;
-    uint8_t                 *is_predefined;
-    uint64_t                *lnvm_lba_list;
-    NvmeCqe                 cqe;
-    BlockAcctCookie         acct;
-    QEMUSGList              qsg;
-    QEMUIOVector            iov;
-    QTAILQ_ENTRY(NvmeRequest)entry;
-} NvmeRequest;
+/*
+ * Encapsulate a request to the block backend. Holds the byte offset in the
+ * backend and an QSG or IOV depending on the request (dma or cmb) and the
+ * number logical NVMe blocks this request spans.
+ */
+typedef struct NvmeBlockBackendRequest {
+    uint64_t slba;
+    uint16_t nlb;
+    uint64_t blk_offset;
 
+    struct NvmeRequest *req;
+
+    BlockAIOCB      *aiocb;
+    BlockAcctCookie acct;
+
+    QEMUSGList   qsg;
+    QEMUIOVector iov;
+
+    QTAILQ_ENTRY(NvmeBlockBackendRequest) blk_req_tailq;
+} NvmeBlockBackendRequest;
+
+typedef struct NvmeRequest {
+    struct NvmeSQueue    *sq;
+    struct NvmeNamespace *ns;
+    NvmeCqe              cqe;
+
+    uint8_t  cmd_opcode;
+    uint8_t  cmb;
+    uint16_t status;
+    uint64_t slba;
+
+    uint64_t lbal[LNVM_CMD_MAX_LBAS];
+    uint16_t nlb;
+
+    QTAILQ_HEAD(, NvmeBlockBackendRequest) blk_req_tailq_head;
+
+    struct {
+        /*
+         * For vector commands, predef is a bitmap indicating if the Nth LBA
+         * may be read succesfully. For scalar, it holds the sector offset
+         * relative to the start LBA where reads become invalid.
+         */
+        uint64_t lba_or_map;
+
+        QEMUSGList   qsg;
+        QEMUIOVector iov;
+    } predef;
+
+    QTAILQ_ENTRY(NvmeRequest) entry;
+} NvmeRequest;
 
 typedef struct NvmeSQueue {
     struct NvmeCtrl *ctrl;
@@ -86,9 +129,11 @@ typedef struct NvmeNamespace {
     unsigned long   *uncorrectable;
     uint32_t        id;
     uint64_t        ns_blks;
-    uint64_t        start_block;
-    uint64_t        start_block_predef;
-    uint8_t         *predef;
+    struct {
+        uint64_t    data;
+        uint64_t    meta;
+        uint64_t    internal;
+    } blk_backend;
     LnvmCS          *chunk_meta;
     uint8_t         *resetfail;
     uint8_t         *writefail;
@@ -129,7 +174,7 @@ typedef struct NvmeCtrl {
     uint8_t     cqr;
     uint8_t     max_sqes;
     uint8_t     max_cqes;
-    uint8_t     meta;
+    uint8_t     ms;
     uint8_t     vwc;
     uint8_t     mc;
     uint8_t     dpc;

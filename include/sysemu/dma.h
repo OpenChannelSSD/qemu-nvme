@@ -194,6 +194,7 @@ void qemu_sglist_init(QEMUSGList *qsg, DeviceState *dev, int alloc_hint,
                       AddressSpace *as);
 void qemu_sglist_add(QEMUSGList *qsg, dma_addr_t base, dma_addr_t len);
 void qemu_sglist_destroy(QEMUSGList *qsg);
+void qemu_sglist_reset(QEMUSGList *qsg);
 #endif
 
 typedef BlockAIOCB *DMAIOFunc(int64_t offset, QEMUIOVector *iov,
@@ -210,17 +211,6 @@ BlockAIOCB *dma_blk_read(BlockBackend *blk,
 BlockAIOCB *dma_blk_write(BlockBackend *blk,
                           QEMUSGList *sg, uint64_t offset, uint32_t align,
                           BlockCompletionFunc *cb, void *opaque);
-BlockAIOCB *dma_blk_io_list(AioContext *ctx,
-                       QEMUSGList *sg, uint64_t *offset_list, uint32_t align,
-                       DMAIOFunc *io_func, void *io_func_opaque,
-                       BlockCompletionFunc *cb, void *opaque, DMADirection dir);
-BlockAIOCB *dma_blk_read_list(BlockBackend *blk,
-                         QEMUSGList *sg, uint64_t *offset_list, uint32_t align,
-                         BlockCompletionFunc *cb, void *opaque);
-BlockAIOCB *dma_blk_write_list(BlockBackend *blk,
-                          QEMUSGList *sg, uint64_t *offset_list, uint32_t align,
-                          BlockCompletionFunc *cb, void *opaque);
-
 uint64_t dma_buf_read(uint8_t *ptr, int32_t len, QEMUSGList *sg);
 uint64_t dma_buf_write(uint8_t *ptr, int32_t len, QEMUSGList *sg);
 

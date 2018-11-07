@@ -652,7 +652,7 @@ typedef struct NvmeRangeType {
 
 typedef struct NvmeLBAF {
     uint16_t    ms;
-    uint8_t     ds;
+    uint8_t     lbads;
     uint8_t     rp;
 } NvmeLBAF;
 

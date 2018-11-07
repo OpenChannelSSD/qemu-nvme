@@ -24,7 +24,7 @@ enum LnvmChunkStates {
     LNVM_CHUNK_FREE     = 1 << 0,
     LNVM_CHUNK_CLOSED   = 1 << 1,
     LNVM_CHUNK_OPEN     = 1 << 2,
-    LNVM_CHUNK_BAD      = 1 << 3,
+    LNVM_CHUNK_OFFLINE  = 1 << 3,
 };
 
 #define LNVM_CHUNK_RESETABLE \
@@ -54,21 +54,21 @@ typedef struct LnvmChunkState {
 } LnvmCS;
 
 typedef struct LnvmRwCmd {
-    uint16_t    opcode : 8;
-    uint16_t    fuse   : 2;
-    uint16_t    res1   : 4;
-    uint16_t    psdt   : 2;
+    uint16_t    opcode :  8;
+    uint16_t    fuse   :  2;
+    uint16_t    rsvd1  :  4;
+    uint16_t    psdt   :  2;
     uint16_t    cid;
     uint32_t    nsid;
     uint64_t    rsvd2;
     uint64_t    metadata;
     uint64_t    prp1;
     uint64_t    prp2;
-    uint64_t    slba;
-    uint16_t    nlb;
-    uint16_t    control;
-    uint32_t    rsvd3;
-    uint64_t    rsvd4;
+    uint64_t    lbal;
+    uint32_t    nlb    :  6;
+    uint32_t    rsvd3  : 26;
+    uint32_t    rsvd4;
+    uint64_t    resv5;
 } LnvmRwCmd;
 
 typedef struct LnvmDmCmd {
@@ -153,9 +153,9 @@ typedef struct LnvmParams {
     uint32_t num_grp;
     uint32_t num_lun;
     uint32_t num_sec;
-    uint8_t  ws_min;
-    uint8_t  ws_opt;
-    uint8_t  mw_cunits;
+    uint32_t ws_min;
+    uint32_t ws_opt;
+    uint32_t mw_cunits;
 
     /* calculated values */
     uint32_t sec_per_lun;

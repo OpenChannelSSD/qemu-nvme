@@ -17,13 +17,9 @@ typedef struct LnvmCtrl {
     uint8_t        debug;
     uint8_t        early_reset;
     uint8_t        state_auto_gen;
-    char           *meta_fname;
     char           *chunk_fname;
     char           *resetfail_fname;
     char           *writefail_fname;
-    FILE           *metadata;
-    uint8_t        int_meta_size;       // # of bytes for "internal" metadata
-    uint8_t        lba_meta_size; /* per lba metadata */
 } LnvmCtrl;
 
 
