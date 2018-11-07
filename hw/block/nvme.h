@@ -2,6 +2,8 @@
 #define HW_NVME_H
 
 #include "block/nvme.h"
+#include "lightnvm.h"
+
 typedef struct NvmeAsyncEvent {
     QSIMPLEQ_ENTRY(NvmeAsyncEvent) entry;
     NvmeAerResult result;
@@ -25,12 +27,6 @@ typedef struct NvmeRequest {
     QTAILQ_ENTRY(NvmeRequest)entry;
 } NvmeRequest;
 
-typedef struct DMAOff {
-    QEMUSGList *qsg;
-    int ndx;
-    dma_addr_t ptr;
-    dma_addr_t len;
-} DMAOff;
 
 typedef struct NvmeSQueue {
     struct NvmeCtrl *ctrl;
@@ -101,24 +97,6 @@ typedef struct NvmeNamespace {
 #define TYPE_NVME "nvme"
 #define NVME(obj) \
         OBJECT_CHECK(NvmeCtrl, (obj), TYPE_NVME)
-
-typedef struct LnvmCtrl {
-    LnvmParams     params;
-    LnvmIdCtrl     id_ctrl;
-    LnvmAddrF      lbaf;
-    uint8_t        bbt_gen_freq;
-    uint8_t        meta_auto_gen;
-    uint8_t        debug;
-    uint8_t        early_reset;
-    uint8_t        state_auto_gen;
-    char           *meta_fname;
-    char           *chunk_fname;
-    char           *resetfail_fname;
-    char           *writefail_fname;
-    FILE           *metadata;
-    uint8_t        int_meta_size;       // # of bytes for "internal" metadata
-    uint8_t        lba_meta_size; /* per lba metadata */
-} LnvmCtrl;
 
 typedef struct NvmeCtrl {
     PCIDevice    parent_obj;

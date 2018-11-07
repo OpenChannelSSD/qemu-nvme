@@ -149,8 +149,6 @@
 #define NVME_OP_ABORTED         0xff
 #define NVME_DLFEAT_VAL         0x00
 
-#define LNVM_CMD_MAX_LBAS 64
-
 #define NVME_GUEST_ERR(trace, fmt, ...) \
     do { \
         (trace_##trace)(__VA_ARGS__); \
@@ -911,7 +909,7 @@ static uint16_t lnvm_rw_check_write_req(NvmeCtrl *n, LnvmCtrl *ln,
 {
     uint16_t err = 0;
 
-    Lnvm_IdWrt *wrt = &ln->id_ctrl.wrt;
+    LnvmIdWrt *wrt = &ln->id_ctrl.wrt;
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
 
     // we need to check that the device write constraints are respected by
@@ -1386,7 +1384,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
-    Lnvm_IdWrt *wrt = &ln->id_ctrl.wrt;
+    LnvmIdWrt *wrt = &ln->id_ctrl.wrt;
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint16_t ctrl = le16_to_cpu(rw->control);
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
@@ -1702,7 +1700,7 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_SUCCESS;
 }
 
-static uint16_t lnvm_identity(NvmeCtrl *n, NvmeCmd *cmd)
+static uint16_t lnvm_identify(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     NvmeIdentify *c = (NvmeIdentify *)cmd;
     uint32_t nsid = le32_to_cpu(c->nsid);
@@ -3006,8 +3004,8 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_ADM_CMD_SET_DB_MEMORY:
         return nvme_set_db_memory(n, cmd);
-    case LNVM_ADM_CMD_IDENTITY:
-            return lnvm_identity(n, cmd);
+    case LNVM_ADM_CMD_IDENTIFY:
+            return lnvm_identify(n, cmd, req);
     case NVME_ADM_CMD_ACTIVATE_FW:
     case NVME_ADM_CMD_DOWNLOAD_FW:
     case NVME_ADM_CMD_SECURITY_SEND:
@@ -3690,9 +3688,9 @@ static int lnvm_init_meta(LnvmCtrl *ln, Error **errp)
 static int lnvm_init(NvmeCtrl *n, Error **errp)
 {
     LnvmCtrl *ln;
-    Lnvm_IdGeo *geo;
-    Lnvm_IdPerf *perf;
-    Lnvm_IdWrt *wrt;
+    LnvmIdGeo *geo;
+    LnvmIdPerf *perf;
+    LnvmIdWrt *wrt;
     NvmeNamespace *ns;
     NvmeIdNs *id_ns;
     unsigned int i;
@@ -3707,7 +3705,9 @@ static int lnvm_init(NvmeCtrl *n, Error **errp)
         id_ns = &ns->id_ns;
         max_chks = ns->ns_blks / ln->params.num_sec;
 
-        ln->id_ctrl.major_verid = 2;
+        ln->id_ctrl.ver.major = 0x2;
+        ln->id_ctrl.ver.minor = 0x0;
+
         ln->id_ctrl.mccap = cpu_to_le32(ln->params.mccap);
 
         if (ln->early_reset) {

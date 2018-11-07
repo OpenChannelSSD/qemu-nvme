@@ -241,10 +241,6 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_SET_DB_MEMORY  = 0xC0,  /* Vendor specific. */
 };
 
-enum LnvmAdminCommands {
-    LNVM_ADM_CMD_IDENTITY          = 0xe2,
-};
-
 enum NvmeIoCommands {
     NVME_CMD_FLUSH              = 0x00,
     NVME_CMD_WRITE              = 0x01,
@@ -253,80 +249,7 @@ enum NvmeIoCommands {
     NVME_CMD_COMPARE            = 0x05,
     NVME_CMD_WRITE_ZEROS        = 0x08,
     NVME_CMD_DSM                = 0x09,
-
-    LNVM_CMD_VECT_ERASE         = 0x90,
-    LNVM_CMD_VECT_WRITE         = 0x91,
-    LNVM_CMD_VECT_READ          = 0x92,
 };
-
-enum LnvmMetaState {
-    LNVM_SEC_UNKNOWN = 0x0,
-    LNVM_SEC_WRITTEN = 0xAC,
-    LNVM_SEC_ERASED = 0xDC,
-};
-
-typedef struct LnvmGetL2PTbl {
-    uint8_t opcode;
-    uint8_t flags;
-    uint16_t cid;
-    uint32_t nsid;
-    uint32_t rsvd1[4];
-    uint64_t prp1;
-    uint64_t prp2;
-    uint64_t slba;
-    uint32_t nlb;
-    uint16_t rsvd2[6];
-} LnvmGetL2PTbl;
-
-typedef struct LnvmBbtGet {
-  uint8_t opcode;
-  uint8_t flags;
-  uint16_t cid;
-  uint32_t nsid;
-  uint64_t rsvd1[2];
-  uint64_t prp1;
-  uint64_t prp2;
-  uint64_t spba;
-  uint32_t rsvd4[4]; // DW15, 14, 13, 12
-} LnvmBbtGet;
-
-enum {
-    LNVM_CHUNK_FREE     = 1 << 0,
-    LNVM_CHUNK_CLOSED   = 1 << 1,
-    LNVM_CHUNK_OPEN     = 1 << 2,
-    LNVM_CHUNK_BAD      = 1 << 3,
-};
-
-enum {
-    LNVM_CHUNK_TYPE_SEQ = 1 << 0,
-    LNVM_CHUNK_TYPE_RAN = 1 << 1,
-    LNVM_CHUNK_TYPE_SRK = 1 << 4,
-};
-
-typedef struct LnvmChunkState {
-  uint8_t state;
-  uint8_t type;
-  uint8_t wear_index;
-  uint8_t rsvd[5];
-  uint64_t slba;
-  uint64_t cnlb;
-  uint64_t wp;
-} LnvmCS;
-
-typedef struct LnvmBbtSet {
-  uint8_t opcode;
-  uint8_t flags;
-  uint16_t cid;
-  uint32_t nsid;
-  uint64_t rsvd1[2];
-  uint64_t prp1;
-  uint64_t prp2;
-  uint64_t spba;
-  uint16_t nlb;
-  uint8_t value;
-  uint8_t rsvd3;
-  uint32_t rsvd4[3];
-} LnvmBbtSet;
 
 typedef struct NvmeDeleteQ {
     uint8_t     opcode;
@@ -409,33 +332,6 @@ typedef struct NvmeRwCmd {
     uint16_t    apptag;
     uint16_t    appmask;
 } NvmeRwCmd;
-
-typedef struct LnvmRwCmd {
-    uint8_t     opcode;
-    uint8_t     flags;
-    uint16_t    cid;
-    uint32_t    nsid;
-    uint64_t    rsvd2;
-    uint64_t    metadata;
-    uint64_t    prp1;
-    uint64_t    prp2;
-    uint64_t    slba;
-    uint16_t    nlb;
-    uint16_t    control;
-    uint32_t    resv;
-    uint64_t    resv2;
-} LnvmRwCmd;
-
-typedef struct LnvmDmCmd {
-  uint8_t opcode;
-  uint8_t flags;
-  uint16_t cid;
-  uint32_t nsid;
-  uint32_t rsvd1[8];
-  uint64_t spba;
-  uint32_t nlb;
-  uint32_t rsvd2[3];
-} LnvmDmCmd;
 
 enum {
     NVME_RW_LR                  = 1 << 15,
@@ -524,61 +420,59 @@ typedef struct NvmeCqe {
 } NvmeCqe;
 
 enum NvmeStatusCodes {
-    NVME_SUCCESS                = 0x0000,
-    NVME_INVALID_OPCODE         = 0x0001,
-    NVME_INVALID_FIELD          = 0x0002,
-    NVME_CID_CONFLICT           = 0x0003,
-    NVME_DATA_TRAS_ERROR        = 0x0004,
-    NVME_POWER_LOSS_ABORT       = 0x0005,
-    NVME_INTERNAL_DEV_ERROR     = 0x0006,
-    NVME_CMD_ABORT_REQ          = 0x0007,
-    NVME_CMD_ABORT_SQ_DEL       = 0x0008,
-    NVME_CMD_ABORT_FAILED_FUSE  = 0x0009,
-    NVME_CMD_ABORT_MISSING_FUSE = 0x000a,
-    NVME_INVALID_NSID           = 0x000b,
-    NVME_CMD_SEQ_ERROR          = 0x000c,
-    NVME_LBA_RANGE              = 0x0080,
-    NVME_CAP_EXCEEDED           = 0x0081,
-    NVME_NS_NOT_READY           = 0x0082,
-    NVME_NS_RESV_CONFLICT       = 0x0083,
-    NVME_INVALID_CQID           = 0x0100,
-    NVME_INVALID_QID            = 0x0101,
-    NVME_MAX_QSIZE_EXCEEDED     = 0x0102,
-    NVME_ACL_EXCEEDED           = 0x0103,
-    NVME_RESERVED               = 0x0104,
-    NVME_AER_LIMIT_EXCEEDED     = 0x0105,
-    NVME_INVALID_FW_SLOT        = 0x0106,
-    NVME_INVALID_FW_IMAGE       = 0x0107,
-    NVME_INVALID_IRQ_VECTOR     = 0x0108,
-    NVME_INVALID_LOG_ID         = 0x0109,
-    NVME_INVALID_FORMAT         = 0x010a,
-    NVME_FW_REQ_RESET           = 0x010b,
-    NVME_INVALID_QUEUE_DEL      = 0x010c,
-    NVME_FID_NOT_SAVEABLE       = 0x010d,
-    NVME_FID_NOT_NSID_SPEC      = 0x010f,
-    NVME_FW_REQ_SUSYSTEM_RESET  = 0x0110,
-    NVME_CONFLICTING_ATTRS      = 0x0180,
-    NVME_INVALID_PROT_INFO      = 0x0181,
-    NVME_WRITE_TO_RO            = 0x0182,
-    NVME_INVALID_MEMORY_ADDRESS = 0x01C0,  /* Vendor extension. */
-    NVME_WRITE_FAULT            = 0x0280,
-    NVME_UNRECOVERED_READ       = 0x0281,
-    NVME_E2E_GUARD_ERROR        = 0x0282,
-    NVME_E2E_APP_ERROR          = 0x0283,
-    NVME_E2E_REF_ERROR          = 0x0284,
-    NVME_CMP_FAILURE            = 0x0285,
-    NVME_ACCESS_DENIED          = 0x0286,
-    NVME_DULB                   = 0x0287,
-    NVME_MORE                   = 0x2000,
-    NVME_DNR                    = 0x4000,
-    NVME_NO_COMPLETE            = 0xffff,
-};
-
-enum LnvmStatusCodes {
-    LNVM_CHUNK_EARLY_CLOSE      = 0x02f1,
-    LNVM_OUT_OF_ORDER_WRITE     = 0x02f2,
-    LNVM_OFFLINE_CHUNK          = 0x02c0,
-    LNVM_INVALID_RESET          = 0x02c1,
+    NVME_SUCCESS                     = 0x0000,
+    NVME_INVALID_OPCODE              = 0x0001,
+    NVME_INVALID_FIELD               = 0x0002,
+    NVME_CID_CONFLICT                = 0x0003,
+    NVME_DATA_TRAS_ERROR             = 0x0004,
+    NVME_POWER_LOSS_ABORT            = 0x0005,
+    NVME_INTERNAL_DEV_ERROR          = 0x0006,
+    NVME_CMD_ABORT_REQ               = 0x0007,
+    NVME_CMD_ABORT_SQ_DEL            = 0x0008,
+    NVME_CMD_ABORT_FAILED_FUSE       = 0x0009,
+    NVME_CMD_ABORT_MISSING_FUSE      = 0x000a,
+    NVME_INVALID_NSID                = 0x000b,
+    NVME_CMD_SEQ_ERROR               = 0x000c,
+    NVME_INVALID_SGL_SEG_DESCRIPTOR  = 0x000d,
+    NVME_INVALID_NUM_SGL_DESCRIPTORS = 0x000e,
+    NVME_DATA_SGL_LENGTH_INVALID     = 0x000f,
+    NVME_METADATA_SGL_LENGTH_INVALID = 0x0010,
+    NVME_SGL_DESCRIPTOR_TYPE_INVALID = 0x0011,
+    NVME_LBA_RANGE                   = 0x0080,
+    NVME_CAP_EXCEEDED                = 0x0081,
+    NVME_NS_NOT_READY                = 0x0082,
+    NVME_NS_RESV_CONFLICT            = 0x0083,
+    NVME_INVALID_CQID                = 0x0100,
+    NVME_INVALID_QID                 = 0x0101,
+    NVME_MAX_QSIZE_EXCEEDED          = 0x0102,
+    NVME_ACL_EXCEEDED                = 0x0103,
+    NVME_RESERVED                    = 0x0104,
+    NVME_AER_LIMIT_EXCEEDED          = 0x0105,
+    NVME_INVALID_FW_SLOT             = 0x0106,
+    NVME_INVALID_FW_IMAGE            = 0x0107,
+    NVME_INVALID_IRQ_VECTOR          = 0x0108,
+    NVME_INVALID_LOG_ID              = 0x0109,
+    NVME_INVALID_FORMAT              = 0x010a,
+    NVME_FW_REQ_RESET                = 0x010b,
+    NVME_INVALID_QUEUE_DEL           = 0x010c,
+    NVME_FID_NOT_SAVEABLE            = 0x010d,
+    NVME_FID_NOT_NSID_SPEC           = 0x010f,
+    NVME_FW_REQ_SUSYSTEM_RESET       = 0x0110,
+    NVME_CONFLICTING_ATTRS           = 0x0180,
+    NVME_INVALID_PROT_INFO           = 0x0181,
+    NVME_WRITE_TO_RO                 = 0x0182,
+    NVME_INVALID_MEMORY_ADDRESS      = 0x01C0,  /* Vendor extension. */
+    NVME_WRITE_FAULT                 = 0x0280,
+    NVME_UNRECOVERED_READ            = 0x0281,
+    NVME_E2E_GUARD_ERROR             = 0x0282,
+    NVME_E2E_APP_ERROR               = 0x0283,
+    NVME_E2E_REF_ERROR               = 0x0284,
+    NVME_CMP_FAILURE                 = 0x0285,
+    NVME_ACCESS_DENIED               = 0x0286,
+    NVME_DULB                        = 0x0287,
+    NVME_MORE                        = 0x2000,
+    NVME_DNR                         = 0x4000,
+    NVME_NO_COMPLETE                 = 0xffff,
 };
 
 typedef struct NvmeFwSlotInfoLog {
@@ -687,118 +581,10 @@ typedef struct NvmeIdCtrl {
     uint8_t     vs[1024];
 } NvmeIdCtrl;
 
-typedef struct LnvmAddrF {
-    uint64_t    grp_mask;
-    uint64_t    lun_mask;
-    uint64_t    chk_mask;
-    uint64_t    sec_mask;
-    uint8_t     grp_offset;
-    uint8_t     lun_offset;
-    uint8_t     chk_offset;
-    uint8_t     sec_offset;
-} LnvmAddrF;
-
-typedef struct Lnvm_IdGeo {
-    uint16_t        num_grp;
-    uint16_t        num_lun;
-    uint32_t        num_chk;
-    uint32_t        clba;
-    uint8_t         resv[52];
-} Lnvm_IdGeo;
-
-typedef struct Lnvm_IdWrt {
-  uint32_t        ws_min;
-  uint32_t        ws_opt;
-  uint32_t        mw_cunits;
-  uint8_t         resv[52];
-} Lnvm_IdWrt;
-
-typedef struct Lnvm_IdPerf {
-  uint32_t        trdt;
-  uint32_t        trdm;
-  uint32_t        tprt;
-  uint32_t        tprm;
-  uint32_t        tbet;
-  uint32_t        tbem;
-  uint8_t       resv[40];
-} Lnvm_IdPerf;
-
-typedef struct LnvmIdLBAF {
-  uint8_t         grp_len;
-  uint8_t         lun_len;
-  uint8_t         chk_len;
-  uint8_t         sec_len;
-  uint8_t         resv[4];
-} QEMU_PACKED LnvmIdLBAF;
-
-typedef struct LnvmIdCtrl {
-  uint8_t         major_verid;
-  uint8_t         minor_verid;
-  uint8_t         resv[6];
-  LnvmIdLBAF      lbaf;
-  uint32_t        mccap;
-  uint8_t         resv3[44];
-  Lnvm_IdGeo      geo;
-  Lnvm_IdWrt      wrt;
-  Lnvm_IdPerf     perf;
-} QEMU_PACKED LnvmIdCtrl;
-
-typedef struct LnvmBbt {
-    uint8_t     tblid[4];
-    uint16_t    verid;
-    uint16_t    revid;
-    uint32_t    rvsd1;
-    uint32_t    tblks;
-    uint32_t    tfact;
-    uint32_t    tgrown;
-    uint32_t    tdresv;
-    uint32_t    thresv;
-    uint32_t    rsvd2[8];
-    uint8_t     blk[0];
-} QEMU_PACKED LnvmBbt;
-
-/* Parameters passed on to QEMU to configure the characteristics of the drive */
-typedef struct LnvmParams {
-    /* configurable device characteristics */
-    uint32_t    sec_size;
-    uint32_t    mccap;
-    /* configurable parameters for LnvmIdGroup */
-    uint32_t    num_grp;
-    uint32_t    num_lun;
-    uint32_t    num_sec;
-    uint8_t     ws_min;
-    uint8_t     ws_opt;
-    uint8_t     mw_cunits;
-    /* calculated values */
-    uint32_t    sec_per_lun;
-    uint32_t    sec_per_grp;
-    uint32_t    total_secs;
-    uint32_t    chk_per_lun;
-    uint32_t    chk_per_grp;
-    uint32_t    total_chks;
-    /* Calculated unit values for ordering */
-    uint32_t    chk_units;
-    uint32_t    lun_units;
-    uint32_t	grp_units;
-    uint32_t    total_units;
-} QEMU_PACKED LnvmParams;
-
-enum LnvmParamsMccap {
-    LNVM_PARAMS_MCCAP_MULTIPLE_RESETS = 0x1 << 1,
-
-    /* OCSSD 2.0 spec de-facto extension */
-    LNVM_PARAMS_MCCAP_EARLY_RESET = 0x1 << 2,
-};
-
-enum LnvmLogPage {
-    LNVM_REPORT_CHUNK = 0xCA,
-};
-
 enum NvmeIdCtrlOacs {
     NVME_OACS_SECURITY  = 1 << 0,
     NVME_OACS_FORMAT    = 1 << 1,
     NVME_OACS_FW        = 1 << 2,
-    NVME_OACS_LNVM_DEV  = 1 << 3,
 };
 
 enum NvmeIdCtrlOncs {
@@ -915,17 +701,12 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeCqe) != 16);
     QEMU_BUILD_BUG_ON(sizeof(NvmeDsmRange) != 16);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCmd) != 64);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmGetL2PTbl) != 64);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmBbtGet) != 64);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmBbtSet) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeDeleteQ) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCreateCq) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCreateSq) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdentify) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeRwCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeDsmCmd) != 64);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmRwCmd) != 64);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmDmCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeRangeType) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeErrorLog) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeFwSlotInfoLog) != 512);
