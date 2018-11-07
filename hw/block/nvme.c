@@ -207,7 +207,7 @@ static void lnvm_print_rq(LnvmCtrl *ln, uint64_t *psl, uint32_t nlb)
     for (uint32_t i = 0; i < nlb; i++) lnvm_print_lba(ln, psl[i]);
 }
 
-static inline int64_t lnvm_lba_to_off(LnvmCtrl *ln, uint64_t lba)
+static inline int64_t lnvm_lba_to_sectr_off(LnvmCtrl *ln, uint64_t lba)
 {
     union lnvm_addr gen = lnvm_lba_to_addr(ln, lba);
 
@@ -601,7 +601,7 @@ static void lnvm_inject_w_err(LnvmCtrl *ln, NvmeRequest *req, NvmeCqe *cqe)
     if (ns && ns->writefail && req->is_write && req->lnvm_lba_list) {
         for (int i = 0; i < req->nlb; i++) {
             uint64_t lba = req->lnvm_lba_list[i];
-            uint8_t err_prob = ns->writefail[lnvm_lba_to_off(ln, lba)];
+            uint8_t err_prob = ns->writefail[lnvm_lba_to_sectr_off(ln, lba)];
 
             LnvmCS *chunk_meta = lnvm_chunk_get_state(ns, ln, lba);
 
@@ -1316,7 +1316,7 @@ static uint16_t lnvm_rw_setup_rq(NvmeCtrl *n, NvmeNamespace *ns, LnvmRwCmd *lrw,
      * handlers to write/read data to/from the right physical sector
      */
     for (i = 0; i < nlb; i++) {
-        lba_off = lnvm_lba_to_off(ln, psl[i]);
+        lba_off = lnvm_lba_to_sectr_off(ln, psl[i]);
 
         if (req->is_predefined[i] && !req->is_write) {
             if (NVME_ERR_REC_DULBE(n->features.err_rec)) {
@@ -1411,7 +1411,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return err;
     }
 
-    req->slba = lnvm_lba_to_off(ln, slba);
+    req->slba = lnvm_lba_to_sectr_off(ln, slba);
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
     req->ns = ns;
@@ -1604,7 +1604,7 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         return lnvm_rw_free_rq(aio_offset_list);
     }
 
-    req->slba = lnvm_lba_to_off(ln, psl[0]);
+    req->slba = lnvm_lba_to_sectr_off(ln, psl[0]);
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
     req->ns = ns;
@@ -1668,7 +1668,7 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
         req->status = NVME_SUCCESS;
         for (i = 0; i < nr; i++) {
-            slba = lnvm_lba_to_off(ln, le64_to_cpu(range[i].slba));
+            slba = lnvm_lba_to_sectr_off(ln, le64_to_cpu(range[i].slba));
             dev_slba = le64_to_cpu(range[i].slba);
             nlb = le32_to_cpu(range[i].nlb);
             if (slba + nlb > le64_to_cpu(ns->id_ns.nsze)) {
@@ -2050,7 +2050,7 @@ static int set_writefail_sector(char *secinfo, NvmeNamespace *ns)
     }
 
     lba = lnvm_lba_addr(ch, lun, chk, sec, ln);
-    ns->writefail[lnvm_lba_to_off(ln, lba)] = writefail_prob;
+    ns->writefail[lnvm_lba_to_sectr_off(ln, lba)] = writefail_prob;
 
     return 0;
 }
