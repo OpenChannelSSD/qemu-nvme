@@ -59,28 +59,31 @@
  *  meta=<int>            : Meta-data size, Default:16
  *  oncs=<oncs>           : Optional NVMe command support, Default:DSM
  *  oacs=<oacs>           : Optional Admin command support, Default:Format
+ *
+ * LightNVM specific options:
+ *
  *  lmccap=<int>          : Media and Controller Capabilities (MCCAP),
- *                          Default: 0
- *  lnum_grp=<int>        : Number of controller group, Default: 1
+ *                          Default:0
+ *  lnum_grp=<int>        : Number of controller group, Default:1
  *  lnum_pu=<int>         : Number of parallel units per group, Default:1
- *  lnum_sec=<int>        : Number of sectors in a chunk, Default: 4096
- *  lsec_size             : Sector size, Default: 4096
+ *  lnum_sec=<int>        : Number of sectors in a chunk, Default:4096
+ *  lsec_size             : Sector size, Default:4096
  *  lws_min=<int>         : Mininum write size for device in sectors,
- *                          Default: 4
+ *                          Default:4
  *  lws_opt=<int>         : Optimal write size for device in sectors,
- *                          Default: 8
+ *                          Default:8
  *  lmw_cunits=<int>      : Number of written sectors required in chunk before
- *                          read, Default: 32
+ *                          read, Default:32
  *  lchunktable=<file>    : Load state table from file destination (Provide
  *                          path to file. If no file is provided a state table
  *                          will be generated.
  *  lresetfail=<file>     : Reset fail injection configuration file.
  *  lwritefail=<file>     : Write fail injection configuration file.
  *  lmetadata=<file>      : Load metadata from file destination.
- *  lmetasize=<int>       : LightNVM meta (OOB) size, Default: 16
- *  ldebug                : Enable LightNVM debugging, Default: 0 (disabled)
+ *  lmetasize=<int>       : LightNVM meta (OOB) size, Default:16
+ *  ldebug                : Enable LightNVM debugging, Default:0 (disabled)
  *  learly_reset          : Allow early resets (reset open chunks),
- *                          Default: 1 (enabled)
+ *                          Default:1 (enabled)
  *
  *
  * The logical block formats all start at 512 byte blocks and double for the
