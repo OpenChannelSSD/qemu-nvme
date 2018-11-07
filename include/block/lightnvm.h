@@ -62,13 +62,12 @@ typedef struct LnvmRwCmd {
     uint32_t    nsid;
     uint64_t    rsvd2;
     uint64_t    metadata;
-    uint64_t    prp1;
-    uint64_t    prp2;
+    NvmeCmdDptr dptr;
     uint64_t    lbal;
-    uint32_t    nlb    :  6;
-    uint32_t    rsvd3  : 26;
-    uint32_t    rsvd4;
-    uint64_t    resv5;
+    uint16_t    nlb;
+    uint16_t    control;
+    uint32_t    rsvd3;
+    uint64_t    rsvd4;
 } LnvmRwCmd;
 
 typedef struct LnvmDmCmd {
