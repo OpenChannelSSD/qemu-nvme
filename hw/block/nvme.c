@@ -44,7 +44,7 @@
  *  aerl=<int>            : Async event request limit, Default:3
  *  acl=<int>             : Abort command limit, Default:3
  *  elpe=<int>            : Error log page entries, Default:3
- *  mdts=<int>            : Maximum data transfer size, Default:5
+ *  mdts=<int>            : Maximum data transfer size, Default:7
  *  cqr=<int>             : Contiguous queues required, Default:1
  *  vwc=<int>             : Volatile write cache enabled, Default:0
  *  intc=<int>            : Interrupt configuration disabled, Default:0
@@ -4179,7 +4179,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("aerl", NvmeCtrl, aerl, 3),
     DEFINE_PROP_UINT8("acl", NvmeCtrl, acl, 3),
     DEFINE_PROP_UINT8("elpe", NvmeCtrl, elpe, 3),
-    DEFINE_PROP_UINT8("mdts", NvmeCtrl, mdts, 0),
+    DEFINE_PROP_UINT8("mdts", NvmeCtrl, mdts, 7),
     DEFINE_PROP_UINT8("cqr", NvmeCtrl, cqr, 1),
     DEFINE_PROP_UINT8("vwc", NvmeCtrl, vwc, 0),
     DEFINE_PROP_UINT8("intc", NvmeCtrl, intc, 0),
