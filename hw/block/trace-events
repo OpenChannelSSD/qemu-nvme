@@ -104,14 +104,16 @@ nvme_err_startfail_acqent_sz_zero(void) "nvme_start_ctrl failed because the admi
 nvme_err_startfail(void) "setting controller enable bit failed"
 
 # lnvm traces
-lnvm_rw(uint16_t cid, uint16_t opcode, uint16_t nlb) "cid %"PRIu16" opcode 0x%"PRIx16" nlb %"PRIu16""
-lnvm_addr(uint16_t cid, uint16_t n, char *addr) "cid %"PRIu16" lbal %"PRIu16" %s"
+lnvm_rw(uint16_t cid, uint16_t opcode, uint16_t nlb, char *lbas) "cid %"PRIu16" opcode 0x%"PRIx16" nlb %"PRIu16" %s"
+lnvm_addr(uint16_t cid, char *lba) "cid %"PRIu16" %s"
 lnvm_advance_wp(uint16_t cid, uint64_t lba, uint16_t nlb) "cid %"PRIu16" lba 0x%"PRIx64" nlb %"PRIu16""
 lnvm_double_reset(uint16_t cid, uint64_t lba) "cid %"PRIu16" lba 0x%"PRIx64""
 lnvm_early_reset(uint16_t cid, uint64_t lba, uint64_t wp) "cid %"PRIu16" lba 0x%"PRIx64" wp %"PRIu64""
 lnvm_inject_write_err(uint16_t cid, uint64_t lba) "cid %"PRIu16" lba 0x%"PRIx64""
+lnvm_inject_reset_err(uint16_t cid, uint64_t lba) "cid %"PRIu16" lba 0x%"PRIx64""
 
 # lnvm traces (error conditions)
+lnvm_err(uint16_t cid, const char *s, uint16_t err) "cid %"PRIu16" \"%s\" err 0x%"PRIx16""
 lnvm_err_invalid_chunk(uint16_t cid, uint64_t lba) "cid %"PRIu16" lba 0x%"PRIx64""
 lnvm_err_invalid_chunk_state(uint16_t cid, uint64_t lba, uint8_t state) "cid %"PRIu16" lba 0x%"PRIx64" state 0x%"PRIx8""
 lnvm_err_offline_chunk(uint16_t cid, uint64_t lba) "cid %"PRIu16" lba 0x%"PRIx64""

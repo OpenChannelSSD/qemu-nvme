@@ -157,69 +157,63 @@
             " in %s: " fmt "\n", __func__, ## __VA_ARGS__); \
     } while (0)
 
-#define NVME_NS_LBADS(ns) \
-    (ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas)].lbads)
+#define NVME_NS_LBADS(ns)                                                     \
+    ((ns)->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX((ns)->id_ns.flbas)].lbads)
 
-#define NVME_NS_MS(ns) \
-    (ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas)].ms)
+#define NVME_NS_MS(ns)                                                        \
+    ((ns)->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX((ns)->id_ns.flbas)].ms)
 
-#define NVME_IS_WRITE(req) \
-    (req->cmd_opcode == NVME_CMD_WRITE)
+#define NVME_IS_WRITE(req)                                                    \
+    ((req)->cmd_opcode == NVME_CMD_WRITE)
 
-#define LNVM_IS_WRITE(req) \
-    (NVME_IS_WRITE(req) || (req->cmd_opcode == LNVM_CMD_VECT_WRITE))
+#define LNVM_IS_WRITE(req)                                                    \
+    (NVME_IS_WRITE(req) || ((req)->cmd_opcode == LNVM_CMD_VECT_WRITE))
 
-#define LNVM_LBA_GET_SECTR(ln, lba) \
-    ((lba & ln->lbaf.sec_mask) >> ln->lbaf.sec_offset)
+#define LNVM_LBA_GET_SECTR(ln, lba)                                           \
+    ((lba & (ln)->lbaf.sec_mask) >> (ln)->lbaf.sec_offset)
 
-#define LNVM_LBA_GET_CHUNK(ln, lba) \
-    ((lba & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset)
+#define LNVM_LBA_GET_CHUNK(ln, lba)                                           \
+    ((lba & (ln)->lbaf.chk_mask) >> (ln)->lbaf.chk_offset)
 
-#define LNVM_LBA_GET_PUNIT(ln, lba) \
-    ((lba & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset)
+#define LNVM_LBA_GET_PUNIT(ln, lba)                                           \
+    ((lba & (ln)->lbaf.lun_mask) >> (ln)->lbaf.lun_offset)
 
-#define LNVM_LBA_GET_GROUP(ln, lba) \
-    (lba >> ln->lbaf.grp_offset)
+#define LNVM_LBA_GET_GROUP(ln, lba)                                           \
+    (lba >> (ln)->lbaf.grp_offset)
 
-union lnvm_addr {
-    struct  {
-        uint32_t sectr;
-        uint16_t chunk;
-        uint8_t  punit;
-        uint8_t  pugrp;
-    };
+#define LNVM_LBA(ln, group, punit, chunk, sectr)                              \
+    (sectr << (ln)->lbaf.sec_offset                                           \
+        | chunk << (ln)->lbaf.chk_offset                                      \
+        | punit << (ln)->lbaf.lun_offset                                      \
+        | group << (ln)->lbaf.grp_offset)
 
-    uint64_t v;
-};
+#define LNVM_LBA_TO_SECTOR_INDEX(ln, lba)                                     \
+    (LNVM_LBA_GET_SECTR(ln, lba) +                                            \
+        LNVM_LBA_GET_CHUNK(ln, lba) * (ln)->params.chk_units +                \
+        LNVM_LBA_GET_PUNIT(ln, lba) * (ln)->params.lun_units +                \
+        LNVM_LBA_GET_GROUP(ln, lba) * (ln)->params.grp_units)
 
-static inline union lnvm_addr lnvm_lba_to_addr(LnvmCtrl *ln, uint64_t lba) {
-    union lnvm_addr gen = { .v = 0 };
+#define LNVM_LBA_TO_CHUNK_INDEX(ln, lba)                                      \
+    (LNVM_LBA_GET_CHUNK(ln, lba) +                                            \
+        LNVM_LBA_GET_PUNIT(ln, lba) * (ln)->params.chk_per_lun +              \
+        LNVM_LBA_GET_GROUP(ln, lba) * (ln)->params.chk_per_grp)
 
-    gen.pugrp = LNVM_LBA_GET_GROUP(ln, lba);
-    gen.punit = LNVM_LBA_GET_PUNIT(ln, lba);
-    gen.chunk = LNVM_LBA_GET_CHUNK(ln, lba);
-    gen.sectr = LNVM_LBA_GET_SECTR(ln, lba);
+#define LNVM_LBA_FROM_CHUNK_INDEX(ln, idx)                                    \
+    ((idx / (ln)->params.chk_per_grp) << (ln)->lbaf.grp_offset |              \
+        ((idx % (ln)->params.chk_per_grp / (ln)->params.chk_per_lun) <<       \
+            (ln)->lbaf.lun_offset) |                                          \
+        (idx % (ln)->params.chk_per_lun) << (ln)->lbaf.chk_offset)
 
-    return gen;
-}
+#define LNVM_LBA_VALID(ln, lba)                                               \
+    (LNVM_LBA_GET_SECTR(ln, lba) < (ln)->id_ctrl.geo.clba &&                  \
+        LNVM_LBA_GET_CHUNK(ln, lba) < (ln)->id_ctrl.geo.num_chk &&            \
+        LNVM_LBA_GET_PUNIT(ln, lba) < (ln)->id_ctrl.geo.num_lun &&            \
+        LNVM_LBA_GET_GROUP(ln, lba) < (ln)->id_ctrl.geo.num_grp)
 
-static uint64_t lnvm_lba_addr(unsigned int grp, unsigned int lun,
-                              unsigned int chk, unsigned int sec, LnvmCtrl *ln)
-{
-    uint64_t lba = 0;
-
-    lba = lba | sec << ln->lbaf.sec_offset;
-    lba = lba | chk << ln->lbaf.chk_offset;
-    lba = lba | lun << ln->lbaf.lun_offset;
-    lba = lba | grp << ln->lbaf.grp_offset;
-
-    return lba;
-}
-
-#define LNVM_ADDR_PP_TEMPLATE \
+#define LNVM_LBA_FORMAT_TEMPLATE \
     "lba 0xffffffffffffffff pugrp 255 punit 255 chunk 65535 sectr 4294967295"
 
-static size_t lnvm_addr_pp(char *buf, size_t n, LnvmCtrl *ln, uint64_t lba)
+static int lnvm_lba_str(char *buf, LnvmCtrl *ln, uint64_t lba)
 {
     uint8_t pugrp, punit;
     uint16_t chunk;
@@ -230,71 +224,40 @@ static size_t lnvm_addr_pp(char *buf, size_t n, LnvmCtrl *ln, uint64_t lba)
     chunk = LNVM_LBA_GET_CHUNK(ln, lba);
     sectr = LNVM_LBA_GET_SECTR(ln, lba);
 
-    return snprintf(buf, n, "lba 0x%016"PRIx64" pugrp %"PRIu8" punit %"PRIu8
+    return sprintf(buf, "lba 0x%016"PRIx64" pugrp %"PRIu8" punit %"PRIu8
         " chunk %"PRIu16" sectr %"PRIu32, lba, pugrp, punit, chunk, sectr);
 }
 
-static void lnvm_print_lba(LnvmCtrl *ln, uint64_t lba)
+static inline void lnvm_trace_rw(LnvmCtrl *ln, NvmeRequest *req)
 {
-    union lnvm_addr gen = lnvm_lba_to_addr(ln, lba);
-
-    fprintf(stderr, "phys: 0x%016lx; {pugrp: %u, punit: %u, chunk: %u, "
-                    "sectr: %u}\n",
-                    lba, gen.pugrp, gen.punit, gen.chunk, gen.sectr);
-}
-
-static void lnvm_print_rq(LnvmCtrl *ln, NvmeRequest *req)
-{
-    for (uint32_t i = 0; i < req->nlb; i++) lnvm_print_lba(ln, req->lbal[i]);
-}
-
-static inline int64_t lnvm_lba_to_sectr_off(LnvmCtrl *ln, uint64_t lba)
-{
-    union lnvm_addr gen = lnvm_lba_to_addr(ln, lba);
-
-    return gen.sectr + gen.chunk * ln->params.chk_units +
-        gen.punit * ln->params.lun_units +
-        gen.pugrp * ln->params.grp_units;
-}
-
-static inline int lnvm_lba_to_chunk_no(LnvmCtrl *ln, uint64_t lba)
-{
-    uint64_t grp = lba >> ln->lbaf.grp_offset;
-    uint64_t lun = (lba & ln->lbaf.lun_mask) >> ln->lbaf.lun_offset;
-    uint64_t chk = (lba & ln->lbaf.chk_mask) >> ln->lbaf.chk_offset;
-    uint64_t cno = chk;
-
-    cno += lun * ln->params.chk_per_lun;
-    cno += grp * ln->params.chk_per_grp;
-
-    if (chk >= ln->params.chk_per_lun ||
-            lun >= ln->params.num_lun ||
-            grp >= ln->params.num_grp) {
-        return -1;
+    char *buf = g_malloc(req->nlb * (sizeof(LNVM_LBA_FORMAT_TEMPLATE) + 3) + 1);
+    char *bufp = buf;
+    for (uint16_t i = 0; i < req->nlb; i++) {
+        bufp += sprintf(bufp, "\n  ");
+        bufp += lnvm_lba_str(bufp, ln, req->lbal[i]);
     }
 
-    return cno;
+    trace_lnvm_rw(req->cqe.cid, req->cmd_opcode, req->nlb, buf);
+    g_free(buf);
 }
 
-static inline uint64_t lnvm_chunk_no_to_lba(LnvmCtrl *ln, int64_t cno) {
-    uint64_t grp = cno / ln->params.chk_per_grp;
-    uint64_t lun = cno % ln->params.chk_per_grp / ln->params.chk_per_lun;
-    uint64_t chk = cno % ln->params.chk_per_lun;
-
-    return grp << ln->lbaf.grp_offset |
-        lun << ln->lbaf.lun_offset |
-        chk << ln->lbaf.chk_offset;
+static inline void lnvm_trace_lba(LnvmCtrl *ln, uint64_t lba,
+    NvmeRequest *req)
+{
+    char *buf = g_malloc(sizeof(LNVM_LBA_FORMAT_TEMPLATE) + 1);
+    lnvm_lba_str(buf, ln, lba);
+    trace_lnvm_addr(req->cqe.cid, buf);
+    g_free(buf);
 }
 
 static LnvmCS *lnvm_chunk_get_state(NvmeNamespace *ns, LnvmCtrl *ln,
     uint64_t lba)
 {
-    int cid = lnvm_lba_to_chunk_no(ln, lba);
-
-    if (cid == -1)
+    if (!LNVM_LBA_VALID(ln, lba)) {
         return NULL;
+    }
 
-    return &ns->chunk_meta[cid];
+    return &ns->chunk_meta[LNVM_LBA_TO_CHUNK_INDEX(ln, lba)];
 }
 
 static int lnvm_advance_wp(NvmeCtrl *n, uint64_t lba, uint16_t nlb,
@@ -700,7 +663,7 @@ static void nvme_blk_setup_dma(NvmeCtrl *n, QEMUSGList *qsg,
 {
     size_t split, tlen = 0;
     NvmeBlockBackendRequest *blk_req = nvme_blk_req_new(n, req);
-    uint64_t soffset = lnvm_lba_to_sectr_off(&n->lnvm_ctrl, req->slba);
+    uint64_t soffset = LNVM_LBA_TO_SECTOR_INDEX(&n->lnvm_ctrl, req->slba);
 
     blk_req->slba = req->slba;
     blk_req->nlb = req->nlb;
@@ -753,7 +716,7 @@ static void nvme_blk_setup_cmb(NvmeCtrl *n, QEMUIOVector *iov,
 {
     size_t split, tlen = 0;
     NvmeBlockBackendRequest *blk_req = nvme_blk_req_new(n, req);
-    uint64_t soffset = lnvm_lba_to_sectr_off(&n->lnvm_ctrl, req->slba);
+    uint64_t soffset = LNVM_LBA_TO_SECTOR_INDEX((&(n->lnvm_ctrl)), req->slba);
 
     blk_req->slba = req->slba;
     blk_req->nlb = req->nlb;
@@ -818,7 +781,7 @@ static void lnvm_blk_setup_dma(NvmeCtrl *n, QEMUSGList *qsg,
         if (!LNVM_IS_WRITE(req) && req->predef.lba_or_map & (1 << i)) {
             qsg_tmp = &req->predef.qsg;
         } else {
-            uint64_t soffset = lnvm_lba_to_sectr_off(ln, req->lbal[i]);
+            uint64_t soffset = LNVM_LBA_TO_SECTOR_INDEX(ln, req->lbal[i]);
             uint64_t offset = blk_offset + soffset * unit_len;
 
             // add a new block backend request if non-contiguous
@@ -875,7 +838,7 @@ static void lnvm_blk_setup_cmb(NvmeCtrl *n, QEMUIOVector *iov,
         if (!LNVM_IS_WRITE(req) && req->predef.lba_or_map & (1 << i)) {
             iov_tmp = &req->predef.iov;
         } else {
-            uint64_t soffset = lnvm_lba_to_sectr_off(ln, req->lbal[i]);
+            uint64_t soffset = LNVM_LBA_TO_SECTOR_INDEX(ln, req->lbal[i]);
             uint64_t offset = blk_offset + soffset * unit_len;
 
             // add a new block backend request if non-contiguous
@@ -1148,7 +1111,7 @@ static void lnvm_inject_write_err(LnvmCtrl *ln, NvmeRequest *req)
     if (ns && ns->writefail && LNVM_IS_WRITE(req) && req->lbal) {
         for (int i = 0; i < req->nlb; i++) {
             uint64_t lba = req->lbal[i];
-            uint8_t err_prob = ns->writefail[lnvm_lba_to_sectr_off(ln, lba)];
+            uint8_t err_prob = ns->writefail[LNVM_LBA_TO_SECTOR_INDEX(ln, lba)];
 
             LnvmCS *chunk_meta = lnvm_chunk_get_state(ns, ln, lba);
 
@@ -1166,11 +1129,10 @@ static void lnvm_inject_write_err(LnvmCtrl *ln, NvmeRequest *req)
                 chunk_meta->state = LNVM_CHUNK_CLOSED;
 
                 /* Fail the next erase */
-                ns->resetfail[lnvm_lba_to_chunk_no(ln, lba)] = 100;
+                ns->resetfail[LNVM_LBA_TO_CHUNK_INDEX(ln, lba)] = 100;
 
                 if (ln->debug) {
-                    fprintf(stderr, "Injecting write error for lba:\n");
-                    lnvm_print_lba(ln, lba);
+                    lnvm_trace_lba(ln, lba, req);
                 }
             }
         }
@@ -1578,14 +1540,14 @@ static uint16_t lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln,
     }
 
     if (ns->resetfail) {
-        resetfail_prob = ns->resetfail[lnvm_lba_to_chunk_no(ln, lba)];
+        resetfail_prob = ns->resetfail[LNVM_LBA_TO_CHUNK_INDEX(ln, lba)];
     }
 
     if (resetfail_prob) {
         if ((rand() % 100) < resetfail_prob) {
             chunk_meta->state = LNVM_CHUNK_OFFLINE;
             chunk_meta->wp = 0xffff;
-            fprintf(stderr, "nvme: injecting erase failure\n");
+            trace_lnvm_inject_reset_err(req->cqe.cid, lba);
             return LNVM_INVALID_RESET | NVME_DNR;
         }
     }
@@ -1775,6 +1737,8 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     uint16_t err;
 
     if (nlb > LNVM_CMD_MAX_LBAS) {
+        trace_lnvm_err(req->cqe.cid, "LNVM_CMD_MAX_LBAS exceeded",
+            NVME_INVALID_FIELD | NVME_DNR);
         nvme_set_error_page(n, req->sq->sqid, req->cqe.cid, NVME_INVALID_FIELD,
                 offsetof(LnvmRwCmd, lbal), 0, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -1791,23 +1755,12 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 
     if (trace_event_get_state_backends(TRACE_LNVM_RW)) {
-        trace_lnvm_rw(req->cqe.cid, cmd->opcode, nlb);
-
-        size_t len = strlen(LNVM_ADDR_PP_TEMPLATE) + 1;
-        char *s = g_malloc(len);
-
-        for (int i = 0; i < req->nlb; i++) {
-            lnvm_addr_pp(s, len, ln, req->lbal[i]);
-            trace_lnvm_addr(req->cqe.cid, i, s);
-        }
-
-        g_free(s);
+        lnvm_trace_rw(ln, req);
     }
 
     err = lnvm_rw_check_req(n, cmd, req);
     if (err) {
-        fprintf(stderr, "lnvm_rw: lvme_rw_check_req failed: 0x%x\n", err);
-        lnvm_print_rq(ln, req);
+        trace_lnvm_err(req->cqe.cid, "lnvm_rw_check_req", err);
         return err;
     }
 
@@ -1821,12 +1774,14 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     err = nvme_map(n, cmd, req, lnvm_blk_setup);
     if (err) {
+        trace_lnvm_err(req->cqe.cid, "nvme_map", err);
         return err;
     }
 
     if (!LNVM_IS_WRITE(req)) {
         err = nvme_read_predef(req);
         if (err) {
+            trace_lnvm_err(req->cqe.cid, "nvme_read_predef", err);
             return err;
         }
     }
@@ -1877,7 +1832,7 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         req->status = NVME_SUCCESS;
         for (i = 0; i < nr; i++) {
             NvmeBlockBackendRequest *blk_req = nvme_blk_req_new(n, req);
-            slba = lnvm_lba_to_sectr_off(ln, le64_to_cpu(range[i].slba));
+            slba = LNVM_LBA_TO_SECTOR_INDEX(ln, le64_to_cpu(range[i].slba));
             dev_slba = le64_to_cpu(range[i].slba);
             nlb = le32_to_cpu(range[i].nlb);
             if (slba + nlb > le64_to_cpu(ns->id_ns.nsze)) {
@@ -1934,7 +1889,7 @@ static void lnvm_chunk_meta_init(LnvmCtrl *ln, LnvmCS *chunk_meta,
         chunk_meta[i].state = LNVM_CHUNK_FREE;
         chunk_meta[i].type = LNVM_CHUNK_TYPE_SEQ;
         chunk_meta[i].wear_index = 0;
-        chunk_meta[i].slba = lnvm_chunk_no_to_lba(ln, i);
+        chunk_meta[i].slba = LNVM_LBA_FROM_CHUNK_INDEX(ln, i);
         chunk_meta[i].cnlb = ln->params.num_sec;
         chunk_meta[i].wp = 0;
     }
@@ -2256,8 +2211,8 @@ static int set_writefail_sector(char *secinfo, NvmeNamespace *ns)
         return 1;
     }
 
-    lba = lnvm_lba_addr(ch, lun, chk, sec, ln);
-    ns->writefail[lnvm_lba_to_sectr_off(ln, lba)] = writefail_prob;
+    lba = LNVM_LBA(ln, ch, lun, chk, sec);
+    ns->writefail[LNVM_LBA_TO_SECTOR_INDEX(ln, lba)] = writefail_prob;
 
     return 0;
 }
