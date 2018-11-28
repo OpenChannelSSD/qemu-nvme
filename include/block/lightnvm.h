@@ -41,6 +41,7 @@ enum LnvmStatusCodes {
     LNVM_OUT_OF_ORDER_WRITE          = 0x02f2,
     LNVM_OFFLINE_CHUNK               = 0x02c0,
     LNVM_INVALID_RESET               = 0x02c1,
+    LNVM_LBAL_SGL_LENGTH_INVALID     = 0x00c2,
 };
 
 typedef struct LnvmChunkState {

@@ -82,6 +82,8 @@
  *  ldebug                : Enable LightNVM debugging, Default:0 (disabled)
  *  learly_reset          : Allow early resets (reset open chunks),
  *                          Default:1 (enabled)
+ *  lsgl_lbal             : If DPTR is an SGL, interpret LBAL as an SGL too,
+ *                          Default:0 (disabled)
  *
  *
  * The logical block formats all start at 512 byte blocks and double for the
@@ -637,6 +639,12 @@ static uint16_t nvme_map_sgl(NvmeCtrl *n, QEMUSGList *qsg, QEMUIOVector *iov,
 
         if (len == 0) {
             if (!NVME_CTRL_SGLS_EXCESS_LENGTH(n->id_ctrl.sgls)) {
+                if (req->cmb) {
+                    qemu_iovec_destroy(iov);
+                } else {
+                    qemu_sglist_destroy(qsg);
+                }
+
                 return NVME_DATA_SGL_LENGTH_INVALID | NVME_DNR;
             }
 
@@ -1068,26 +1076,28 @@ static uint16_t nvme_dma_read_sgl(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
 {
     QEMUSGList qsg;
     QEMUIOVector iov;
-    uint16_t status = NVME_SUCCESS;
+    uint16_t err = NVME_SUCCESS;
 
-    if (nvme_map_sgl(n, &qsg, &iov, sgl, len, req)) {
-        return NVME_INVALID_FIELD | NVME_DNR;
+    err = nvme_map_sgl(n, &qsg, &iov, sgl, len, req);
+    if (err) {
+        return err;
     }
 
     if (!req->cmb) {
         if (unlikely(dma_buf_read(ptr, len, &qsg))) {
             trace_nvme_err_invalid_dma();
-            status = NVME_INVALID_FIELD | NVME_DNR;
+            err = NVME_INVALID_FIELD | NVME_DNR;
         }
         qemu_sglist_destroy(&qsg);
     } else {
         if (unlikely(qemu_iovec_from_buf(&iov, 0, ptr, len) != len)) {
             trace_nvme_err_invalid_dma();
-            status = NVME_INVALID_FIELD | NVME_DNR;
+            err = NVME_INVALID_FIELD | NVME_DNR;
         }
         qemu_iovec_destroy(&iov);
     }
-    return status;
+
+    return err;
 }
 
 static uint16_t nvme_dma_read(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
@@ -1749,7 +1759,28 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->ns = ns;
 
     if (nlb > 1) {
-        nvme_addr_read(n, lbal, req->lbal, nlb * sizeof(uint64_t));
+        uint32_t len = nlb * sizeof(uint64_t);
+
+        if (cmd->psdt && ln->sgl_lbal) {
+            NvmeSglDescriptor sgl;
+
+            nvme_addr_read(n, lbal, &sgl, sizeof(NvmeSglDescriptor));
+
+            err = nvme_dma_read_sgl(n, (uint8_t *) req->lbal, len, sgl, req);
+            if (err) {
+                if (err & NVME_DATA_SGL_LENGTH_INVALID) {
+                    err &= ~NVME_DATA_SGL_LENGTH_INVALID;
+                    err |= LNVM_LBAL_SGL_LENGTH_INVALID;
+                }
+
+                nvme_set_error_page(n, req->sq->sqid, req->cqe.cid, err,
+                    offsetof(LnvmRwCmd, lbal), 0, req->ns->id);
+
+                return err;
+            }
+        } else {
+            nvme_addr_read(n, lbal, req->lbal, len);
+        }
     } else {
         req->lbal[0] = lbal;
     }
@@ -4167,6 +4198,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_STRING("lwritefail", NvmeCtrl, lnvm_ctrl.writefail_fname),
     DEFINE_PROP_UINT8("ldebug", NvmeCtrl, lnvm_ctrl.debug, 0),
     DEFINE_PROP_UINT8("learly_reset", NvmeCtrl, lnvm_ctrl.early_reset, 1),
+    DEFINE_PROP_UINT8("lsgl_lbal", NvmeCtrl, lnvm_ctrl.sgl_lbal, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
