@@ -37,11 +37,13 @@ enum LnvmChunkTypes {
 };
 
 enum LnvmStatusCodes {
+    LNVM_LBAL_SGL_LENGTH_INVALID     = 0x01c1,
+
+    LNVM_WRITE_NEXT_UNIT             = 0x02f0,
     LNVM_CHUNK_EARLY_CLOSE           = 0x02f1,
     LNVM_OUT_OF_ORDER_WRITE          = 0x02f2,
     LNVM_OFFLINE_CHUNK               = 0x02c0,
     LNVM_INVALID_RESET               = 0x02c1,
-    LNVM_LBAL_SGL_LENGTH_INVALID     = 0x00c2,
 };
 
 typedef struct LnvmChunkState {

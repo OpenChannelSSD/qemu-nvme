@@ -3,52 +3,64 @@
 This repository implements support for exposing an NVMe device that implements
 the Open-Channel 2.0 specification.
 
+**NOTE** This is the CNEX Labs development version of this fork. See
+[OpenChannelSSD/qemu-nvme](https://github.com/OpenChannelSSD/qemu-nvme) for
+upstream. This fork differs from upstream:
+
+-  [x] Upstream QEMU master merged
+-  [x] Support for multiple groups
+-  [x] Support for SGLs
+-  [x] Refactored I/O path (metadata on backend file)
+-  [x] Optional support for chunk early close (`learly_close` parameter)
+-  [x] Support for no metadata (parameter `ms=0`)
+-  [x] Strongly respects the OCSSD 2.0 read/write/reset access rules
+-  [x] Write and reset error injection
+-  [x] Text-based chunktable
+-  [x] Additional tracing (prefixes `nvme` and `lnvm`)
+
+It is the intention to have this merged into upstream qemu-nvme, but there are
+still some rough edges.
+
 ## Compiling & Installing
 
-Below is a minimal example of the installation process for x86_64, kvm-enabled
-emulation using libaio for I/O.
+Below is a minimal example of the installation process for x86_64 into
+`$HOME/qemu-nvme/bin`.
 
-    git clone https://github.com/OpenChannelSSD/qemu-nvme.git
+    git clone https://github.com/CNEX-Labs/qemu-nvme.git
 
     cd qemu-nvme
     ./configure --target-list=x86_64-softmmu --prefix=$HOME/qemu-nvme
     make
     make install
 
-That'll install the OCSSD enabled qemu binary into $HOME/qemu-nvme.
+**NOTE** Consider using the `--enable-trace-backends=log` configure option for
+better debugging.
 
 ## Configuring the virtual open-channel SSD drive
 
 The device must have a backend file to store its data. Create a backend file by
 (e.g., 8GB)
 
-    dd if=/dev/zero of=ocssd_backend.img bs=1M count=8192
+    dd if=/dev/zero of=ocssd.img bs=1M count=8192
 
-The qemu arguments must be extended with:
+To add the OCSSD NVMe device, extend the QEMU arguments with something like:
 
+    -blockdev raw,node-name=nvme01,file.driver=file,file.filename=ocssd.img \
+    -device nvme,drive=nvme01,serial=deadbeef,ms=16,id=lnvm,\
+      lnum_grp=2,lnum_pu=4,lnum_sec=4096,lws_min=4,lws_opt=8,\
+      lchunktable_txt=$HOME/chunktable.txt
 
-    -drive file={path to ocssd backend file},id=myocssd,format=raw,if=none \
-    -device nvme,drive=myocssd,serial=deadbeef,lnum_pu=4,lstrict=1,meta=16,\
-    mc=3,id='lnvm',chunktable_txt=$HOME/chunktable.txt
+Only the number of group, parallel units per group and sectors per chunk are
+configured. The number of chunks per parallel unit is inferred from those
+values to fill out the backend file (with reserved space for internal and
+external metadata).
 
-The full command line could look like the following and creates an ocssd with 4
-parallel units:
-
-    $HOME/qemu-nvme/bin/qemu-system-x86_64 \
-        -cpu host -smp 4 -m 4G \
-        -drive file=boot.img,id=bootdrive,format=qcow2,if=none \
-        -device virtio-blk-pci,drive=bootdrive,scsi=off,config-wce=off \
-        -drive file=nvme00.img,if=none,id=nvme00,format=raw \
-        -device nvme,drive=nvme00,serial=deadbeef,lnum_pu=4,lstrict=1,\
-        meta=16,mc=3,id='lnvm',lchunktable_txt=chunktable.txt
+`$HOME/chunktable.txt` is used to store the state of chunks. The file can be
+cleared to "reset" the state of the drive.
 
 A complete list of all options supported by the NVMe device can be found in
-[the source](hw/block/nvme.c#L61) with comments on each option at the top of
-the file and a list of options and their default values toward the bottom of
+[the source](hw/block/nvme.c#L31) with comments on each option at the top of
 the file.
-
-In the virtual machine, make sure to install at least Linux kernel 4.20 or
-latest release candidate.
 
 You probably want to make sure the following options are enabled in the kernel
 you are going to use.
