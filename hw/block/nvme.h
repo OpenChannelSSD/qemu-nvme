@@ -129,10 +129,10 @@ typedef struct NvmeNamespace {
     unsigned long   *uncorrectable;
     uint32_t        id;
     uint64_t        ns_blks;
+    uint64_t        nsze;
     struct {
         uint64_t    data;
         uint64_t    meta;
-        uint64_t    internal;
     } blk_backend;
     LnvmCS          *chunk_meta;
     uint8_t         *resetfail;
@@ -198,6 +198,7 @@ typedef struct NvmeCtrl {
     uint32_t    cmbloc;
     uint8_t     *cmbuf;
     uint64_t    irq_status;
+    uint32_t    sgls;
 
     char            *serial;
     NvmeErrorLog    *elpes;

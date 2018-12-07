@@ -66,7 +66,7 @@
  *                          Default:0
  *  lnum_grp=<int>        : Number of controller group, Default:1
  *  lnum_pu=<int>         : Number of parallel units per group, Default:1
- *  lnum_sec=<int>        : Number of sectors in a chunk, Default:4096
+ *  lnum_sec=<int>        : Number of sectors per chunk, Default:4096
  *  lsec_size             : Sector size, Default:4096
  *  lws_min=<int>         : Mininum write size for device in sectors,
  *                          Default:4
@@ -159,11 +159,13 @@
             " in %s: " fmt "\n", __func__, ## __VA_ARGS__); \
     } while (0)
 
-#define NVME_NS_LBADS(ns)                                                     \
+#define NVME_ID_NS_LBADS(ns)                                                  \
     ((ns)->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX((ns)->id_ns.flbas)].lbads)
 
-#define NVME_NS_MS(ns)                                                        \
-    ((ns)->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX((ns)->id_ns.flbas)].ms)
+#define NVME_ID_NS_MS(ns)                                                     \
+    le16_to_cpu(                                                              \
+        ((ns)->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX((ns)->id_ns.flbas)].ms)      \
+    )
 
 #define NVME_IS_WRITE(req)                                                    \
     ((req)->cmd_opcode == NVME_CMD_WRITE)
@@ -207,10 +209,10 @@
         (idx % (ln)->params.chk_per_lun) << (ln)->lbaf.chk_offset)
 
 #define LNVM_LBA_VALID(ln, lba)                                               \
-    (LNVM_LBA_GET_SECTR(ln, lba) < (ln)->id_ctrl.geo.clba &&                  \
-        LNVM_LBA_GET_CHUNK(ln, lba) < (ln)->id_ctrl.geo.num_chk &&            \
-        LNVM_LBA_GET_PUNIT(ln, lba) < (ln)->id_ctrl.geo.num_lun &&            \
-        LNVM_LBA_GET_GROUP(ln, lba) < (ln)->id_ctrl.geo.num_grp)
+    (LNVM_LBA_GET_SECTR(ln, lba) < (ln)->params.num_sec &&                    \
+        LNVM_LBA_GET_CHUNK(ln, lba) < (ln)->params.num_chk &&                 \
+        LNVM_LBA_GET_PUNIT(ln, lba) < (ln)->params.num_lun &&                 \
+        LNVM_LBA_GET_GROUP(ln, lba) < (ln)->params.num_grp)
 
 #define LNVM_LBA_FORMAT_TEMPLATE \
     "lba 0xffffffffffffffff pugrp 255 punit 255 chunk 65535 sectr 4294967295"
@@ -638,7 +640,7 @@ static uint16_t nvme_map_sgl(NvmeCtrl *n, QEMUSGList *qsg, QEMUIOVector *iov,
         uint32_t trans_len;
 
         if (len == 0) {
-            if (!NVME_CTRL_SGLS_EXCESS_LENGTH(n->id_ctrl.sgls)) {
+            if (!NVME_CTRL_SGLS_EXCESS_LENGTH(n->sgls)) {
                 if (req->cmb) {
                     qemu_iovec_destroy(iov);
                 } else {
@@ -919,8 +921,8 @@ static uint16_t nvme_map(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req,
     QEMUIOVector iov;
     NvmeSglDescriptor sgl;
 
-    uint32_t len = req->nlb * (1 << NVME_NS_LBADS(ns));
-    uint32_t meta_len = req->nlb * NVME_NS_MS(ns);
+    uint32_t len = req->nlb * (1 << NVME_ID_NS_LBADS(ns));
+    uint32_t meta_len = req->nlb * NVME_ID_NS_MS(ns);
 
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp.prp2);
@@ -941,7 +943,7 @@ static uint16_t nvme_map(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req,
         }
     }
 
-    blk_setup(n, &qsg, &iov, ns->blk_backend.data, 1 << NVME_NS_LBADS(ns),
+    blk_setup(n, &qsg, &iov, ns->blk_backend.data, 1 << NVME_ID_NS_LBADS(ns),
         req);
 
     qemu_sglist_reset(&qsg);
@@ -969,7 +971,7 @@ static uint16_t nvme_map(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req,
             nvme_map_add(n, &qsg, &iov, le64_to_cpu(cmd->mptr), meta_len, req);
         }
 
-        blk_setup(n, &qsg, &iov, ns->blk_backend.meta, NVME_NS_MS(ns), req);
+        blk_setup(n, &qsg, &iov, ns->blk_backend.meta, NVME_ID_NS_MS(ns), req);
     }
 
     return NVME_SUCCESS;
@@ -1321,8 +1323,7 @@ static void nvme_rw_cb(void *opaque, int ret)
     nvme_blk_req_destroy(blk_req);
 }
 
-static uint16_t nvme_flush(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
+static uint16_t nvme_flush(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     NvmeBlockBackendRequest *blk_req = nvme_blk_req_new(n, req);
 
@@ -1333,20 +1334,18 @@ static uint16_t nvme_flush(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_NO_COMPLETE;
 }
 
-static uint16_t nvme_write_zeros(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
+static uint16_t nvme_write_zeros(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     NvmeBlockBackendRequest *blk_req;
-    const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
+    const uint8_t lbads = NVME_ID_NS_LBADS(req->ns);
     uint64_t slba = le64_to_cpu(rw->slba);
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
-    uint64_t data_offset = slba << data_shift;
-    uint32_t data_count = nlb << data_shift;
+    uint64_t data_offset = slba << lbads;
+    uint32_t data_count = nlb << lbads;
 
-    if (unlikely(slba + nlb > ns->id_ns.nsze)) {
-        trace_nvme_err_invalid_lba_range(slba, nlb, ns->id_ns.nsze);
+    if (unlikely(slba + nlb > req->ns->nsze)) {
+        trace_nvme_err_invalid_lba_range(slba, nlb, req->ns->nsze);
         return NVME_LBA_RANGE | NVME_DNR;
     }
 
@@ -1366,9 +1365,9 @@ static uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req,
 {
     NvmeNamespace *ns = req->ns;
 
-    uint32_t data_size = req->nlb << NVME_NS_LBADS(ns);
+    uint32_t data_size = req->nlb << NVME_ID_NS_LBADS(ns);
 
-    if (n->id_ctrl.mdts && data_size > n->page_size * (1 << n->id_ctrl.mdts)) {
+    if (n->mdts && data_size > n->page_size * (1 << n->mdts)) {
         trace_nvme_err_invalid_field(req->cqe.cid, "NLB", "MDTS exceeded");
         nvme_set_error_page(n, req->sq->sqid, req->cqe.cid, NVME_INVALID_FIELD,
             offsetof(NvmeRwCmd, nlb), req->nlb, ns->id);
@@ -1388,7 +1387,7 @@ static uint16_t lnvm_rw_check_chunk_write(NvmeCtrl *n, NvmeCmd *cmd,
     uint64_t lba, uint32_t ws, NvmeRequest *req)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
-    LnvmIdWrt *wrt = &ln->id_ctrl.wrt;
+    LnvmParams *params = &ln->params;
     NvmeNamespace *ns = req->ns;
     LnvmRwCmd *lrw = (LnvmRwCmd *) cmd;
 
@@ -1399,8 +1398,8 @@ static uint16_t lnvm_rw_check_chunk_write(NvmeCtrl *n, NvmeCmd *cmd,
         return NVME_WRITE_FAULT | NVME_DNR;
     }
 
-    if (ws < wrt->ws_min || (ws % wrt->ws_min) != 0) {
-        trace_lnvm_err_write_constraints(req->cqe.cid, ws, wrt->ws_min);
+    if (ws < params->ws_min || (ws % params->ws_min) != 0) {
+        trace_lnvm_err_write_constraints(req->cqe.cid, ws, params->ws_min);
         nvme_set_error_page(n, req->sq->sqid, req->cqe.cid,
             NVME_INVALID_FIELD, offsetof(LnvmRwCmd, lbal),
             lrw->lbal + req->nlb, req->ns->id);
@@ -1483,7 +1482,7 @@ static uint16_t lnvm_rw_check_chunk_read(NvmeCtrl *n, NvmeCmd *cmd,
     uint8_t state = chunk_meta->state;
 
     uint64_t sectr = LNVM_LBA_GET_SECTR(ln, lba);
-    uint64_t mw_cunits = ln->id_ctrl.wrt.mw_cunits;
+    uint64_t mw_cunits = ln->params.mw_cunits;
     uint64_t wp = chunk_meta->wp;
 
     if (state == LNVM_CHUNK_CLOSED && sectr < wp) {
@@ -1567,7 +1566,7 @@ static uint16_t lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln,
         case LNVM_CHUNK_FREE:
             trace_lnvm_double_reset(req->cqe.cid, lba);
 
-            if (!(ln->id_ctrl.mccap & LNVM_PARAMS_MCCAP_MULTIPLE_RESETS)) {
+            if (!(ln->params.mccap & LNVM_PARAMS_MCCAP_MULTIPLE_RESETS)) {
                 return LNVM_INVALID_RESET | NVME_DNR;
             }
 
@@ -1575,7 +1574,7 @@ static uint16_t lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln,
 
         case LNVM_CHUNK_OPEN:
             trace_lnvm_early_reset(req->cqe.cid, lba, chunk_meta->wp);
-            if (!(ln->id_ctrl.mccap & LNVM_PARAMS_MCCAP_EARLY_RESET)) {
+            if (!(ln->params.mccap & LNVM_PARAMS_MCCAP_EARLY_RESET)) {
                 return LNVM_INVALID_RESET | NVME_DNR;
             }
 
@@ -1662,11 +1661,10 @@ static uint16_t nvme_blk_submit_io(NvmeCtrl *n, NvmeRequest *req)
     return NVME_NO_COMPLETE;
 }
 
-static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
+static uint16_t nvme_rw(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
-    LnvmIdWrt *wrt = &ln->id_ctrl.wrt;
+    LnvmParams *params = &ln->params;
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
 
     uint16_t ctrl = le16_to_cpu(rw->control);
@@ -1679,7 +1677,6 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
-    req->ns = ns;
     req->slba = slba;
     req->predef.lba_or_map = -1;
 
@@ -1690,8 +1687,8 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     switch (rw->opcode) {
     case NVME_CMD_WRITE:
-        if (nlb < wrt->ws_min || nlb % wrt->ws_min != 0) {
-            trace_lnvm_err_write_constraints(req->cqe.cid, nlb, wrt->ws_min);
+        if (nlb < params->ws_min || nlb % params->ws_min != 0) {
+            trace_lnvm_err_write_constraints(req->cqe.cid, nlb, params->ws_min);
             return NVME_INVALID_FIELD | NVME_DNR;
         }
 
@@ -1737,8 +1734,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return nvme_blk_submit_io(n, req);
 }
 
-static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
+static uint16_t lnvm_rw(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
     LnvmRwCmd *lrw = (LnvmRwCmd *)cmd;
@@ -1750,13 +1746,12 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         trace_lnvm_err(req->cqe.cid, "LNVM_CMD_MAX_LBAS exceeded",
             NVME_INVALID_FIELD | NVME_DNR);
         nvme_set_error_page(n, req->sq->sqid, req->cqe.cid, NVME_INVALID_FIELD,
-                offsetof(LnvmRwCmd, lbal), 0, ns->id);
+                offsetof(LnvmRwCmd, lbal), 0, req->ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
     req->predef.lba_or_map = 0;
     req->nlb = nlb;
-    req->ns = ns;
 
     if (nlb > 1) {
         uint32_t len = nlb * sizeof(uint64_t);
@@ -1834,10 +1829,10 @@ static void nvme_discard_cb(void *opaque, int ret)
     nvme_blk_req_destroy(blk_req);
 }
 
-static uint16_t nvme_dsm(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
+static uint16_t nvme_dsm(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
+    NvmeNamespace *ns = req->ns;
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
     uint32_t dw11 = le32_to_cpu(cmd->cdw11);
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp.prp1);
@@ -1966,8 +1961,8 @@ static void lnvm_chunk_meta_save(NvmeNamespace *ns)
 
     for (ch = 0; ch < ln->params.num_grp; ch++) {
         for (lun = 0; lun < ln->params.num_lun; lun++) {
-            for (chk = 0; chk < ln->id_ctrl.geo.num_chk; chk++) {
-                index = ln->id_ctrl.geo.num_chk *
+            for (chk = 0; chk < ln->params.num_chk; chk++) {
+                index = ln->params.num_chk *
                     (ch * ln->params.num_lun + lun) + chk;
                 ret = fprintf(fp, "grp=%d pu=%d chk=%d state=%s wp=%lu "
                                   "type=W_SEQ wi=%d\n",
@@ -2064,7 +2059,7 @@ static int get_chunk_meta_index(unsigned int grp, unsigned int lun,
 {
     struct LnvmCtrl *ln = &ns->ctrl->lnvm_ctrl;
 
-    if (chk >= ln->id_ctrl.geo.num_chk) {
+    if (chk >= ln->params.num_chk) {
         return -1;
     }
 
@@ -2076,7 +2071,7 @@ static int get_chunk_meta_index(unsigned int grp, unsigned int lun,
         return -1;
     }
 
-    return ln->id_ctrl.geo.num_chk * (grp * ln->params.num_lun + lun) + chk;
+    return ln->params.num_chk * (grp * ln->params.num_lun + lun) + chk;
 }
 
 static int update_chunk(char *chunkinfo, NvmeNamespace *ns)
@@ -2230,7 +2225,7 @@ static int set_writefail_sector(char *secinfo, NvmeNamespace *ns)
         return 1;
     }
 
-    if (sec >= ln->id_ctrl.geo.clba) {
+    if (sec >= ln->params.num_sec) {
         return 1;
     }
 
@@ -2274,8 +2269,7 @@ static int lnvm_writefail_load(NvmeNamespace *ns)
     return 0;
 }
 
-static uint16_t lnvm_erase(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
+static uint16_t lnvm_erase(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
     LnvmRwCmd *dm = (LnvmRwCmd *)cmd;
@@ -2292,10 +2286,9 @@ static uint16_t lnvm_erase(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
-    req->ns = ns;
 
     for (i = 0; i < nlb; i++) {
-        int err = lnvm_chunk_set_free(ns, ln, req->lbal[i], mptr, req);
+        int err = lnvm_chunk_set_free(req->ns, ln, req->lbal[i], mptr, req);
         if (err) {
             return err;
         }
@@ -2309,7 +2302,6 @@ static uint16_t lnvm_erase(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
 static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
-    NvmeNamespace *ns;
     uint32_t nsid = le32_to_cpu(cmd->nsid);
 
     if (unlikely(nsid == 0 || nsid > n->num_namespaces)) {
@@ -2317,28 +2309,29 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_NSID | NVME_DNR;
     }
 
-    ns = &n->namespaces[nsid - 1];
+    req->ns = &n->namespaces[nsid - 1];
+
     switch (cmd->opcode) {
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
-        return nvme_rw(n, ns, cmd, req);
+        return nvme_rw(n, cmd, req);
     case LNVM_CMD_VECT_READ:
     case LNVM_CMD_VECT_WRITE:
-        return lnvm_rw(n, ns, cmd, req);
+        return lnvm_rw(n, cmd, req);
     case NVME_CMD_FLUSH:
-        if (!n->id_ctrl.vwc || !n->features.volatile_wc) {
+        if (!n->vwc || !n->features.volatile_wc) {
             return NVME_SUCCESS;
         }
-        return nvme_flush(n, ns, cmd, req);
+        return nvme_flush(n, cmd, req);
     case NVME_CMD_WRITE_ZEROS:
-        return nvme_write_zeros(n, ns, cmd, req);
+        return nvme_write_zeros(n, cmd, req);
     case NVME_CMD_DSM:
         if (NVME_ONCS_DSM & n->oncs) {
-            return nvme_dsm(n, ns, cmd, req);
+            return nvme_dsm(n, cmd, req);
         }
         return NVME_INVALID_OPCODE | NVME_DNR;
     case LNVM_CMD_VECT_ERASE:
-        return lnvm_erase(n, ns, cmd, req);
+        return lnvm_erase(n, cmd, req);
     default:
         trace_nvme_err_invalid_opc(cmd->opcode);
         return NVME_INVALID_OPCODE | NVME_DNR;
@@ -2824,10 +2817,11 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
     return nvme_dma_read(n, (uint8_t *)&smart, trans_len, cmd, req);
 }
 
-static uint16_t lnvm_report_chunk(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    uint32_t buf_len, uint64_t off, NvmeRequest *req)
+static uint16_t lnvm_report_chunk(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+    uint64_t off, NvmeRequest *req)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
+    NvmeNamespace *ns;
     uint8_t *log_page;
     uint32_t log_len, trans_len;
     uint32_t nsid;
@@ -2845,8 +2839,7 @@ static uint16_t lnvm_report_chunk(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return nvme_dma_read(n, log_page, trans_len, cmd, req);
 }
 
-static uint16_t nvme_get_log(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
-    NvmeRequest *req)
+static uint16_t nvme_get_log(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
     uint32_t dw11 = le32_to_cpu(cmd->cdw11);
@@ -2873,7 +2866,7 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     case NVME_LOG_FW_SLOT_INFO:
         return nvme_fw_log_info(n, cmd, len, req);
     case LNVM_REPORT_CHUNK:
-        return lnvm_report_chunk(n, ns, cmd, len, off, req);
+        return lnvm_report_chunk(n, cmd, len, off, req);
     default:
         return NVME_INVALID_LOG_ID | NVME_DNR;
     }
@@ -2952,14 +2945,9 @@ static uint16_t nvme_abort_req(NvmeCtrl *n, NvmeCmd *cmd, uint32_t *result)
     return NVME_SUCCESS;
 }
 
-static uint64_t ns_calc_blks(NvmeNamespace *ns, uint8_t lba_idx)
+static uint64_t ns_calc_blks(NvmeCtrl *n, NvmeNamespace *ns)
 {
-    NvmeCtrl *n = ns->ctrl;
-    NvmeIdNs *id_ns = &ns->id_ns;
-    uint32_t lbads = (1 << id_ns->lbaf[lba_idx].lbads);
-    uint32_t ms = id_ns->lbaf[lba_idx].ms;
-
-    return n->ns_size / (lbads + ms);
+    return n->ns_size / ((1 << NVME_ID_NS_LBADS(ns)) + NVME_ID_NS_MS(ns));
 }
 
 static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
@@ -3006,7 +2994,7 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
 
     ns->id_ns.flbas = lba_idx | meta_loc;
     ns->id_ns.dps = pil | pi;
-    ns->ns_blks = ns_calc_blks(ns, lba_idx);
+    ns->ns_blks = ns_calc_blks(ns->ctrl, ns);
     nvme_partition_ns(ns, lba_idx);
     if (sec_erase) {
         /* TODO: write zeros, complete asynchronously */;
@@ -3173,7 +3161,7 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     case NVME_ADM_CMD_GET_FEATURES:
         return nvme_get_feature(n, cmd, req);
     case NVME_ADM_CMD_GET_LOG_PAGE:
-        return nvme_get_log(n, req->ns, cmd, req);
+        return nvme_get_log(n, cmd, req);
     case NVME_ADM_CMD_ASYNC_EV_REQ:
         return nvme_async_req(n, cmd, req);
     case NVME_ADM_CMD_ABORT:
@@ -3740,18 +3728,16 @@ static void nvme_init_namespaces(NvmeCtrl *n)
     LnvmCtrl *ln = &n->lnvm_ctrl;
 
     for (i = 0; i < n->num_namespaces; i++) {
-        int lba_index;
         NvmeNamespace *ns = &n->namespaces[i];
         NvmeIdNs *id_ns = &ns->id_ns;
 
-        id_ns->nsfeat = 0x4; // support DULBE
+        id_ns->nsfeat = 0x4;
         id_ns->nlbaf = n->nlbaf - 1;
         id_ns->flbas = n->lba_index | (n->extended << 4);
         id_ns->mc = n->mc;
         id_ns->dpc = n->dpc;
         id_ns->dps = n->dps;
-        id_ns->dlfeat = 0x1; // predefined data (and metadata) is set to 0x00
-
+        id_ns->dlfeat = 0x1;
         id_ns->vs[0] = 0x1;
 
         ns->id = i + 1;
@@ -3762,8 +3748,7 @@ static void nvme_init_namespaces(NvmeCtrl *n)
             id_ns->lbaf[j].ms = cpu_to_le16(n->ms);
         }
 
-        lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-        ns->ns_blks = ns_calc_blks(ns, lba_index);
+        ns->ns_blks = ns_calc_blks(n, ns);
         id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(ns->ns_blks);
 
         ns->blk_backend.data = i * n->ns_size;
@@ -3785,51 +3770,54 @@ static void nvme_free_namespace(NvmeNamespace *ns) {
 
 static int lnvm_init(NvmeCtrl *n, Error **errp)
 {
-    LnvmCtrl *ln;
-    LnvmIdGeo *geo;
-    LnvmIdPerf *perf;
-    LnvmIdWrt *wrt;
+    LnvmCtrl *ln = &n->lnvm_ctrl;
+    LnvmParams *params = &ln->params;
+
+    LnvmIdCtrl *id_ctrl = &ln->id_ctrl;
+    LnvmIdGeo *id_geo = &ln->id_ctrl.geo;
+    LnvmIdWrt *id_wrt = &ln->id_ctrl.wrt;
+    LnvmIdPerf *id_perf = &ln->id_ctrl.perf;
+
+    LnvmAddrF *lbaf = &ln->lbaf;
+
     NvmeNamespace *ns;
     NvmeIdNs *id_ns;
-    unsigned int i;
+
     uint64_t max_chks;
     int ret = 0;
 
-    ln = &n->lnvm_ctrl;
-
-    for (i = 0; i < n->num_namespaces; i++) {
+    for (unsigned int i = 0; i < n->num_namespaces; i++) {
         ns = &n->namespaces[i];
         ns->ctrl = n;
         id_ns = &ns->id_ns;
-        max_chks = ns->ns_blks / ln->params.num_sec;
+        max_chks = ns->ns_blks / params->num_sec;
 
         ln->id_ctrl.ver.major = 0x2;
         ln->id_ctrl.ver.minor = 0x0;
 
-        ln->id_ctrl.mccap = cpu_to_le32(ln->params.mccap);
-
         if (ln->early_reset) {
-            ln->id_ctrl.mccap |= LNVM_PARAMS_MCCAP_EARLY_RESET;
+            params->mccap |= LNVM_PARAMS_MCCAP_EARLY_RESET;
         }
 
-        geo = &ln->id_ctrl.geo;
-        geo->num_grp = cpu_to_le16(ln->params.num_grp);
-        geo->num_lun = cpu_to_le16(ln->params.num_lun);
-        geo->num_chk = cpu_to_le32(max_chks / (ln->params.num_lun * ln->params.num_grp));
-        geo->clba = cpu_to_le32(ln->params.num_sec);
+        ln->id_ctrl.mccap = cpu_to_le32(params->mccap);
 
-        wrt = &ln->id_ctrl.wrt;
-        wrt->ws_min = cpu_to_le32(ln->params.ws_min);
-        wrt->ws_opt = cpu_to_le32(ln->params.ws_opt);
-        wrt->mw_cunits = cpu_to_le32(ln->params.mw_cunits);
+        ln->params.num_chk = max_chks / (params->num_lun * params->num_grp);
 
-        perf = &ln->id_ctrl.perf;
-        perf->trdt = cpu_to_le32(70000);
-        perf->trdm = cpu_to_le32(100000);
-        perf->tprt = cpu_to_le32(1900000);
-        perf->tprm = cpu_to_le32(3500000);
-        perf->tbet = cpu_to_le32(3000000);
-        perf->tbem = cpu_to_le32(3000000);
+        id_geo->num_grp = cpu_to_le16(params->num_grp);
+        id_geo->num_lun = cpu_to_le16(params->num_lun);
+        id_geo->num_chk = cpu_to_le32(params->num_chk);
+        id_geo->clba = cpu_to_le32(params->num_sec);
+
+        id_wrt->ws_min = cpu_to_le32(params->ws_min);
+        id_wrt->ws_opt = cpu_to_le32(params->ws_opt);
+        id_wrt->mw_cunits = cpu_to_le32(params->mw_cunits);
+
+        id_perf->trdt = cpu_to_le32(70000);
+        id_perf->trdm = cpu_to_le32(100000);
+        id_perf->tprt = cpu_to_le32(1900000);
+        id_perf->tprm = cpu_to_le32(3500000);
+        id_perf->tbet = cpu_to_le32(3000000);
+        id_perf->tbem = cpu_to_le32(3000000);
 
         /* We divide the address space linearly to be able to fit into the 4KB
          * sectors in which the nvme driver divides the backend file. We do the
@@ -3848,46 +3836,46 @@ static int lnvm_init(NvmeCtrl *n, Error **errp)
          */
 
         /* calculated values */
-        ln->params.sec_per_lun = ln->params.num_sec * geo->num_chk;
-        ln->params.sec_per_grp = ln->params.sec_per_lun * geo->num_lun;
-        ln->params.total_secs = ln->params.sec_per_grp * geo->num_grp;
-        ln->params.chk_per_lun = geo->num_chk;
-        ln->params.chk_per_grp = ln->params.chk_per_lun * geo->num_lun;
-        ln->params.total_chks = ln->params.chk_per_grp * geo->num_grp;
+        params->sec_per_lun = params->num_sec * params->num_chk;
+        params->sec_per_grp = params->sec_per_lun * params->num_lun;
+        params->total_secs = params->sec_per_grp * params->num_grp;
+        params->chk_per_lun = params->num_chk;
+        params->chk_per_grp = params->chk_per_lun * params->num_lun;
+        params->total_chks = params->chk_per_grp * params->num_grp;
 
         /* Calculated unit values for ordering */
-        ln->params.chk_units = ln->params.num_sec;
-        ln->params.lun_units = ln->params.chk_units * geo->num_chk;
-        ln->params.grp_units = ln->params.lun_units * geo->num_lun;
-        ln->params.total_units = ln->params.grp_units * geo->num_grp;
+        params->chk_units = params->num_sec;
+        params->lun_units = params->chk_units * params->num_chk;
+        params->grp_units = params->lun_units * params->num_lun;
+        params->total_units = params->grp_units * params->num_grp;
 
         /* calculate optimal LBAF */
-        ln->id_ctrl.lbaf.sec_len = 32 - clz32(ln->params.num_sec - 1);
-        ln->id_ctrl.lbaf.chk_len = 32 - clz32(geo->num_chk - 1);
-        ln->id_ctrl.lbaf.lun_len = 32 - clz32(ln->params.num_lun - 1);
-        ln->id_ctrl.lbaf.grp_len = 32 - clz32(ln->params.num_grp - 1);
+        id_ctrl->lbaf.sec_len = 32 - clz32(params->num_sec - 1);
+        id_ctrl->lbaf.chk_len = 32 - clz32(params->num_chk - 1);
+        id_ctrl->lbaf.lun_len = 32 - clz32(params->num_lun - 1);
+        id_ctrl->lbaf.grp_len = 32 - clz32(params->num_grp - 1);
 
         /* Address format: GRP | LUN | CHK | SEC */
-        ln->lbaf.sec_offset = 0;
-        ln->lbaf.chk_offset = ln->id_ctrl.lbaf.sec_len;
-        ln->lbaf.lun_offset = ln->id_ctrl.lbaf.sec_len + ln->id_ctrl.lbaf.chk_len;
-        ln->lbaf.grp_offset = ln->id_ctrl.lbaf.sec_len +
-                                ln->id_ctrl.lbaf.chk_len +
-                                ln->id_ctrl.lbaf.lun_len;
+        lbaf->sec_offset = 0;
+        lbaf->chk_offset = id_ctrl->lbaf.sec_len;
+        lbaf->lun_offset = id_ctrl->lbaf.sec_len + id_ctrl->lbaf.chk_len;
+        lbaf->grp_offset = id_ctrl->lbaf.sec_len +
+                                id_ctrl->lbaf.chk_len +
+                                id_ctrl->lbaf.lun_len;
 
         /* Address component selection MASK */
-        ln->lbaf.grp_mask = ((1 << ln->id_ctrl.lbaf.grp_len) - 1) <<
-                                                        ln->lbaf.grp_offset;
-        ln->lbaf.lun_mask = ((1 << ln->id_ctrl.lbaf.lun_len) -1) <<
-                                                        ln->lbaf.lun_offset;
-        ln->lbaf.chk_mask = ((1 << ln->id_ctrl.lbaf.chk_len) - 1) <<
-                                                        ln->lbaf.chk_offset;
-        ln->lbaf.sec_mask = ((1 << ln->id_ctrl.lbaf.sec_len) - 1) <<
-                                                        ln->lbaf.sec_offset;
+        lbaf->grp_mask = ((1 << id_ctrl->lbaf.grp_len) - 1) <<
+                                                        lbaf->grp_offset;
+        lbaf->lun_mask = ((1 << id_ctrl->lbaf.lun_len) - 1) <<
+                                                        lbaf->lun_offset;
+        lbaf->chk_mask = ((1 << id_ctrl->lbaf.chk_len) - 1) <<
+                                                        lbaf->chk_offset;
+        lbaf->sec_mask = ((1 << id_ctrl->lbaf.sec_len) - 1) <<
+                                                        lbaf->sec_offset;
 
         id_ns->nuse = id_ns->ncap = id_ns->nsze =
-            1ULL << (ln->id_ctrl.lbaf.sec_len + ln->id_ctrl.lbaf.chk_len +
-            ln->id_ctrl.lbaf.lun_len + ln->id_ctrl.lbaf.grp_len);
+            1ULL << (id_ctrl->lbaf.sec_len + id_ctrl->lbaf.chk_len +
+            id_ctrl->lbaf.lun_len + id_ctrl->lbaf.grp_len);
 
         ns->chunk_meta = g_malloc0(ln->params.total_chks * sizeof(LnvmCS));
         if (!ns->chunk_meta)
@@ -3953,6 +3941,12 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     NvmeIdCtrl *id = &n->id_ctrl;
     uint8_t *pci_conf = n->parent_obj.config;
 
+    /**
+     * Support SGLs with no alignment nor granularity requirement for Data
+     * Blocks. Support SGLs for MPTR.
+     */
+    n->sgls = 0x80001;
+
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
     strpadcpy((char *)id->mn, sizeof(id->mn), "QEMU NVMe OCSSD Ctrl", ' ');
@@ -3980,7 +3974,7 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     id->vwc = n->vwc;
     id->awun = cpu_to_le16(0);
     id->awupf = cpu_to_le16(0);
-    id->sgls = cpu_to_le32(1 + (1 << 19)); // support SGLs for data and meta
+    id->sgls = cpu_to_le32(n->sgls);
     id->psd[0].mp = cpu_to_le16(0x9c4);
     id->psd[0].enlat = cpu_to_le32(0x10);
     id->psd[0].exlat = cpu_to_le32(0x4);
@@ -4189,8 +4183,8 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT32("lws_min", NvmeCtrl, lnvm_ctrl.params.ws_min, 4),
     DEFINE_PROP_UINT32("lws_opt", NvmeCtrl, lnvm_ctrl.params.ws_opt, 8),
     DEFINE_PROP_UINT32("lmw_cunits", NvmeCtrl, lnvm_ctrl.params.mw_cunits, 32),
-    DEFINE_PROP_UINT32("lnum_grp", NvmeCtrl, lnvm_ctrl.params.num_grp, 1),
-    DEFINE_PROP_UINT32("lnum_pu", NvmeCtrl, lnvm_ctrl.params.num_lun, 1),
+    DEFINE_PROP_UINT16("lnum_grp", NvmeCtrl, lnvm_ctrl.params.num_grp, 1),
+    DEFINE_PROP_UINT16("lnum_pu", NvmeCtrl, lnvm_ctrl.params.num_lun, 1),
     DEFINE_PROP_UINT32("lnum_sec", NvmeCtrl, lnvm_ctrl.params.num_sec, 4096),
     DEFINE_PROP_UINT32("lsec_size", NvmeCtrl, lnvm_ctrl.params.sec_size, 4096),
     DEFINE_PROP_STRING("lchunktable_txt", NvmeCtrl, lnvm_ctrl.chunk_fname),

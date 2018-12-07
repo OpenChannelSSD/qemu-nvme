@@ -152,8 +152,9 @@ typedef struct LnvmParams {
     uint32_t mccap;
 
     /* configurable parameters for LnvmIdGroup */
-    uint32_t num_grp;
-    uint32_t num_lun;
+    uint16_t num_grp;
+    uint16_t num_lun;
+    uint32_t num_chk;
     uint32_t num_sec;
     uint32_t ws_min;
     uint32_t ws_opt;

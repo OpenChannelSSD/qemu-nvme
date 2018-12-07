@@ -47,7 +47,7 @@ To add the OCSSD NVMe device, extend the QEMU arguments with something like:
 
     -blockdev raw,node-name=nvme01,file.driver=file,file.filename=ocssd.img \
     -device nvme,drive=nvme01,serial=deadbeef,ms=16,id=lnvm,\
-      lnum_grp=2,lnum_pu=4,lnum_sec=4096,lws_min=4,lws_opt=8,\
+      lnum_grp=2,lnum_pu=4,lclba=4096,lws_min=4,lws_opt=8,\
       lchunktable_txt=$HOME/chunktable.txt
 
 Only the number of group, parallel units per group and sectors per chunk are
