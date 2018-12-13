@@ -499,6 +499,7 @@ enum NvmeStatusCodes {
     NVME_DATA_SGL_LENGTH_INVALID     = 0x000f,
     NVME_METADATA_SGL_LENGTH_INVALID = 0x0010,
     NVME_SGL_DESCRIPTOR_TYPE_INVALID = 0x0011,
+    NVME_INVALID_USE_OF_CMB          = 0x0012,
     NVME_LBA_RANGE                   = 0x0080,
     NVME_CAP_EXCEEDED                = 0x0081,
     NVME_NS_NOT_READY                = 0x0082,

@@ -65,7 +65,6 @@ typedef struct NvmeRequest {
         uint64_t lba_or_map;
 
         QEMUSGList   qsg;
-        QEMUIOVector iov;
     } predef;
 
     QTAILQ_ENTRY(NvmeRequest) entry;
