@@ -57,6 +57,7 @@
  *  dps=<int>             : Data protection settings, Default:0
  *  mc=<int>              : Meta-data capabilities, Default:2
  *  ms=<int>              : Meta-data size in bytes, Default:16
+ *  dlfeat=<int>          : Control DLFEAT, Default:0x1
  *  oncs=<oncs>           : Optional NVMe command support, Default:DSM
  *  oacs=<oacs>           : Optional Admin command support, Default:Format
  *
@@ -150,7 +151,6 @@
 #define NVME_SPARE_THRESHOLD    20
 #define NVME_TEMPERATURE        0x143
 #define NVME_OP_ABORTED         0xff
-#define NVME_DLFEAT_VAL         0x00
 
 #define NVME_GUEST_ERR(trace, fmt, ...) \
     do { \
@@ -682,117 +682,135 @@ static uint16_t nvme_map_sgl(NvmeCtrl *n, QEMUSGList *qsg,
     return NVME_SUCCESS;
 }
 
-static void nvme_blk_setup(NvmeCtrl *n, QEMUSGList *qsg,
+static uint16_t nvme_blk_setup(NvmeCtrl *n, QEMUSGList *qsg,
     uint64_t blk_offset, uint32_t unit_len, NvmeRequest *req)
 {
-    size_t split, tlen = 0;
-    NvmeBlockBackendRequest *blk_req = nvme_blk_req_new(n, req);
+    NvmeNamespace *ns = req->ns;
+    NvmeBlockBackendRequest *blk_req, *blk_req_predef;
+    size_t curr_offset = 0;
+    int curr_sge = 0;
+
     uint64_t soffset = LNVM_LBA_TO_SECTOR_INDEX(&n->lnvm_ctrl, req->slba);
+
+    if (NULL == (blk_req = nvme_blk_req_new(n, req))) {
+        return NVME_INTERNAL_DEV_ERROR;
+    }
 
     blk_req->slba = req->slba;
     blk_req->nlb = req->nlb;
     blk_req->blk_offset = blk_offset + soffset * unit_len;
 
     if (NVME_IS_WRITE(req) || req->predef.lba_or_map == -1) {
-        blk_req->qsg.nalloc = qsg->nsg;
-        blk_req->qsg.nsg = qsg->nsg;
-        blk_req->qsg.size = qsg->size;
+        ScatterGatherEntry *tmp;
 
-        blk_req->qsg.sg = g_realloc(blk_req->qsg.sg,
-            blk_req->qsg.nalloc * sizeof(ScatterGatherEntry));
+        if (blk_req->qsg.nalloc < qsg->nsg) {
+            tmp = g_realloc(blk_req->qsg.sg,
+                qsg->nalloc * sizeof(ScatterGatherEntry));
+            if (!tmp) {
+                nvme_blk_req_destroy(blk_req);
+                return NVME_INTERNAL_DEV_ERROR;
+            }
+
+            blk_req->qsg.sg = tmp;
+        }
+
         memcpy(blk_req->qsg.sg, qsg->sg,
             qsg->nsg * sizeof(ScatterGatherEntry));
+
+        blk_req->qsg.nalloc = qsg->nalloc;
+        blk_req->qsg.nsg = qsg->nsg;
+        blk_req->qsg.size = qsg->size;
 
         goto out;
     }
 
-    split = req->predef.lba_or_map * unit_len;
+    blk_req->nlb = req->predef.lba_or_map - req->slba;
+    qemu_sglist_yank(qsg, &blk_req->qsg, &curr_sge, &curr_offset,
+        blk_req->nlb * unit_len);
 
-    for (int i = 0; i < qsg->nsg; i++) {
-        if (tlen + qsg->sg[i].len > split) {
-            size_t r = qsg->sg[i].len - split;
-            qsg->sg[i].len -= r;
-
-            pci_dma_sglist_init(&req->predef.qsg, &n->parent_obj,
-                qsg->nsg - i);
-            qemu_sglist_add(&req->predef.qsg, qsg->sg[i].base + qsg->sg[i].len,
-                r);
-
-            for (i = i + 1; i < qsg->nsg; i++) {
-                qemu_sglist_add(&req->predef.qsg, qsg->sg[i].base,
-                    qsg->sg[i].len);
+    if (ns->id_ns.dlfeat) {
+        for (uint16_t i = 0; i < (req->nlb - blk_req->nlb); i++) {
+            if (NULL == (blk_req_predef = nvme_blk_req_new(n, req))) {
+                return NVME_INTERNAL_DEV_ERROR;
             }
 
-            break;
+            blk_req_predef->slba = req->predef.lba_or_map + i;
+            blk_req_predef->nlb = 1;
+            blk_req_predef->blk_offset = ns->blk_backend.predef;
+
+            qemu_sglist_yank(qsg, &blk_req_predef->qsg, &curr_sge,
+                &curr_offset, unit_len);
+
+            QTAILQ_INSERT_TAIL(&req->blk_req_tailq_head, blk_req_predef,
+                blk_req_tailq);
         }
-
-        qemu_sglist_add(&blk_req->qsg, qsg->sg[i].base, qsg->sg[i].len);
-
-        tlen += qsg->sg[i].len;
     }
 
 out:
     QTAILQ_INSERT_TAIL(&req->blk_req_tailq_head, blk_req, blk_req_tailq);
+
+    return NVME_SUCCESS;
 }
 
-static void lnvm_blk_setup(NvmeCtrl *n, QEMUSGList *qsg, uint64_t blk_offset,
+static uint16_t lnvm_blk_setup(NvmeCtrl *n, QEMUSGList *qsg, uint64_t blk_offset,
     uint32_t unit_len, NvmeRequest *req)
 {
     LnvmCtrl *ln = &n->lnvm_ctrl;
+    NvmeNamespace *ns = req->ns;
     NvmeBlockBackendRequest *blk_req = NULL;
-    QEMUSGList *qsg_tmp;
-    size_t len, curr_byte = 0;
-    dma_addr_t curr_addr, curr_len;
+    size_t curr_byte = 0;
+    uint64_t last_lba;
     int curr_sge = 0;
-
-    if (req->predef.lba_or_map) {
-        pci_dma_sglist_init(&req->predef.qsg, &n->parent_obj, 1);
-    }
 
     for (uint16_t i = 0; i < req->nlb; i++) {
         if (!LNVM_IS_WRITE(req) && req->predef.lba_or_map & (1 << i)) {
-            qsg_tmp = &req->predef.qsg;
-        } else {
-            uint64_t soffset = LNVM_LBA_TO_SECTOR_INDEX(ln, req->lbal[i]);
-            uint64_t offset = blk_offset + soffset * unit_len;
+            /* skip block request if dlfeat is 0x00 (predefined data not
+               reported) */
+            if (ns->id_ns.dlfeat) {
+                if (NULL == (blk_req = nvme_blk_req_new(n, req))) {
+                    return NVME_INTERNAL_DEV_ERROR;
+                }
 
+                blk_req->blk_offset = ns->blk_backend.predef;
+                blk_req->slba = req->lbal[i];
+
+                QTAILQ_INSERT_TAIL(&req->blk_req_tailq_head, blk_req,
+                    blk_req_tailq);
+            } else {
+                blk_req = NULL;
+            }
+        } else {
             // add a new block backend request if non-contiguous
-            if (!blk_req || (i > 0 && req->lbal[i] != req->lbal[i-1] + 1)) {
-                blk_req = nvme_blk_req_new(n, req);
+            if (!blk_req || (i > 0 && last_lba + 1 != req->lbal[i])) {
+                uint64_t soffset = LNVM_LBA_TO_SECTOR_INDEX(ln, req->lbal[i]);
+                uint64_t offset = blk_offset + soffset * unit_len;
+
+                if (NULL == (blk_req = nvme_blk_req_new(n, req))) {
+                    return NVME_INTERNAL_DEV_ERROR;
+                }
+
                 blk_req->blk_offset = offset;
                 blk_req->slba = req->lbal[i];
 
                 QTAILQ_INSERT_TAIL(&req->blk_req_tailq_head, blk_req,
                     blk_req_tailq);
             }
+        }
+
+        if (blk_req) {
+            last_lba = blk_req->slba + blk_req->nlb;
 
             blk_req->nlb++;
-
-            qsg_tmp = &blk_req->qsg;
         }
 
-        len = unit_len;
-
-        while (len) {
-            curr_addr = qsg->sg[curr_sge].base + curr_byte;
-            curr_len = qsg->sg[curr_sge].len - curr_byte;
-
-            curr_len = MIN(curr_len, len);
-
-            qemu_sglist_add(qsg_tmp, curr_addr, curr_len);
-
-            curr_byte += curr_len;
-            len -= curr_len;
-
-            if (curr_byte == qsg->sg[curr_sge].len) {
-                curr_byte = 0;
-                curr_sge++;
-            }
-        }
+        qemu_sglist_yank(qsg, blk_req ? &blk_req->qsg : NULL, &curr_sge,
+            &curr_byte, unit_len);
     }
+
+    return NVME_SUCCESS;
 }
 
-typedef void (*NvmeBlockSetupFn)(NvmeCtrl *n, QEMUSGList *qsg,
+typedef uint16_t (*NvmeBlockSetupFn)(NvmeCtrl *n, QEMUSGList *qsg,
     uint64_t blk_offset, uint32_t unit_len, NvmeRequest *req);
 
 static uint16_t nvme_blk_map(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req,
@@ -804,8 +822,10 @@ static uint16_t nvme_blk_map(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req,
     QEMUSGList qsg;
     NvmeSglDescriptor sgl;
 
-    uint32_t len = req->nlb * (1 << NVME_ID_NS_LBADS(ns));
-    uint32_t meta_len = req->nlb * NVME_ID_NS_MS(ns);
+    uint32_t unit_len = 1 << NVME_ID_NS_LBADS(ns);
+    uint32_t len = req->nlb * unit_len;
+    uint32_t meta_unit_len = NVME_ID_NS_MS(ns);
+    uint32_t meta_len = req->nlb * meta_unit_len;
 
     if (cmd->psdt) {
         err = nvme_map_sgl(n, &qsg, cmd->dptr.sgl, len, req);
@@ -822,11 +842,14 @@ static uint16_t nvme_blk_map(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req,
         if (err) {
             nvme_set_error_page(n, req->sq->sqid, req->cqe.cid, err,
                 offsetof(NvmeRwCmd, dptr.prp.prp1), 0, req->ns->id);
-            return err | NVME_DNR;
+            return err;
         }
     }
 
-    blk_setup(n, &qsg, ns->blk_backend.data, 1 << NVME_ID_NS_LBADS(ns), req);
+    err = blk_setup(n, &qsg, ns->blk_backend.data, unit_len, req);
+    if (err) {
+        return err;
+    }
 
     qemu_sglist_reset(&qsg);
 
@@ -852,7 +875,10 @@ static uint16_t nvme_blk_map(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req,
             qemu_sglist_add(&qsg, le64_to_cpu(cmd->mptr), meta_len);
         }
 
-        blk_setup(n, &qsg, ns->blk_backend.meta, NVME_ID_NS_MS(ns), req);
+        err = blk_setup(n, &qsg, ns->blk_backend.meta, meta_unit_len, req);
+        if (err) {
+            return err;
+        }
     }
 
     return NVME_SUCCESS;
@@ -1523,42 +1549,6 @@ static uint16_t lnvm_chunk_set_free(NvmeNamespace *ns, LnvmCtrl *ln,
     return NVME_DNR | LNVM_OFFLINE_CHUNK;
 }
 
-static uint16_t nvme_read_predef(NvmeCtrl *n, NvmeRequest *req)
-{
-    uint8_t *predef;
-
-    if (!req->predef.qsg.size) {
-        return NVME_SUCCESS;
-    }
-
-    if (NULL == (predef = g_malloc(req->predef.qsg.size))) {
-        return NVME_INVALID_FIELD | NVME_DNR;
-    }
-
-    memset(predef, NVME_DLFEAT_VAL, req->predef.qsg.size);
-
-    if (req->cmb) {
-        QEMUIOVector iov;
-        qemu_iovec_init(&iov, req->predef.qsg.nsg);
-
-        dma_to_cmb(n, &req->predef.qsg, &iov);
-
-        qemu_iovec_from_buf(&iov, 0, predef, iov.size);
-        qemu_iovec_destroy(&iov);
-
-        goto out;
-    }
-
-    QEMUSGList *qsg = &req->predef.qsg;
-    dma_buf_read(predef, qsg->size, qsg);
-    qemu_sglist_destroy(qsg);
-
-out:
-    g_free(predef);
-
-    return NVME_SUCCESS;
-}
-
 static uint16_t nvme_blk_submit_io(NvmeCtrl *n, NvmeRequest *req)
 {
     NvmeBlockBackendRequest *blk_req;
@@ -1638,7 +1628,7 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             err = lnvm_rw_check_chunk_read(n, cmd, req, slba + i);
             if (err) {
                 if (err & NVME_DULB) {
-                    req->predef.lba_or_map = i;
+                    req->predef.lba_or_map = slba + i;
                     if (NVME_ERR_REC_DULBE(n->features.err_rec)) {
                         return NVME_DULB | NVME_DNR;
                     }
@@ -1656,13 +1646,6 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     err = nvme_blk_map(n, cmd, req, nvme_blk_setup);
     if (err) {
         return err;
-    }
-
-    if (!NVME_IS_WRITE(req)) {
-        err = nvme_read_predef(n, req);
-        if (err) {
-            return err;
-        }
     }
 
     return nvme_blk_submit_io(n, req);
@@ -1736,14 +1719,6 @@ static uint16_t lnvm_rw(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     if (err) {
         trace_lnvm_err(req->cqe.cid, "nvme_map", err);
         return err;
-    }
-
-    if (!LNVM_IS_WRITE(req)) {
-        err = nvme_read_predef(n, req);
-        if (err) {
-            trace_lnvm_err(req->cqe.cid, "nvme_read_predef", err);
-            return err;
-        }
     }
 
     return nvme_blk_submit_io(n, req);
@@ -3702,7 +3677,7 @@ static void nvme_init_namespaces(NvmeCtrl *n)
         id_ns->mc = n->mc;
         id_ns->dpc = n->dpc;
         id_ns->dps = n->dps;
-        id_ns->dlfeat = 0x1;
+        id_ns->dlfeat = n->dlfeat;
         id_ns->vs[0] = 0x1;
 
         ns->id = i + 1;
@@ -3713,10 +3688,31 @@ static void nvme_init_namespaces(NvmeCtrl *n)
             id_ns->lbaf[j].ms = cpu_to_le16(n->ms);
         }
 
-        ns->ns_blks = ns_calc_blks(n, ns);
+        // reserve space for one block of predefined data
+        ns->ns_blks = ns_calc_blks(n, ns) - 1;
         id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(ns->ns_blks);
 
-        ns->blk_backend.data = i * n->ns_size;
+        ns->blk_backend.predef = i * n->ns_size;
+
+        uint8_t predef_buf[ln->params.sec_size];
+
+        switch (n->dlfeat) {
+        case 0x2:
+            memset(predef_buf, 0xff, ln->params.sec_size);
+            break;
+
+        case 0x1:
+            memset(predef_buf, 0x00, ln->params.sec_size);
+            break;
+
+        default:
+            break;
+        }
+
+        blk_pwrite(n->conf.blk, ns->blk_backend.predef, predef_buf,
+            ln->params.sec_size, 0);
+
+        ns->blk_backend.data = ns->blk_backend.predef + ln->params.sec_size;
         ns->blk_backend.meta = ns->blk_backend.data +
             ns->ns_blks * ln->params.sec_size;
 
@@ -4139,6 +4135,7 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("dps", NvmeCtrl, dps, 0),
     DEFINE_PROP_UINT8("mc", NvmeCtrl, mc, 2),
     DEFINE_PROP_UINT8("ms", NvmeCtrl, ms, 16),
+    DEFINE_PROP_UINT8("dlfeat", NvmeCtrl, dlfeat, 0x1),
     DEFINE_PROP_UINT32("cmb_size_mb", NvmeCtrl, cmb_size_mb, 0),
     DEFINE_PROP_UINT16("oacs", NvmeCtrl, oacs, NVME_OACS_FORMAT),
     DEFINE_PROP_UINT16("oncs", NvmeCtrl, oncs, NVME_ONCS_DSM),

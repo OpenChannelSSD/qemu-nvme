@@ -61,6 +61,31 @@ void qemu_sglist_add(QEMUSGList *qsg, dma_addr_t base, dma_addr_t len)
     ++qsg->nsg;
 }
 
+void qemu_sglist_yank(QEMUSGList *from, QEMUSGList *to, int *idx,
+                      size_t *offset, size_t len)
+{
+    dma_addr_t curr_addr, curr_len;
+
+    while (len) {
+        curr_addr = from->sg[*idx].base + *offset;
+        curr_len = from->sg[*idx].len - *offset;
+
+        curr_len = MIN(curr_len, len);
+
+        if (to) {
+            qemu_sglist_add(to, curr_addr, curr_len);
+        }
+
+        *offset += curr_len;
+        len -= curr_len;
+
+        if (*offset == from->sg[*idx].len) {
+            *offset = 0;
+            (*idx)++;
+        }
+    }
+}
+
 void qemu_sglist_destroy(QEMUSGList *qsg)
 {
     object_unref(OBJECT(qsg->dev));

@@ -63,8 +63,6 @@ typedef struct NvmeRequest {
          * relative to the start LBA where reads become invalid.
          */
         uint64_t lba_or_map;
-
-        QEMUSGList   qsg;
     } predef;
 
     QTAILQ_ENTRY(NvmeRequest) entry;
@@ -130,9 +128,11 @@ typedef struct NvmeNamespace {
     uint64_t        ns_blks;
     uint64_t        nsze;
     struct {
-        uint64_t    data;
-        uint64_t    meta;
+        uint64_t predef;
+        uint64_t data;
+        uint64_t meta;
     } blk_backend;
+
     LnvmCS          *chunk_meta;
     uint8_t         *resetfail;
     uint8_t         *writefail;
@@ -198,6 +198,7 @@ typedef struct NvmeCtrl {
     uint8_t     *cmbuf;
     uint64_t    irq_status;
     uint32_t    sgls;
+    uint8_t     dlfeat;
 
     char            *serial;
     NvmeErrorLog    *elpes;
