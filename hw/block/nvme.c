@@ -403,14 +403,6 @@ static void nvme_irq_assert(NvmeCtrl *n, NvmeCQueue *cq)
     }
 }
 
-static void nvme_irq_assertx(void *opaque)
-{
-    NvmeCQueue *cq = opaque;
-    NvmeCtrl *n = cq->ctrl;
-
-    nvme_irq_assert(n, cq);
-}
-
 static void nvme_irq_deassert(NvmeCtrl *n, NvmeCQueue *cq)
 {
     if (cq->irq_enabled) {
@@ -2504,7 +2496,7 @@ static uint16_t nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
     cq->eventidx_addr = 0;
     msix_vector_use(&n->parent_obj, cq->vector);
     n->cq[cqid] = cq;
-    cq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_irq_assertx, cq);
+    cq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_post_cqes, cq);
 
     return NVME_SUCCESS;
 }
@@ -3600,6 +3592,16 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data,
     }
 }
 
+static const MemoryRegionOps nvme_mmio_ops = {
+    .read = nvme_mmio_read,
+    .write = nvme_mmio_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = {
+        .min_access_size = 2,
+        .max_access_size = 8,
+    },
+};
+
 static void nvme_cmb_write(void *opaque, hwaddr addr, uint64_t data,
     unsigned size)
 {
@@ -3619,16 +3621,6 @@ static const MemoryRegionOps nvme_cmb_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
     .impl = {
         .min_access_size = 1,
-        .max_access_size = 8,
-    },
-};
-
-static const MemoryRegionOps nvme_mmio_ops = {
-    .read = nvme_mmio_read,
-    .write = nvme_mmio_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .impl = {
-        .min_access_size = 2,
         .max_access_size = 8,
     },
 };
