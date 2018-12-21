@@ -450,7 +450,7 @@ int pci_bus_numa_node(PCIBus *bus)
 }
 
 static int get_pci_config_device(QEMUFile *f, void *pv, size_t size,
-                                 VMStateField *field)
+                                 const VMStateField *field)
 {
     PCIDevice *s = container_of(pv, PCIDevice, config);
     PCIDeviceClass *pc = PCI_DEVICE_GET_CLASS(s);
@@ -490,7 +490,7 @@ static int get_pci_config_device(QEMUFile *f, void *pv, size_t size,
 
 /* just put buffer */
 static int put_pci_config_device(QEMUFile *f, void *pv, size_t size,
-                                 VMStateField *field, QJSON *vmdesc)
+                                 const VMStateField *field, QJSON *vmdesc)
 {
     const uint8_t **v = pv;
     assert(size == pci_config_size(container_of(pv, PCIDevice, config)));
@@ -506,7 +506,7 @@ static VMStateInfo vmstate_info_pci_config = {
 };
 
 static int get_pci_irq_state(QEMUFile *f, void *pv, size_t size,
-                             VMStateField *field)
+                             const VMStateField *field)
 {
     PCIDevice *s = container_of(pv, PCIDevice, irq_state);
     uint32_t irq_state[PCI_NUM_PINS];
@@ -528,7 +528,7 @@ static int get_pci_irq_state(QEMUFile *f, void *pv, size_t size,
 }
 
 static int put_pci_irq_state(QEMUFile *f, void *pv, size_t size,
-                             VMStateField *field, QJSON *vmdesc)
+                             const VMStateField *field, QJSON *vmdesc)
 {
     int i;
     PCIDevice *s = container_of(pv, PCIDevice, irq_state);
@@ -1737,9 +1737,6 @@ static PciDeviceInfo *qmp_query_pci_device(PCIDevice *dev, PCIBus *bus,
     info->id = g_new0(PciDeviceId, 1);
     info->id->vendor = pci_get_word(dev->config + PCI_VENDOR_ID);
     info->id->device = pci_get_word(dev->config + PCI_DEVICE_ID);
-    info->id->subsystem = pci_get_word(dev->config + PCI_SUBSYSTEM_ID);
-    info->id->subsystem_vendor =
-        pci_get_word(dev->config + PCI_SUBSYSTEM_VENDOR_ID);
     info->regions = qmp_query_pci_regions(dev);
     info->qdev_id = g_strdup(dev->qdev.id ? dev->qdev.id : "");
 
@@ -1752,6 +1749,16 @@ static PciDeviceInfo *qmp_query_pci_device(PCIDevice *dev, PCIBus *bus,
     if (type == PCI_HEADER_TYPE_BRIDGE) {
         info->has_pci_bridge = true;
         info->pci_bridge = qmp_query_pci_bridge(dev, bus, bus_num);
+    } else if (type == PCI_HEADER_TYPE_NORMAL) {
+        info->id->has_subsystem = info->id->has_subsystem_vendor = true;
+        info->id->subsystem = pci_get_word(dev->config + PCI_SUBSYSTEM_ID);
+        info->id->subsystem_vendor =
+            pci_get_word(dev->config + PCI_SUBSYSTEM_VENDOR_ID);
+    } else if (type == PCI_HEADER_TYPE_CARDBUS) {
+        info->id->has_subsystem = info->id->has_subsystem_vendor = true;
+        info->id->subsystem = pci_get_word(dev->config + PCI_CB_SUBSYSTEM_ID);
+        info->id->subsystem_vendor =
+            pci_get_word(dev->config + PCI_CB_SUBSYSTEM_VENDOR_ID);
     }
 
     return info;
@@ -2254,7 +2261,11 @@ static void pci_add_option_rom(PCIDevice *pdev, bool is_default_rom,
     pdev->has_rom = true;
     memory_region_init_rom(&pdev->rom, OBJECT(pdev), name, size, &error_fatal);
     ptr = memory_region_get_ram_ptr(&pdev->rom);
-    load_image(path, ptr);
+    if (load_image_size(path, ptr, size) < 0) {
+        error_setg(errp, "failed to load romfile \"%s\"", pdev->romfile);
+        g_free(path);
+        return;
+    }
     g_free(path);
 
     if (is_default_rom) {

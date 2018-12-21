@@ -1143,8 +1143,10 @@
 # This command is now obsolete and will always return an error since 2.10
 #
 ##
-{ 'command': 'block_passwd', 'data': {'*device': 'str',
-                                      '*node-name': 'str', 'password': 'str'} }
+{ 'command': 'block_passwd',
+  'data': { '*device': 'str',
+            '*node-name': 'str',
+            'password': 'str' } }
 
 ##
 # @block_resize:
@@ -1171,9 +1173,10 @@
 # <- { "return": {} }
 #
 ##
-{ 'command': 'block_resize', 'data': { '*device': 'str',
-                                       '*node-name': 'str',
-                                       'size': 'int' }}
+{ 'command': 'block_resize',
+  'data': { '*device': 'str',
+            '*node-name': 'str',
+            'size': 'int' } }
 
 ##
 # @NewImageMode:
@@ -1316,6 +1319,10 @@
 # @speed: the maximum speed, in bytes per second. The default is 0,
 #         for unlimited.
 #
+# @bitmap: the name of dirty bitmap if sync is "incremental".
+#          Must be present if sync is "incremental", must NOT be present
+#          otherwise. (Since 3.1)
+#
 # @compress: true to compress data, if the target format supports it.
 #            (default: false) (since 2.8)
 #
@@ -1348,7 +1355,8 @@
 ##
 { 'struct': 'BlockdevBackup',
   'data': { '*job-id': 'str', 'device': 'str', 'target': 'str',
-            'sync': 'MirrorSyncMode', '*speed': 'int', '*compress': 'bool',
+            'sync': 'MirrorSyncMode', '*speed': 'int',
+            '*bitmap': 'str', '*compress': 'bool',
             '*on-source-error': 'BlockdevOnError',
             '*on-target-error': 'BlockdevOnError',
             '*auto-finalize': 'bool', '*auto-dismiss': 'bool' } }
@@ -2615,7 +2623,9 @@
             'copy-on-read', 'dmg', 'file', 'ftp', 'ftps', 'gluster',
             'host_cdrom', 'host_device', 'http', 'https', 'iscsi', 'luks',
             'nbd', 'nfs', 'null-aio', 'null-co', 'nvme', 'parallels', 'qcow',
-            'qcow2', 'qed', 'quorum', 'raw', 'rbd', 'replication', 'sheepdog',
+            'qcow2', 'qed', 'quorum', 'raw', 'rbd',
+            { 'name': 'replication', 'if': 'defined(CONFIG_REPLICATION)' },
+            'sheepdog',
             'ssh', 'throttle', 'vdi', 'vhdx', 'vmdk', 'vpc', 'vvfat', 'vxhs' ] }
 
 ##
@@ -3372,7 +3382,8 @@
 #
 # Since: 2.9
 ##
-{ 'enum' : 'ReplicationMode', 'data' : [ 'primary', 'secondary' ] }
+{ 'enum' : 'ReplicationMode', 'data' : [ 'primary', 'secondary' ],
+  'if': 'defined(CONFIG_REPLICATION)' }
 
 ##
 # @BlockdevOptionsReplication:
@@ -3390,7 +3401,8 @@
 { 'struct': 'BlockdevOptionsReplication',
   'base': 'BlockdevOptionsGenericFormat',
   'data': { 'mode': 'ReplicationMode',
-            '*top-id': 'str' } }
+            '*top-id': 'str' },
+  'if': 'defined(CONFIG_REPLICATION)' }
 
 ##
 # @NFSTransport:
@@ -3651,6 +3663,12 @@
 #                 either generally or in certain configurations. In this case,
 #                 the default value does not work and the option must be
 #                 specified explicitly.
+# @auto-read-only: if true and @read-only is false, QEMU may automatically
+#                  decide not to open the image read-write as requested, but
+#                  fall back to read-only instead (and switch between the modes
+#                  later), e.g. depending on whether the image file is writable
+#                  or whether a writing user is attached to the node
+#                  (default: false, since 3.1)
 # @detect-zeroes: detect and optimize zero writes (Since 2.1)
 #                 (default: off)
 # @force-share:   force share all permission on added nodes.
@@ -3666,6 +3684,7 @@
             '*discard': 'BlockdevDiscardOptions',
             '*cache': 'BlockdevCacheOptions',
             '*read-only': 'bool',
+            '*auto-read-only': 'bool',
             '*force-share': 'bool',
             '*detect-zeroes': 'BlockdevDetectZeroesOptions' },
   'discriminator': 'driver',
@@ -3699,7 +3718,8 @@
       'quorum':     'BlockdevOptionsQuorum',
       'raw':        'BlockdevOptionsRaw',
       'rbd':        'BlockdevOptionsRbd',
-      'replication':'BlockdevOptionsReplication',
+      'replication': { 'type': 'BlockdevOptionsReplication',
+                       'if': 'defined(CONFIG_REPLICATION)' },
       'sheepdog':   'BlockdevOptionsSheepdog',
       'ssh':        'BlockdevOptionsSsh',
       'throttle':   'BlockdevOptionsThrottle',

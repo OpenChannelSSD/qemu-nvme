@@ -201,11 +201,6 @@ struct MemoryRegionOps {
          */
         bool unaligned;
     } impl;
-
-    /* If .read and .write are not present, old_mmio may be used for
-     * backwards compatibility with old mmio registration
-     */
-    const MemoryRegionMmio old_mmio;
 };
 
 enum IOMMUMemoryRegionAttr {
@@ -360,6 +355,7 @@ struct MemoryRegion {
     bool ram;
     bool subpage;
     bool readonly; /* For RAM regions */
+    bool nonvolatile;
     bool rom_device;
     bool flush_coalesced_mmio;
     bool global_locking;
@@ -424,9 +420,9 @@ struct MemoryListener {
                         bool match_data, uint64_t data, EventNotifier *e);
     void (*eventfd_del)(MemoryListener *listener, MemoryRegionSection *section,
                         bool match_data, uint64_t data, EventNotifier *e);
-    void (*coalesced_mmio_add)(MemoryListener *listener, MemoryRegionSection *section,
+    void (*coalesced_io_add)(MemoryListener *listener, MemoryRegionSection *section,
                                hwaddr addr, hwaddr len);
-    void (*coalesced_mmio_del)(MemoryListener *listener, MemoryRegionSection *section,
+    void (*coalesced_io_del)(MemoryListener *listener, MemoryRegionSection *section,
                                hwaddr addr, hwaddr len);
     /* Lower = earlier (during add), later (during del) */
     unsigned priority;
@@ -485,6 +481,7 @@ static inline FlatView *address_space_to_flatview(AddressSpace *as)
  * @offset_within_address_space: the address of the first byte of the section
  *     relative to the region's address space
  * @readonly: writes to this section are ignored
+ * @nonvolatile: this section is non-volatile
  */
 struct MemoryRegionSection {
     MemoryRegion *mr;
@@ -493,6 +490,7 @@ struct MemoryRegionSection {
     Int128 size;
     hwaddr offset_within_address_space;
     bool readonly;
+    bool nonvolatile;
 };
 
 /**
@@ -633,7 +631,7 @@ void memory_region_init_resizeable_ram(MemoryRegion *mr,
                                                        uint64_t length,
                                                        void *host),
                                        Error **errp);
-#ifdef __linux__
+#ifdef CONFIG_POSIX
 
 /**
  * memory_region_init_ram_from_file:  Initialize RAM memory region with a
@@ -940,7 +938,7 @@ uint64_t memory_region_size(MemoryRegion *mr);
 /**
  * memory_region_is_ram: check whether a memory region is random access
  *
- * Returns %true is a memory region is random access.
+ * Returns %true if a memory region is random access.
  *
  * @mr: the memory region being queried
  */
@@ -952,7 +950,7 @@ static inline bool memory_region_is_ram(MemoryRegion *mr)
 /**
  * memory_region_is_ram_device: check whether a memory region is a ram device
  *
- * Returns %true is a memory region is a device backed ram region
+ * Returns %true if a memory region is a device backed ram region
  *
  * @mr: the memory region being queried
  */
@@ -1166,7 +1164,7 @@ uint8_t memory_region_get_dirty_log_mask(MemoryRegion *mr);
 /**
  * memory_region_is_rom: check whether a memory region is ROM
  *
- * Returns %true is a memory region is read-only memory.
+ * Returns %true if a memory region is read-only memory.
  *
  * @mr: the memory region being queried
  */
@@ -1175,6 +1173,17 @@ static inline bool memory_region_is_rom(MemoryRegion *mr)
     return mr->ram && mr->readonly;
 }
 
+/**
+ * memory_region_is_nonvolatile: check whether a memory region is non-volatile
+ *
+ * Returns %true is a memory region is non-volatile memory.
+ *
+ * @mr: the memory region being queried
+ */
+static inline bool memory_region_is_nonvolatile(MemoryRegion *mr)
+{
+    return mr->nonvolatile;
+}
 
 /**
  * memory_region_get_fd: Get a file descriptor backing a RAM memory region.
@@ -1345,6 +1354,17 @@ void memory_region_reset_dirty(MemoryRegion *mr, hwaddr addr,
  * @readonly: whether rhe region is to be ROM or RAM.
  */
 void memory_region_set_readonly(MemoryRegion *mr, bool readonly);
+
+/**
+ * memory_region_set_nonvolatile: Turn a memory region non-volatile
+ *
+ * Allows a memory region to be marked as non-volatile.
+ * only useful on RAM regions.
+ *
+ * @mr: the region being updated.
+ * @nonvolatile: whether rhe region is to be non-volatile.
+ */
+void memory_region_set_nonvolatile(MemoryRegion *mr, bool nonvolatile);
 
 /**
  * memory_region_rom_device_set_romd: enable/disable ROMD mode
@@ -1771,6 +1791,32 @@ MemTxResult address_space_rw(AddressSpace *as, hwaddr addr,
 MemTxResult address_space_write(AddressSpace *as, hwaddr addr,
                                 MemTxAttrs attrs,
                                 const uint8_t *buf, int len);
+
+/**
+ * address_space_write_rom: write to address space, including ROM.
+ *
+ * This function writes to the specified address space, but will
+ * write data to both ROM and RAM. This is used for non-guest
+ * writes like writes from the gdb debug stub or initial loading
+ * of ROM contents.
+ *
+ * Note that portions of the write which attempt to write data to
+ * a device will be silently ignored -- only real RAM and ROM will
+ * be written to.
+ *
+ * Return a MemTxResult indicating whether the operation succeeded
+ * or failed (eg unassigned memory, device rejected the transaction,
+ * IOMMU fault).
+ *
+ * @as: #AddressSpace to be accessed
+ * @addr: address within that address space
+ * @attrs: memory transaction attributes
+ * @buf: buffer with the data transferred
+ * @len: the number of bytes to write
+ */
+MemTxResult address_space_write_rom(AddressSpace *as, hwaddr addr,
+                                    MemTxAttrs attrs,
+                                    const uint8_t *buf, int len);
 
 /* address_space_ld*: load from an address space
  * address_space_st*: store to an address space

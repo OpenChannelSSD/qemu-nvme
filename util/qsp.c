@@ -61,7 +61,7 @@
 #include "qemu/timer.h"
 #include "qemu/qht.h"
 #include "qemu/rcu.h"
-#include "exec/tb-hash-xx.h"
+#include "qemu/xxhash.h"
 
 enum QSPType {
     QSP_MUTEX,
@@ -84,13 +84,6 @@ struct QSPEntry {
     uint64_t n_acqs;
     uint64_t ns;
     unsigned int n_objs; /* count of coalesced objs; only used for reporting */
-#ifndef CONFIG_ATOMIC64
-    /*
-     * If we cannot update the counts atomically, then use a seqlock.
-     * We don't need an associated lock because the updates are thread-local.
-     */
-    QemuSeqLock sequence;
-#endif
 };
 typedef struct QSPEntry QSPEntry;
 
@@ -142,13 +135,13 @@ QemuCondWaitFunc qemu_cond_wait_func = qemu_cond_wait_impl;
  * without it we still get a pretty unique hash.
  */
 static inline
-uint32_t do_qsp_callsite_hash(const QSPCallSite *callsite, uint64_t a)
+uint32_t do_qsp_callsite_hash(const QSPCallSite *callsite, uint64_t ab)
 {
-    uint64_t b = (uint64_t)(uintptr_t)callsite->obj;
+    uint64_t cd = (uint64_t)(uintptr_t)callsite->obj;
     uint32_t e = callsite->line;
     uint32_t f = callsite->type;
 
-    return tb_hash_func7(a, b, e, f, 0);
+    return qemu_xxhash6(ab, cd, e, f);
 }
 
 static inline
@@ -176,11 +169,11 @@ static uint32_t qsp_entry_no_thread_hash(const QSPEntry *entry)
 static uint32_t qsp_entry_no_thread_obj_hash(const QSPEntry *entry)
 {
     const QSPCallSite *callsite = entry->callsite;
-    uint64_t a = g_str_hash(callsite->file);
-    uint64_t b = callsite->line;
+    uint64_t ab = g_str_hash(callsite->file);
+    uint64_t cd = callsite->line;
     uint32_t e = callsite->type;
 
-    return tb_hash_func7(a, b, e, 0, 0);
+    return qemu_xxhash5(ab, cd, e);
 }
 
 static bool qsp_callsite_cmp(const void *ap, const void *bp)
@@ -345,46 +338,15 @@ static QSPEntry *qsp_entry_get(const void *obj, const char *file, int line,
 }
 
 /*
- * @from is in the global hash table; read it atomically if the host
- * supports it, otherwise use the seqlock.
- */
-static void qsp_entry_aggregate(QSPEntry *to, const QSPEntry *from)
-{
-#ifdef CONFIG_ATOMIC64
-    to->ns += atomic_read__nocheck(&from->ns);
-    to->n_acqs += atomic_read__nocheck(&from->n_acqs);
-#else
-    unsigned int version;
-    uint64_t ns, n_acqs;
-
-    do {
-        version = seqlock_read_begin(&from->sequence);
-        ns = atomic_read__nocheck(&from->ns);
-        n_acqs = atomic_read__nocheck(&from->n_acqs);
-    } while (seqlock_read_retry(&from->sequence, version));
-
-    to->ns += ns;
-    to->n_acqs += n_acqs;
-#endif
-}
-
-/*
  * @e is in the global hash table; it is only written to by the current thread,
  * so we write to it atomically (as in "write once") to prevent torn reads.
- * If the host doesn't support u64 atomics, use the seqlock.
  */
 static inline void do_qsp_entry_record(QSPEntry *e, int64_t delta, bool acq)
 {
-#ifndef CONFIG_ATOMIC64
-    seqlock_write_begin(&e->sequence);
-#endif
-    atomic_set__nocheck(&e->ns, e->ns + delta);
+    atomic_set_u64(&e->ns, e->ns + delta);
     if (acq) {
-        atomic_set__nocheck(&e->n_acqs, e->n_acqs + 1);
+        atomic_set_u64(&e->n_acqs, e->n_acqs + 1);
     }
-#ifndef CONFIG_ATOMIC64
-    seqlock_write_end(&e->sequence);
-#endif
 }
 
 static inline void qsp_entry_record(QSPEntry *e, int64_t delta)
@@ -550,7 +512,12 @@ static void qsp_aggregate(void *p, uint32_t h, void *up)
 
     hash = qsp_entry_no_thread_hash(e);
     agg = qsp_entry_find(ht, e, hash);
-    qsp_entry_aggregate(agg, e);
+    /*
+     * The entry is in the global hash table; read from it atomically (as in
+     * "read once").
+     */
+    agg->ns += atomic_read_u64(&e->ns);
+    agg->n_acqs += atomic_read_u64(&e->n_acqs);
 }
 
 static void qsp_iter_diff(void *p, uint32_t hash, void *htp)

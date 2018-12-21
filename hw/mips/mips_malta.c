@@ -995,8 +995,8 @@ static void GCC_FMT_ATTR(3, 4) prom_set(uint32_t* prom_buf, int index,
 /* Kernel */
 static int64_t load_kernel (void)
 {
-    int64_t kernel_entry, kernel_high;
-    long kernel_size, initrd_size;
+    int64_t kernel_entry, kernel_high, initrd_size;
+    long kernel_size;
     ram_addr_t initrd_offset;
     int big_endian;
     uint32_t *prom_buf;
@@ -1070,7 +1070,7 @@ static int64_t load_kernel (void)
 
     prom_set(prom_buf, prom_index++, "%s", loaderparams.kernel_filename);
     if (initrd_size > 0) {
-        prom_set(prom_buf, prom_index++, "rd_start=0x%" PRIx64 " rd_size=%li %s",
+        prom_set(prom_buf, prom_index++, "rd_start=0x%" PRIx64 " rd_size=%" PRId64 " %s",
                  xlate_to_kseg0(NULL, initrd_offset), initrd_size,
                  loaderparams.kernel_cmdline);
     } else {
@@ -1422,23 +1422,10 @@ void mips_malta_init(MachineState *machine)
     pci_vga_init(pci_bus);
 }
 
-static int mips_malta_sysbus_device_init(SysBusDevice *sysbusdev)
-{
-    return 0;
-}
-
-static void mips_malta_class_init(ObjectClass *klass, void *data)
-{
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-
-    k->init = mips_malta_sysbus_device_init;
-}
-
 static const TypeInfo mips_malta_device = {
     .name          = TYPE_MIPS_MALTA,
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(MaltaState),
-    .class_init    = mips_malta_class_init,
 };
 
 static void mips_malta_machine_init(MachineClass *mc)

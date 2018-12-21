@@ -610,6 +610,29 @@ static void spapr_populate_cpus_dt_node(void *fdt, sPAPRMachineState *spapr)
     g_free(rev);
 }
 
+static int spapr_rng_populate_dt(void *fdt)
+{
+    int node;
+    int ret;
+
+    node = qemu_fdt_add_subnode(fdt, "/ibm,platform-facilities");
+    if (node <= 0) {
+        return -1;
+    }
+    ret = fdt_setprop_string(fdt, node, "device_type",
+                             "ibm,platform-facilities");
+    ret |= fdt_setprop_cell(fdt, node, "#address-cells", 0x1);
+    ret |= fdt_setprop_cell(fdt, node, "#size-cells", 0x0);
+
+    node = fdt_add_subnode(fdt, node, "ibm,random-v1");
+    if (node <= 0) {
+        return -1;
+    }
+    ret |= fdt_setprop_string(fdt, node, "compatible", "ibm,random");
+
+    return ret ? -1 : 0;
+}
+
 static uint32_t spapr_pc_dimm_node(MemoryDeviceInfoList *list, ram_addr_t addr)
 {
     MemoryDeviceInfoList *info;
@@ -1915,6 +1938,7 @@ static const VMStateDescription vmstate_spapr = {
         &vmstate_spapr_cap_sbbc,
         &vmstate_spapr_cap_ibs,
         &vmstate_spapr_irq_map,
+        &vmstate_spapr_cap_nested_kvm_hv,
         NULL
     }
 };
@@ -3128,14 +3152,12 @@ static void spapr_memory_plug(HotplugHandler *hotplug_dev, DeviceState *dev,
     Error *local_err = NULL;
     sPAPRMachineState *ms = SPAPR_MACHINE(hotplug_dev);
     PCDIMMDevice *dimm = PC_DIMM(dev);
-    PCDIMMDeviceClass *ddc = PC_DIMM_GET_CLASS(dimm);
-    MemoryRegion *mr = ddc->get_memory_region(dimm, &error_abort);
     uint64_t size, addr;
     uint32_t node;
 
-    size = memory_region_size(mr);
+    size = memory_device_get_region_size(MEMORY_DEVICE(dev), &error_abort);
 
-    pc_dimm_plug(dev, MACHINE(ms), &local_err);
+    pc_dimm_plug(dimm, MACHINE(ms), &local_err);
     if (local_err) {
         goto out;
     }
@@ -3158,7 +3180,7 @@ static void spapr_memory_plug(HotplugHandler *hotplug_dev, DeviceState *dev,
     return;
 
 out_unplug:
-    pc_dimm_unplug(dev, MACHINE(ms));
+    pc_dimm_unplug(dimm, MACHINE(ms));
 out:
     error_propagate(errp, local_err);
 }
@@ -3169,9 +3191,7 @@ static void spapr_memory_pre_plug(HotplugHandler *hotplug_dev, DeviceState *dev,
     const sPAPRMachineClass *smc = SPAPR_MACHINE_GET_CLASS(hotplug_dev);
     sPAPRMachineState *spapr = SPAPR_MACHINE(hotplug_dev);
     PCDIMMDevice *dimm = PC_DIMM(dev);
-    PCDIMMDeviceClass *ddc = PC_DIMM_GET_CLASS(dimm);
     Error *local_err = NULL;
-    MemoryRegion *mr;
     uint64_t size;
     Object *memdev;
     hwaddr pagesize;
@@ -3181,11 +3201,11 @@ static void spapr_memory_pre_plug(HotplugHandler *hotplug_dev, DeviceState *dev,
         return;
     }
 
-    mr = ddc->get_memory_region(dimm, errp);
-    if (!mr) {
+    size = memory_device_get_region_size(MEMORY_DEVICE(dimm), &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
         return;
     }
-    size = memory_region_size(mr);
 
     if (size % SPAPR_MEMORY_BLOCK_SIZE) {
         error_setg(errp, "Hotplugged memory size must be a multiple of "
@@ -3202,7 +3222,7 @@ static void spapr_memory_pre_plug(HotplugHandler *hotplug_dev, DeviceState *dev,
         return;
     }
 
-    pc_dimm_pre_plug(dev, MACHINE(hotplug_dev), NULL, errp);
+    pc_dimm_pre_plug(dimm, MACHINE(hotplug_dev), NULL, errp);
 }
 
 struct sPAPRDIMMState {
@@ -3257,9 +3277,8 @@ static sPAPRDIMMState *spapr_recover_pending_dimm_state(sPAPRMachineState *ms,
                                                         PCDIMMDevice *dimm)
 {
     sPAPRDRConnector *drc;
-    PCDIMMDeviceClass *ddc = PC_DIMM_GET_CLASS(dimm);
-    MemoryRegion *mr = ddc->get_memory_region(dimm, &error_abort);
-    uint64_t size = memory_region_size(mr);
+    uint64_t size = memory_device_get_region_size(MEMORY_DEVICE(dimm),
+                                                  &error_abort);
     uint32_t nr_lmbs = size / SPAPR_MEMORY_BLOCK_SIZE;
     uint32_t avail_lmbs = 0;
     uint64_t addr_start, addr;
@@ -3314,7 +3333,7 @@ static void spapr_memory_unplug(HotplugHandler *hotplug_dev, DeviceState *dev)
     sPAPRMachineState *spapr = SPAPR_MACHINE(hotplug_dev);
     sPAPRDIMMState *ds = spapr_pending_dimm_unplugs_find(spapr, PC_DIMM(dev));
 
-    pc_dimm_unplug(dev, MACHINE(hotplug_dev));
+    pc_dimm_unplug(PC_DIMM(dev), MACHINE(hotplug_dev));
     object_unparent(OBJECT(dev));
     spapr_pending_dimm_unplugs_remove(spapr, ds);
 }
@@ -3325,14 +3344,12 @@ static void spapr_memory_unplug_request(HotplugHandler *hotplug_dev,
     sPAPRMachineState *spapr = SPAPR_MACHINE(hotplug_dev);
     Error *local_err = NULL;
     PCDIMMDevice *dimm = PC_DIMM(dev);
-    PCDIMMDeviceClass *ddc = PC_DIMM_GET_CLASS(dimm);
-    MemoryRegion *mr = ddc->get_memory_region(dimm, &error_abort);
     uint32_t nr_lmbs;
     uint64_t size, addr_start, addr;
     int i;
     sPAPRDRConnector *drc;
 
-    size = memory_region_size(mr);
+    size = memory_device_get_region_size(MEMORY_DEVICE(dimm), &error_abort);
     nr_lmbs = size / SPAPR_MEMORY_BLOCK_SIZE;
 
     addr_start = object_property_get_uint(OBJECT(dimm), PC_DIMM_ADDR_PROP,
@@ -3886,6 +3903,7 @@ static void spapr_machine_class_init(ObjectClass *oc, void *data)
     smc->default_caps.caps[SPAPR_CAP_SBBC] = SPAPR_CAP_BROKEN;
     smc->default_caps.caps[SPAPR_CAP_IBS] = SPAPR_CAP_BROKEN;
     smc->default_caps.caps[SPAPR_CAP_HPT_MAXPAGESIZE] = 16; /* 64kiB */
+    smc->default_caps.caps[SPAPR_CAP_NESTED_KVM_HV] = SPAPR_CAP_OFF;
     spapr_caps_add_properties(smc, &error_abort);
     smc->irq = &spapr_irq_xics;
 }
@@ -3921,16 +3939,10 @@ static const TypeInfo spapr_machine_info = {
             mc->is_default = 1;                                      \
         }                                                            \
     }                                                                \
-    static void spapr_machine_##suffix##_instance_init(Object *obj)  \
-    {                                                                \
-        MachineState *machine = MACHINE(obj);                        \
-        spapr_machine_##suffix##_instance_options(machine);          \
-    }                                                                \
     static const TypeInfo spapr_machine_##suffix##_info = {          \
         .name = MACHINE_TYPE_NAME("pseries-" verstr),                \
         .parent = TYPE_SPAPR_MACHINE,                                \
         .class_init = spapr_machine_##suffix##_class_init,           \
-        .instance_init = spapr_machine_##suffix##_instance_init,     \
     };                                                               \
     static void spapr_machine_register_##suffix(void)                \
     {                                                                \
@@ -3938,30 +3950,35 @@ static const TypeInfo spapr_machine_info = {
     }                                                                \
     type_init(spapr_machine_register_##suffix)
 
- /*
- * pseries-3.1
+/*
+ * pseries-4.0
  */
-static void spapr_machine_3_1_instance_options(MachineState *machine)
-{
-}
-
-static void spapr_machine_3_1_class_options(MachineClass *mc)
+static void spapr_machine_4_0_class_options(MachineClass *mc)
 {
     /* Defaults for the latest behaviour inherited from the base class */
 }
 
-DEFINE_SPAPR_MACHINE(3_1, "3.1", true);
+DEFINE_SPAPR_MACHINE(4_0, "4.0", true);
+
+/*
+ * pseries-3.1
+ */
+#define SPAPR_COMPAT_3_1                                              \
+    HW_COMPAT_3_1
+
+static void spapr_machine_3_1_class_options(MachineClass *mc)
+{
+    spapr_machine_4_0_class_options(mc);
+    SET_MACHINE_COMPAT(mc, SPAPR_COMPAT_3_1);
+}
+
+DEFINE_SPAPR_MACHINE(3_1, "3.1", false);
 
 /*
  * pseries-3.0
  */
 #define SPAPR_COMPAT_3_0                                              \
     HW_COMPAT_3_0
-
-static void spapr_machine_3_0_instance_options(MachineState *machine)
-{
-    spapr_machine_3_1_instance_options(machine);
-}
 
 static void spapr_machine_3_0_class_options(MachineClass *mc)
 {
@@ -3992,11 +4009,6 @@ DEFINE_SPAPR_MACHINE(3_0, "3.0", false);
         .value    = "on",                                              \
     },
 
-static void spapr_machine_2_12_instance_options(MachineState *machine)
-{
-    spapr_machine_3_0_instance_options(machine);
-}
-
 static void spapr_machine_2_12_class_options(MachineClass *mc)
 {
     sPAPRMachineClass *smc = SPAPR_MACHINE_CLASS(mc);
@@ -4013,11 +4025,6 @@ static void spapr_machine_2_12_class_options(MachineClass *mc)
 }
 
 DEFINE_SPAPR_MACHINE(2_12, "2.12", false);
-
-static void spapr_machine_2_12_sxxm_instance_options(MachineState *machine)
-{
-    spapr_machine_2_12_instance_options(machine);
-}
 
 static void spapr_machine_2_12_sxxm_class_options(MachineClass *mc)
 {
@@ -4037,11 +4044,6 @@ DEFINE_SPAPR_MACHINE(2_12_sxxm, "2.12-sxxm", false);
 #define SPAPR_COMPAT_2_11                                              \
     HW_COMPAT_2_11
 
-static void spapr_machine_2_11_instance_options(MachineState *machine)
-{
-    spapr_machine_2_12_instance_options(machine);
-}
-
 static void spapr_machine_2_11_class_options(MachineClass *mc)
 {
     sPAPRMachineClass *smc = SPAPR_MACHINE_CLASS(mc);
@@ -4058,11 +4060,6 @@ DEFINE_SPAPR_MACHINE(2_11, "2.11", false);
  */
 #define SPAPR_COMPAT_2_10                                              \
     HW_COMPAT_2_10
-
-static void spapr_machine_2_10_instance_options(MachineState *machine)
-{
-    spapr_machine_2_11_instance_options(machine);
-}
 
 static void spapr_machine_2_10_class_options(MachineClass *mc)
 {
@@ -4082,11 +4079,6 @@ DEFINE_SPAPR_MACHINE(2_10, "2.10", false);
         .property = "pre-2.10-migration",                              \
         .value    = "on",                                              \
     },                                                                 \
-
-static void spapr_machine_2_9_instance_options(MachineState *machine)
-{
-    spapr_machine_2_10_instance_options(machine);
-}
 
 static void spapr_machine_2_9_class_options(MachineClass *mc)
 {
@@ -4111,11 +4103,6 @@ DEFINE_SPAPR_MACHINE(2_9, "2.9", false);
         .property = "pcie-extended-configuration-space",        \
         .value    = "off",                                      \
     },
-
-static void spapr_machine_2_8_instance_options(MachineState *machine)
-{
-    spapr_machine_2_9_instance_options(machine);
-}
 
 static void spapr_machine_2_8_class_options(MachineClass *mc)
 {
@@ -4201,20 +4188,13 @@ static void phb_placement_2_7(sPAPRMachineState *spapr, uint32_t index,
      */
 }
 
-static void spapr_machine_2_7_instance_options(MachineState *machine)
-{
-    sPAPRMachineState *spapr = SPAPR_MACHINE(machine);
-
-    spapr_machine_2_8_instance_options(machine);
-    spapr->use_hotplug_event_source = false;
-}
-
 static void spapr_machine_2_7_class_options(MachineClass *mc)
 {
     sPAPRMachineClass *smc = SPAPR_MACHINE_CLASS(mc);
 
     spapr_machine_2_8_class_options(mc);
     mc->default_cpu_type = POWERPC_CPU_TYPE_NAME("power7_v2.3");
+    mc->default_machine_opts = "modern-hotplug-events=off";
     SET_MACHINE_COMPAT(mc, SPAPR_COMPAT_2_7);
     smc->phb_placement = phb_placement_2_7;
 }
@@ -4231,11 +4211,6 @@ DEFINE_SPAPR_MACHINE(2_7, "2.7", false);
         .property = "ddw",\
         .value    = stringify(off),\
     },
-
-static void spapr_machine_2_6_instance_options(MachineState *machine)
-{
-    spapr_machine_2_7_instance_options(machine);
-}
 
 static void spapr_machine_2_6_class_options(MachineClass *mc)
 {
@@ -4257,11 +4232,6 @@ DEFINE_SPAPR_MACHINE(2_6, "2.6", false);
         .value    = "off", \
     },
 
-static void spapr_machine_2_5_instance_options(MachineState *machine)
-{
-    spapr_machine_2_6_instance_options(machine);
-}
-
 static void spapr_machine_2_5_class_options(MachineClass *mc)
 {
     sPAPRMachineClass *smc = SPAPR_MACHINE_CLASS(mc);
@@ -4278,11 +4248,6 @@ DEFINE_SPAPR_MACHINE(2_5, "2.5", false);
  */
 #define SPAPR_COMPAT_2_4 \
         HW_COMPAT_2_4
-
-static void spapr_machine_2_4_instance_options(MachineState *machine)
-{
-    spapr_machine_2_5_instance_options(machine);
-}
 
 static void spapr_machine_2_4_class_options(MachineClass *mc)
 {
@@ -4306,11 +4271,6 @@ DEFINE_SPAPR_MACHINE(2_4, "2.4", false);
             .value    = "off",\
         },
 
-static void spapr_machine_2_3_instance_options(MachineState *machine)
-{
-    spapr_machine_2_4_instance_options(machine);
-}
-
 static void spapr_machine_2_3_class_options(MachineClass *mc)
 {
     spapr_machine_2_4_class_options(mc);
@@ -4330,16 +4290,11 @@ DEFINE_SPAPR_MACHINE(2_3, "2.3", false);
             .value    = "0x20000000",\
         },
 
-static void spapr_machine_2_2_instance_options(MachineState *machine)
-{
-    spapr_machine_2_3_instance_options(machine);
-    machine->suppress_vmdesc = true;
-}
-
 static void spapr_machine_2_2_class_options(MachineClass *mc)
 {
     spapr_machine_2_3_class_options(mc);
     SET_MACHINE_COMPAT(mc, SPAPR_COMPAT_2_2);
+    mc->default_machine_opts = "modern-hotplug-events=off,suppress-vmdesc=on";
 }
 DEFINE_SPAPR_MACHINE(2_2, "2.2", false);
 
@@ -4348,11 +4303,6 @@ DEFINE_SPAPR_MACHINE(2_2, "2.2", false);
  */
 #define SPAPR_COMPAT_2_1 \
         HW_COMPAT_2_1
-
-static void spapr_machine_2_1_instance_options(MachineState *machine)
-{
-    spapr_machine_2_2_instance_options(machine);
-}
 
 static void spapr_machine_2_1_class_options(MachineClass *mc)
 {

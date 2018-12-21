@@ -94,6 +94,10 @@
 #include <linux/fiemap.h>
 #endif
 #include <linux/fb.h>
+#if defined(CONFIG_USBFS)
+#include <linux/usbdevice_fs.h>
+#include <linux/usb/ch9.h>
+#endif
 #include <linux/vt.h>
 #include <linux/dm-ioctl.h>
 #include <linux/reboot.h>
@@ -2057,6 +2061,11 @@ set_timeout:
         case TARGET_SO_REUSEADDR:
 		optname = SO_REUSEADDR;
 		break;
+#ifdef SO_REUSEPORT
+        case TARGET_SO_REUSEPORT:
+                optname = SO_REUSEPORT;
+                break;
+#endif
         case TARGET_SO_TYPE:
 		optname = SO_TYPE;
 		break;
@@ -2218,6 +2227,11 @@ static abi_long do_getsockopt(int sockfd, int level, int optname,
         case TARGET_SO_REUSEADDR:
             optname = SO_REUSEADDR;
             goto int_case;
+#ifdef SO_REUSEPORT
+        case TARGET_SO_REUSEPORT:
+            optname = SO_REUSEPORT;
+            goto int_case;
+#endif
         case TARGET_SO_TYPE:
             optname = SO_TYPE;
             goto int_case;
@@ -4195,6 +4209,182 @@ static abi_long do_ioctl_ifconf(const IOCTLEntry *ie, uint8_t *buf_temp,
 
     return ret;
 }
+
+#if defined(CONFIG_USBFS)
+#if HOST_LONG_BITS > 64
+#error USBDEVFS thunks do not support >64 bit hosts yet.
+#endif
+struct live_urb {
+    uint64_t target_urb_adr;
+    uint64_t target_buf_adr;
+    char *target_buf_ptr;
+    struct usbdevfs_urb host_urb;
+};
+
+static GHashTable *usbdevfs_urb_hashtable(void)
+{
+    static GHashTable *urb_hashtable;
+
+    if (!urb_hashtable) {
+        urb_hashtable = g_hash_table_new(g_int64_hash, g_int64_equal);
+    }
+    return urb_hashtable;
+}
+
+static void urb_hashtable_insert(struct live_urb *urb)
+{
+    GHashTable *urb_hashtable = usbdevfs_urb_hashtable();
+    g_hash_table_insert(urb_hashtable, urb, urb);
+}
+
+static struct live_urb *urb_hashtable_lookup(uint64_t target_urb_adr)
+{
+    GHashTable *urb_hashtable = usbdevfs_urb_hashtable();
+    return g_hash_table_lookup(urb_hashtable, &target_urb_adr);
+}
+
+static void urb_hashtable_remove(struct live_urb *urb)
+{
+    GHashTable *urb_hashtable = usbdevfs_urb_hashtable();
+    g_hash_table_remove(urb_hashtable, urb);
+}
+
+static abi_long
+do_ioctl_usbdevfs_reapurb(const IOCTLEntry *ie, uint8_t *buf_temp,
+                          int fd, int cmd, abi_long arg)
+{
+    const argtype usbfsurb_arg_type[] = { MK_STRUCT(STRUCT_usbdevfs_urb) };
+    const argtype ptrvoid_arg_type[] = { TYPE_PTRVOID, 0, 0 };
+    struct live_urb *lurb;
+    void *argptr;
+    uint64_t hurb;
+    int target_size;
+    uintptr_t target_urb_adr;
+    abi_long ret;
+
+    target_size = thunk_type_size(usbfsurb_arg_type, THUNK_TARGET);
+
+    memset(buf_temp, 0, sizeof(uint64_t));
+    ret = get_errno(safe_ioctl(fd, ie->host_cmd, buf_temp));
+    if (is_error(ret)) {
+        return ret;
+    }
+
+    memcpy(&hurb, buf_temp, sizeof(uint64_t));
+    lurb = (void *)((uintptr_t)hurb - offsetof(struct live_urb, host_urb));
+    if (!lurb->target_urb_adr) {
+        return -TARGET_EFAULT;
+    }
+    urb_hashtable_remove(lurb);
+    unlock_user(lurb->target_buf_ptr, lurb->target_buf_adr,
+        lurb->host_urb.buffer_length);
+    lurb->target_buf_ptr = NULL;
+
+    /* restore the guest buffer pointer */
+    lurb->host_urb.buffer = (void *)(uintptr_t)lurb->target_buf_adr;
+
+    /* update the guest urb struct */
+    argptr = lock_user(VERIFY_WRITE, lurb->target_urb_adr, target_size, 0);
+    if (!argptr) {
+        g_free(lurb);
+        return -TARGET_EFAULT;
+    }
+    thunk_convert(argptr, &lurb->host_urb, usbfsurb_arg_type, THUNK_TARGET);
+    unlock_user(argptr, lurb->target_urb_adr, target_size);
+
+    target_size = thunk_type_size(ptrvoid_arg_type, THUNK_TARGET);
+    /* write back the urb handle */
+    argptr = lock_user(VERIFY_WRITE, arg, target_size, 0);
+    if (!argptr) {
+        g_free(lurb);
+        return -TARGET_EFAULT;
+    }
+
+    /* GHashTable uses 64-bit keys but thunk_convert expects uintptr_t */
+    target_urb_adr = lurb->target_urb_adr;
+    thunk_convert(argptr, &target_urb_adr, ptrvoid_arg_type, THUNK_TARGET);
+    unlock_user(argptr, arg, target_size);
+
+    g_free(lurb);
+    return ret;
+}
+
+static abi_long
+do_ioctl_usbdevfs_discardurb(const IOCTLEntry *ie,
+                             uint8_t *buf_temp __attribute__((unused)),
+                             int fd, int cmd, abi_long arg)
+{
+    struct live_urb *lurb;
+
+    /* map target address back to host URB with metadata. */
+    lurb = urb_hashtable_lookup(arg);
+    if (!lurb) {
+        return -TARGET_EFAULT;
+    }
+    return get_errno(safe_ioctl(fd, ie->host_cmd, &lurb->host_urb));
+}
+
+static abi_long
+do_ioctl_usbdevfs_submiturb(const IOCTLEntry *ie, uint8_t *buf_temp,
+                            int fd, int cmd, abi_long arg)
+{
+    const argtype *arg_type = ie->arg_type;
+    int target_size;
+    abi_long ret;
+    void *argptr;
+    int rw_dir;
+    struct live_urb *lurb;
+
+    /*
+     * each submitted URB needs to map to a unique ID for the
+     * kernel, and that unique ID needs to be a pointer to
+     * host memory.  hence, we need to malloc for each URB.
+     * isochronous transfers have a variable length struct.
+     */
+    arg_type++;
+    target_size = thunk_type_size(arg_type, THUNK_TARGET);
+
+    /* construct host copy of urb and metadata */
+    lurb = g_try_malloc0(sizeof(struct live_urb));
+    if (!lurb) {
+        return -TARGET_ENOMEM;
+    }
+
+    argptr = lock_user(VERIFY_READ, arg, target_size, 1);
+    if (!argptr) {
+        g_free(lurb);
+        return -TARGET_EFAULT;
+    }
+    thunk_convert(&lurb->host_urb, argptr, arg_type, THUNK_HOST);
+    unlock_user(argptr, arg, 0);
+
+    lurb->target_urb_adr = arg;
+    lurb->target_buf_adr = (uintptr_t)lurb->host_urb.buffer;
+
+    /* buffer space used depends on endpoint type so lock the entire buffer */
+    /* control type urbs should check the buffer contents for true direction */
+    rw_dir = lurb->host_urb.endpoint & USB_DIR_IN ? VERIFY_WRITE : VERIFY_READ;
+    lurb->target_buf_ptr = lock_user(rw_dir, lurb->target_buf_adr,
+        lurb->host_urb.buffer_length, 1);
+    if (lurb->target_buf_ptr == NULL) {
+        g_free(lurb);
+        return -TARGET_EFAULT;
+    }
+
+    /* update buffer pointer in host copy */
+    lurb->host_urb.buffer = lurb->target_buf_ptr;
+
+    ret = get_errno(safe_ioctl(fd, ie->host_cmd, &lurb->host_urb));
+    if (is_error(ret)) {
+        unlock_user(lurb->target_buf_ptr, lurb->target_buf_adr, 0);
+        g_free(lurb);
+    } else {
+        urb_hashtable_insert(lurb);
+    }
+
+    return ret;
+}
+#endif /* CONFIG_USBFS */
 
 static abi_long do_ioctl_dm(const IOCTLEntry *ie, uint8_t *buf_temp, int fd,
                             int cmd, abi_long arg)
@@ -9347,6 +9537,86 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             return ret;
         }
 #endif
+#ifdef TARGET_MIPS
+        case TARGET_PR_GET_FP_MODE:
+        {
+            CPUMIPSState *env = ((CPUMIPSState *)cpu_env);
+            ret = 0;
+            if (env->CP0_Status & (1 << CP0St_FR)) {
+                ret |= TARGET_PR_FP_MODE_FR;
+            }
+            if (env->CP0_Config5 & (1 << CP0C5_FRE)) {
+                ret |= TARGET_PR_FP_MODE_FRE;
+            }
+            return ret;
+        }
+        case TARGET_PR_SET_FP_MODE:
+        {
+            CPUMIPSState *env = ((CPUMIPSState *)cpu_env);
+            bool old_fr = env->CP0_Status & (1 << CP0St_FR);
+            bool old_fre = env->CP0_Config5 & (1 << CP0C5_FRE);
+            bool new_fr = arg2 & TARGET_PR_FP_MODE_FR;
+            bool new_fre = arg2 & TARGET_PR_FP_MODE_FRE;
+
+            const unsigned int known_bits = TARGET_PR_FP_MODE_FR |
+                                            TARGET_PR_FP_MODE_FRE;
+
+            /* If nothing to change, return right away, successfully.  */
+            if (old_fr == new_fr && old_fre == new_fre) {
+                return 0;
+            }
+            /* Check the value is valid */
+            if (arg2 & ~known_bits) {
+                return -TARGET_EOPNOTSUPP;
+            }
+            /* Setting FRE without FR is not supported.  */
+            if (new_fre && !new_fr) {
+                return -TARGET_EOPNOTSUPP;
+            }
+            if (new_fr && !(env->active_fpu.fcr0 & (1 << FCR0_F64))) {
+                /* FR1 is not supported */
+                return -TARGET_EOPNOTSUPP;
+            }
+            if (!new_fr && (env->active_fpu.fcr0 & (1 << FCR0_F64))
+                && !(env->CP0_Status_rw_bitmask & (1 << CP0St_FR))) {
+                /* cannot set FR=0 */
+                return -TARGET_EOPNOTSUPP;
+            }
+            if (new_fre && !(env->active_fpu.fcr0 & (1 << FCR0_FREP))) {
+                /* Cannot set FRE=1 */
+                return -TARGET_EOPNOTSUPP;
+            }
+
+            int i;
+            fpr_t *fpr = env->active_fpu.fpr;
+            for (i = 0; i < 32 ; i += 2) {
+                if (!old_fr && new_fr) {
+                    fpr[i].w[!FP_ENDIAN_IDX] = fpr[i + 1].w[FP_ENDIAN_IDX];
+                } else if (old_fr && !new_fr) {
+                    fpr[i + 1].w[FP_ENDIAN_IDX] = fpr[i].w[!FP_ENDIAN_IDX];
+                }
+            }
+
+            if (new_fr) {
+                env->CP0_Status |= (1 << CP0St_FR);
+                env->hflags |= MIPS_HFLAG_F64;
+            } else {
+                env->CP0_Status &= ~(1 << CP0St_FR);
+                env->hflags &= ~MIPS_HFLAG_F64;
+            }
+            if (new_fre) {
+                env->CP0_Config5 |= (1 << CP0C5_FRE);
+                if (env->active_fpu.fcr0 & (1 << FCR0_FREP)) {
+                    env->hflags |= MIPS_HFLAG_FRE;
+                }
+            } else {
+                env->CP0_Config5 &= ~(1 << CP0C5_FRE);
+                env->hflags &= ~MIPS_HFLAG_FRE;
+            }
+
+            return 0;
+        }
+#endif /* MIPS */
 #ifdef TARGET_AARCH64
         case TARGET_PR_SVE_SET_VL:
             /*
@@ -9356,7 +9626,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
              * even though the current architectural maximum is VQ=16.
              */
             ret = -TARGET_EINVAL;
-            if (arm_feature(cpu_env, ARM_FEATURE_SVE)
+            if (cpu_isar_feature(aa64_sve, arm_env_get_cpu(cpu_env))
                 && arg2 >= 0 && arg2 <= 512 * 16 && !(arg2 & 15)) {
                 CPUARMState *env = cpu_env;
                 ARMCPU *cpu = arm_env_get_cpu(env);
@@ -9375,9 +9645,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             return ret;
         case TARGET_PR_SVE_GET_VL:
             ret = -TARGET_EINVAL;
-            if (arm_feature(cpu_env, ARM_FEATURE_SVE)) {
-                CPUARMState *env = cpu_env;
-                ret = ((env->vfp.zcr_el[1] & 0xf) + 1) * 16;
+            {
+                ARMCPU *cpu = arm_env_get_cpu(cpu_env);
+                if (cpu_isar_feature(aa64_sve, cpu)) {
+                    ret = ((cpu->env.vfp.zcr_el[1] & 0xf) + 1) * 16;
+                }
             }
             return ret;
 #endif /* AARCH64 */

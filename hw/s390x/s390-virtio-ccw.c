@@ -32,6 +32,7 @@
 #include "ipl.h"
 #include "hw/s390x/s390-virtio-ccw.h"
 #include "hw/s390x/css-bridge.h"
+#include "hw/s390x/ap-bridge.h"
 #include "migration/register.h"
 #include "cpu_models.h"
 #include "hw/nmi.h"
@@ -263,6 +264,9 @@ static void ccw_init(MachineState *machine)
     /* init the SIGP facility */
     s390_init_sigp();
 
+    /* create AP bridge and bus(es) */
+    s390_init_ap();
+
     /* get a BUS */
     css_bus = virtual_css_bus_init();
     s390_init_ipl_dev(machine->kernel_filename, machine->kernel_cmdline,
@@ -456,6 +460,7 @@ static void ccw_machine_class_init(ObjectClass *oc, void *data)
     s390mc->ri_allowed = true;
     s390mc->cpu_model_allowed = true;
     s390mc->css_migration_enabled = true;
+    s390mc->hpage_1m_allowed = true;
     mc->init = ccw_init;
     mc->reset = s390_machine_reset;
     mc->hot_add_cpu = s390_hot_add_cpu;
@@ -533,6 +538,12 @@ bool cpu_model_allowed(void)
 {
     /* for "none" machine this results in true */
     return get_machine_class()->cpu_model_allowed;
+}
+
+bool hpage_1m_allowed(void)
+{
+    /* for "none" machine this results in true */
+    return get_machine_class()->hpage_1m_allowed;
 }
 
 static char *machine_get_loadparm(Object *obj, Error **errp)
@@ -640,6 +651,9 @@ bool css_migration_enabled(void)
     }                                                                         \
     type_init(ccw_machine_register_##suffix)
 
+#define CCW_COMPAT_3_1 \
+        HW_COMPAT_3_1
+
 #define CCW_COMPAT_3_0 \
         HW_COMPAT_3_0
 
@@ -731,14 +745,26 @@ bool css_migration_enabled(void)
             .value    = "0",\
         },
 
+static void ccw_machine_4_0_instance_options(MachineState *machine)
+{
+}
+
+static void ccw_machine_4_0_class_options(MachineClass *mc)
+{
+}
+DEFINE_CCW_MACHINE(4_0, "4.0", true);
+
 static void ccw_machine_3_1_instance_options(MachineState *machine)
 {
+    ccw_machine_4_0_instance_options(machine);
 }
 
 static void ccw_machine_3_1_class_options(MachineClass *mc)
 {
+    ccw_machine_4_0_class_options(mc);
+    SET_MACHINE_COMPAT(mc, CCW_COMPAT_3_1);
 }
-DEFINE_CCW_MACHINE(3_1, "3.1", true);
+DEFINE_CCW_MACHINE(3_1, "3.1", false);
 
 static void ccw_machine_3_0_instance_options(MachineState *machine)
 {
@@ -747,6 +773,9 @@ static void ccw_machine_3_0_instance_options(MachineState *machine)
 
 static void ccw_machine_3_0_class_options(MachineClass *mc)
 {
+    S390CcwMachineClass *s390mc = S390_MACHINE_CLASS(mc);
+
+    s390mc->hpage_1m_allowed = false;
     ccw_machine_3_1_class_options(mc);
     SET_MACHINE_COMPAT(mc, CCW_COMPAT_3_0);
 }

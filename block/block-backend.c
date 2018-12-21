@@ -918,7 +918,8 @@ char *blk_get_attached_dev_id(BlockBackend *blk)
     } else if (dev->id) {
         return g_strdup(dev->id);
     }
-    return object_get_canonical_path(OBJECT(dev));
+
+    return object_get_canonical_path(OBJECT(dev)) ?: g_strdup("");
 }
 
 /*
@@ -1708,7 +1709,7 @@ void blk_error_action(BlockBackend *blk, BlockErrorAction action,
     }
 }
 
-int blk_is_read_only(BlockBackend *blk)
+bool blk_is_read_only(BlockBackend *blk)
 {
     BlockDriverState *bs = blk_bs(blk);
 
@@ -1719,18 +1720,18 @@ int blk_is_read_only(BlockBackend *blk)
     }
 }
 
-int blk_is_sg(BlockBackend *blk)
+bool blk_is_sg(BlockBackend *blk)
 {
     BlockDriverState *bs = blk_bs(blk);
 
     if (!bs) {
-        return 0;
+        return false;
     }
 
     return bdrv_is_sg(bs);
 }
 
-int blk_enable_write_cache(BlockBackend *blk)
+bool blk_enable_write_cache(BlockBackend *blk)
 {
     return blk->enable_write_cache;
 }

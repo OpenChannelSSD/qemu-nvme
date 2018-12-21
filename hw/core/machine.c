@@ -636,7 +636,7 @@ static void machine_class_init(ObjectClass *oc, void *data)
         machine_get_memory_encryption, machine_set_memory_encryption,
         &error_abort);
     object_class_property_set_description(oc, "memory-encryption",
-        "Set memory encyption object to use", &error_abort);
+        "Set memory encryption object to use", &error_abort);
 }
 
 static void machine_class_base_init(ObjectClass *oc, void *data)
@@ -834,16 +834,6 @@ void machine_run_board_init(MachineState *machine)
     machine_class->init(machine);
 }
 
-static void machine_class_finalize(ObjectClass *klass, void *data)
-{
-    MachineClass *mc = MACHINE_CLASS(klass);
-
-    if (mc->compat_props) {
-        g_array_free(mc->compat_props, true);
-    }
-    g_free(mc->name);
-}
-
 void machine_register_compat_props(MachineState *machine)
 {
     MachineClass *mc = MACHINE_GET_CLASS(machine);
@@ -869,7 +859,6 @@ static const TypeInfo machine_info = {
     .class_size = sizeof(MachineClass),
     .class_init    = machine_class_init,
     .class_base_init = machine_class_base_init,
-    .class_finalize = machine_class_finalize,
     .instance_size = sizeof(MachineState),
     .instance_init = machine_initfn,
     .instance_finalize = machine_finalize,

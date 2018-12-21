@@ -26,17 +26,18 @@
 #include "qemu/queue.h"
 #include "qemu/notify.h"
 #include "ui/console.h"
+#include "hw/display/ramfb.h"
 #ifdef CONFIG_LINUX
 #include <linux/vfio.h>
 #endif
 
-#define ERR_PREFIX "vfio error: %s: "
-#define WARN_PREFIX "vfio warning: %s: "
+#define VFIO_MSG_PREFIX "vfio %s: "
 
 enum {
     VFIO_DEVICE_TYPE_PCI = 0,
     VFIO_DEVICE_TYPE_PLATFORM = 1,
     VFIO_DEVICE_TYPE_CCW = 2,
+    VFIO_DEVICE_TYPE_AP = 3,
 };
 
 typedef struct VFIOMmap {
@@ -146,6 +147,7 @@ typedef struct VFIODMABuf {
 
 typedef struct VFIODisplay {
     QemuConsole *con;
+    RAMFBState *ramfb;
     struct {
         VFIORegion buffer;
         DisplaySurface *surface;

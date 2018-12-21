@@ -653,13 +653,18 @@ static void usb_mtp_object_readdir(MTPState *s, MTPObject *o)
 {
     struct dirent *entry;
     DIR *dir;
+    int fd;
 
     if (o->have_children) {
         return;
     }
     o->have_children = true;
 
-    dir = opendir(o->path);
+    fd = open(o->path, O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        return;
+    }
+    dir = fdopendir(fd);
     if (!dir) {
         return;
     }
@@ -1007,7 +1012,7 @@ static MTPData *usb_mtp_get_object(MTPState *s, MTPControl *c,
 
     trace_usb_mtp_op_get_object(s->dev.addr, o->handle, o->path);
 
-    d->fd = open(o->path, O_RDONLY);
+    d->fd = open(o->path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (d->fd == -1) {
         usb_mtp_data_free(d);
         return NULL;
@@ -1031,7 +1036,7 @@ static MTPData *usb_mtp_get_partial_object(MTPState *s, MTPControl *c,
                                         c->argv[1], c->argv[2]);
 
     d = usb_mtp_data_alloc(c);
-    d->fd = open(o->path, O_RDONLY);
+    d->fd = open(o->path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (d->fd == -1) {
         usb_mtp_data_free(d);
         return NULL;
@@ -1593,17 +1598,23 @@ static void usb_mtp_cancel_packet(USBDevice *dev, USBPacket *p)
     fprintf(stderr, "%s\n", __func__);
 }
 
-static void utf16_to_str(uint8_t len, uint16_t *arr, char *name)
+static char *utf16_to_str(uint8_t len, uint16_t *arr)
 {
-    int count;
-    wchar_t *wstr = g_new0(wchar_t, len);
+    wchar_t *wstr = g_new0(wchar_t, len + 1);
+    int count, dlen;
+    char *dest;
 
     for (count = 0; count < len; count++) {
+        /* FIXME: not working for surrogate pairs */
         wstr[count] = (wchar_t)arr[count];
     }
+    wstr[count] = 0;
 
-    wcstombs(name, wstr, len);
+    dlen = wcstombs(NULL, wstr, 0) + 1;
+    dest = g_malloc(dlen);
+    wcstombs(dest, wstr, dlen);
     g_free(wstr);
+    return dest;
 }
 
 /* Wrapper around write, returns 0 on failure */
@@ -1652,7 +1663,7 @@ static void usb_mtp_write_data(MTPState *s)
                                  0, 0, 0, 0);
             goto done;
         }
-        d->fd = open(path, O_CREAT | O_WRONLY, mask);
+        d->fd = open(path, O_CREAT | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, mask);
         if (d->fd == -1) {
             usb_mtp_queue_result(s, RES_STORE_FULL, d->trans,
                                  0, 0, 0, 0);
@@ -1699,11 +1710,11 @@ free:
     s->write_pending = false;
 }
 
-static void usb_mtp_write_metadata(MTPState *s)
+static void usb_mtp_write_metadata(MTPState *s, uint64_t dlen)
 {
     MTPData *d = s->data_out;
     ObjectInfo *dataset = (ObjectInfo *)d->data;
-    char *filename = g_new0(char, dataset->length);
+    char *filename;
     MTPObject *o;
     MTPObject *p = usb_mtp_object_lookup(s, s->dataset.parent_handle);
     uint32_t next_handle = s->next_handle;
@@ -1711,7 +1722,15 @@ static void usb_mtp_write_metadata(MTPState *s)
     assert(!s->write_pending);
     assert(p != NULL);
 
-    utf16_to_str(dataset->length, dataset->filename, filename);
+    filename = utf16_to_str(MIN(dataset->length,
+                                dlen - offsetof(ObjectInfo, filename)),
+                            dataset->filename);
+
+    if (strchr(filename, '/')) {
+        usb_mtp_queue_result(s, RES_PARAMETER_NOT_SUPPORTED, d->trans,
+                             0, 0, 0, 0);
+        return;
+    }
 
     o = usb_mtp_object_lookup_name(p, filename, dataset->length);
     if (o != NULL) {
@@ -1721,7 +1740,6 @@ static void usb_mtp_write_metadata(MTPState *s)
     s->dataset.filename = filename;
     s->dataset.format = dataset->format;
     s->dataset.size = dataset->size;
-    s->dataset.filename = filename;
     s->write_pending = true;
 
     if (s->dataset.format == FMT_ASSOCIATION) {
@@ -1790,7 +1808,7 @@ static void usb_mtp_get_data(MTPState *s, mtp_container *container,
         if (d->offset == d->length) {
             /* The operation might have already failed */
             if (!s->result) {
-                usb_mtp_write_metadata(s);
+                usb_mtp_write_metadata(s, dlen);
             }
             usb_mtp_data_free(s->data_out);
             s->data_out = NULL;

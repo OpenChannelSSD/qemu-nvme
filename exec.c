@@ -965,6 +965,7 @@ void cpu_exec_realizefn(CPUState *cpu, Error **errp)
         tcg_target_initialized = true;
         cc->tcg_initialize();
     }
+    tlb_init(cpu);
 
 #ifndef CONFIG_USER_ONLY
     if (qdev_get_vmsd(DEVICE(cpu)) == NULL) {
@@ -1734,7 +1735,7 @@ long qemu_getrampagesize(void)
 }
 #endif
 
-#ifdef __linux__
+#ifdef CONFIG_POSIX
 static int64_t get_file_size(int fd)
 {
     int64_t size = lseek(fd, 0, SEEK_END);
@@ -2230,7 +2231,7 @@ static void ram_block_add(RAMBlock *new_block, Error **errp, bool shared)
     }
 }
 
-#ifdef __linux__
+#ifdef CONFIG_POSIX
 RAMBlock *qemu_ram_alloc_from_fd(ram_addr_t size, MemoryRegion *mr,
                                  uint32_t ram_flags, int fd,
                                  Error **errp)
@@ -3387,8 +3388,12 @@ enum write_rom_type {
     FLUSH_CACHE,
 };
 
-static inline void cpu_physical_memory_write_rom_internal(AddressSpace *as,
-    hwaddr addr, const uint8_t *buf, int len, enum write_rom_type type)
+static inline MemTxResult address_space_write_rom_internal(AddressSpace *as,
+                                                           hwaddr addr,
+                                                           MemTxAttrs attrs,
+                                                           const uint8_t *buf,
+                                                           int len,
+                                                           enum write_rom_type type)
 {
     hwaddr l;
     uint8_t *ptr;
@@ -3398,8 +3403,7 @@ static inline void cpu_physical_memory_write_rom_internal(AddressSpace *as,
     rcu_read_lock();
     while (len > 0) {
         l = len;
-        mr = address_space_translate(as, addr, &addr1, &l, true,
-                                     MEMTXATTRS_UNSPECIFIED);
+        mr = address_space_translate(as, addr, &addr1, &l, true, attrs);
 
         if (!(memory_region_is_ram(mr) ||
               memory_region_is_romd(mr))) {
@@ -3422,13 +3426,16 @@ static inline void cpu_physical_memory_write_rom_internal(AddressSpace *as,
         addr += l;
     }
     rcu_read_unlock();
+    return MEMTX_OK;
 }
 
 /* used for ROM loading : can write in RAM and ROM */
-void cpu_physical_memory_write_rom(AddressSpace *as, hwaddr addr,
-                                   const uint8_t *buf, int len)
+MemTxResult address_space_write_rom(AddressSpace *as, hwaddr addr,
+                                    MemTxAttrs attrs,
+                                    const uint8_t *buf, int len)
 {
-    cpu_physical_memory_write_rom_internal(as, addr, buf, len, WRITE_DATA);
+    return address_space_write_rom_internal(as, addr, attrs,
+                                            buf, len, WRITE_DATA);
 }
 
 void cpu_flush_icache_range(hwaddr start, int len)
@@ -3443,8 +3450,9 @@ void cpu_flush_icache_range(hwaddr start, int len)
         return;
     }
 
-    cpu_physical_memory_write_rom_internal(&address_space_memory,
-                                           start, NULL, len, FLUSH_CACHE);
+    address_space_write_rom_internal(&address_space_memory,
+                                     start, MEMTXATTRS_UNSPECIFIED,
+                                     NULL, len, FLUSH_CACHE);
 }
 
 typedef struct {
@@ -3872,8 +3880,9 @@ int cpu_memory_rw_debug(CPUState *cpu, target_ulong addr,
             l = len;
         phys_addr += (addr & ~TARGET_PAGE_MASK);
         if (is_write) {
-            cpu_physical_memory_write_rom(cpu->cpu_ases[asidx].as,
-                                          phys_addr, buf, l);
+            address_space_write_rom(cpu->cpu_ases[asidx].as, phys_addr,
+                                    MEMTXATTRS_UNSPECIFIED,
+                                    buf, l);
         } else {
             address_space_rw(cpu->cpu_ases[asidx].as, phys_addr,
                              MEMTXATTRS_UNSPECIFIED,
@@ -3906,11 +3915,6 @@ int qemu_target_page_bits_min(void)
 }
 #endif
 
-/*
- * A helper function for the _utterly broken_ virtio device model to find out if
- * it's running on a big endian machine. Don't do this at home kids!
- */
-bool target_words_bigendian(void);
 bool target_words_bigendian(void)
 {
 #if defined(TARGET_WORDS_BIGENDIAN)

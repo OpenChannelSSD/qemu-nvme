@@ -72,9 +72,7 @@
 #include "sysemu/sysemu.h"
 #include "target/i386/cpu.h"
 
-pthread_rwlock_t mem_lock = PTHREAD_RWLOCK_INITIALIZER;
 HVFState *hvf_state;
-int hvf_disabled = 1;
 
 static void assert_hvf_ok(hv_return_t ret)
 {
@@ -587,7 +585,7 @@ int hvf_init_vcpu(CPUState *cpu)
     hvf_reset_vcpu(cpu);
 
     x86cpu = X86_CPU(cpu);
-    x86cpu->env.kvm_xsave_buf = qemu_memalign(4096, 4096);
+    x86cpu->env.xsave_buf = qemu_memalign(4096, 4096);
 
     hv_vcpu_enable_native_msr(cpu->hvf_fd, MSR_STAR, 1);
     hv_vcpu_enable_native_msr(cpu->hvf_fd, MSR_LSTAR, 1);
@@ -603,11 +601,6 @@ int hvf_init_vcpu(CPUState *cpu)
     hv_vcpu_enable_native_msr(cpu->hvf_fd, MSR_IA32_SYSENTER_ESP, 1);
 
     return 0;
-}
-
-void hvf_disable(int shouldDisable)
-{
-    hvf_disabled = shouldDisable;
 }
 
 static void hvf_store_events(CPUState *cpu, uint32_t ins_len, uint64_t idtvec_info)
@@ -935,7 +928,7 @@ int hvf_vcpu_exec(CPUState *cpu)
     return ret;
 }
 
-static bool hvf_allowed;
+bool hvf_allowed;
 
 static int hvf_accel_init(MachineState *ms)
 {
@@ -943,7 +936,6 @@ static int hvf_accel_init(MachineState *ms)
     hv_return_t ret;
     HVFState *s;
 
-    hvf_disable(0);
     ret = hv_vm_create(HV_VM_DEFAULT);
     assert_hvf_ok(ret);
 

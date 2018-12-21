@@ -107,8 +107,14 @@ matrix:
     - env: CONFIG="--disable-tcg"
            TEST_CMD=""
       compiler: gcc
-    - env: CONFIG=""
+    # MacOSX builds
+    - env: CONFIG="--target-list=aarch64-softmmu,arm-softmmu,i386-softmmu,mips-softmmu,mips64-softmmu,ppc64-softmmu,riscv64-softmmu,s390x-softmmu,x86_64-softmmu"
       os: osx
+      osx_image: xcode9.4
+      compiler: clang
+    - env: CONFIG="--target-list=i386-softmmu,ppc-softmmu,ppc64-softmmu,m68k-softmmu,x86_64-softmmu"
+      os: osx
+      osx_image: xcode10
       compiler: clang
     # Python builds
     - env: CONFIG="--target-list=x86_64-softmmu"
@@ -117,6 +123,14 @@ matrix:
     - env: CONFIG="--target-list=x86_64-softmmu"
       python:
         - "3.6"
+    # Acceptance (Functional) tests
+    - env: CONFIG="--python=/usr/bin/python3 --target-list=x86_64-softmmu"
+           TEST_CMD="make AVOCADO_SHOW=app check-acceptance"
+      addons:
+        apt:
+          packages:
+            - python3-pip
+            - python3.4-venv
     # Using newer GCC with sanitizers
     - addons:
         apt:

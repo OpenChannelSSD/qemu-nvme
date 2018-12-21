@@ -171,7 +171,7 @@ typedef enum X86Seg {
 #define HF_AC_SHIFT         18 /* must be same as eflags */
 #define HF_SMM_SHIFT        19 /* CPU in SMM mode */
 #define HF_SVME_SHIFT       20 /* SVME enabled (copy of EFER.SVME) */
-#define HF_SVMI_SHIFT       21 /* SVM intercepts are active */
+#define HF_GUEST_SHIFT      21 /* SVM intercepts are active */
 #define HF_OSFXSR_SHIFT     22 /* CR4.OSFXSR */
 #define HF_SMAP_SHIFT       23 /* CR4.SMAP */
 #define HF_IOBPT_SHIFT      24 /* an io breakpoint enabled */
@@ -196,7 +196,7 @@ typedef enum X86Seg {
 #define HF_AC_MASK           (1 << HF_AC_SHIFT)
 #define HF_SMM_MASK          (1 << HF_SMM_SHIFT)
 #define HF_SVME_MASK         (1 << HF_SVME_SHIFT)
-#define HF_SVMI_MASK         (1 << HF_SVMI_SHIFT)
+#define HF_GUEST_MASK        (1 << HF_GUEST_SHIFT)
 #define HF_OSFXSR_MASK       (1 << HF_OSFXSR_SHIFT)
 #define HF_SMAP_MASK         (1 << HF_SMAP_SHIFT)
 #define HF_IOBPT_MASK        (1 << HF_IOBPT_SHIFT)
@@ -502,6 +502,7 @@ typedef enum FeatureWord {
     FEAT_6_EAX,         /* CPUID[6].EAX */
     FEAT_XSAVE_COMP_LO, /* CPUID[EAX=0xd,ECX=0].EAX */
     FEAT_XSAVE_COMP_HI, /* CPUID[EAX=0xd,ECX=0].EDX */
+    FEAT_ARCH_CAPABILITIES,
     FEATURE_WORDS,
 } FeatureWord;
 
@@ -686,6 +687,8 @@ typedef uint32_t FeatureWordArray[FEATURE_WORDS];
 #define CPUID_7_0_ECX_LA57     (1U << 16)
 #define CPUID_7_0_ECX_RDPID    (1U << 22)
 #define CPUID_7_0_ECX_CLDEMOTE (1U << 25)  /* CLDEMOTE Instruction */
+#define CPUID_7_0_ECX_MOVDIRI  (1U << 27)  /* MOVDIRI Instruction */
+#define CPUID_7_0_ECX_MOVDIR64B (1U << 28) /* MOVDIR64B Instruction */
 
 #define CPUID_7_0_EDX_AVX512_4VNNIW (1U << 2) /* AVX512 Neural Network Instructions */
 #define CPUID_7_0_EDX_AVX512_4FMAPS (1U << 3) /* AVX512 Multiply Accumulation Single Precision */
@@ -729,6 +732,13 @@ typedef uint32_t FeatureWordArray[FEATURE_WORDS];
 #define CPUID_TOPOLOGY_LEVEL_INVALID  (0U << 8)
 #define CPUID_TOPOLOGY_LEVEL_SMT      (1U << 8)
 #define CPUID_TOPOLOGY_LEVEL_CORE     (2U << 8)
+
+/* MSR Feature Bits */
+#define MSR_ARCH_CAP_RDCL_NO    (1U << 0)
+#define MSR_ARCH_CAP_IBRS_ALL   (1U << 1)
+#define MSR_ARCH_CAP_RSBA       (1U << 2)
+#define MSR_ARCH_CAP_SKIP_L1DFL_VMENTRY (1U << 3)
+#define MSR_ARCH_CAP_SSB_NO     (1U << 4)
 
 #ifndef HYPERV_SPINLOCK_NEVER_RETRY
 #define HYPERV_SPINLOCK_NEVER_RETRY             0xFFFFFFFF
@@ -1327,7 +1337,9 @@ typedef struct CPUX86State {
     bool tsc_valid;
     int64_t tsc_khz;
     int64_t user_tsc_khz; /* for sanity check only */
-    void *kvm_xsave_buf;
+#if defined(CONFIG_KVM) || defined(CONFIG_HVF)
+    void *xsave_buf;
+#endif
 #if defined(CONFIG_HVF)
     HVFX86EmulatorState *hvf_emul;
 #endif
@@ -1376,10 +1388,13 @@ struct X86CPU {
     bool hyperv_vpindex;
     bool hyperv_runtime;
     bool hyperv_synic;
+    bool hyperv_synic_kvm_only;
     bool hyperv_stimer;
     bool hyperv_frequencies;
     bool hyperv_reenlightenment;
     bool hyperv_tlbflush;
+    bool hyperv_evmcs;
+    bool hyperv_ipi;
     bool check_cpuid;
     bool enforce_cpuid;
     bool expose_kvm;
@@ -1485,6 +1500,7 @@ extern struct VMStateDescription vmstate_x86_cpu;
  */
 void x86_cpu_do_interrupt(CPUState *cpu);
 bool x86_cpu_exec_interrupt(CPUState *cpu, int int_req);
+int x86_cpu_pending_interrupt(CPUState *cs, int interrupt_request);
 
 int x86_cpu_write_elf64_note(WriteCoreDumpFunction f, CPUState *cpu,
                              int cpuid, void *opaque);

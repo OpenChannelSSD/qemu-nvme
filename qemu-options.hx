@@ -1019,7 +1019,7 @@ Define a new file system device. Valid options are:
 @table @option
 @item @var{fsdriver}
 This option specifies the fs driver backend to use.
-Currently "local", "handle" and "proxy" file system drivers are supported.
+Currently "local" and "proxy" file system drivers are supported.
 @item id=@var{id}
 Specifies identifier for this device
 @item path=@var{path}
@@ -1037,7 +1037,7 @@ hidden .virtfs_metadata directory. Directories exported by this security model c
 interact with other unix tools. "none" security model is same as
 passthrough except the sever won't report failures if it fails to
 set file attributes like ownership. Security model is mandatory
-only for local fsdriver. Other fsdrivers (like handle, proxy) don't take
+only for local fsdriver. Other fsdrivers (like proxy) don't take
 security model as a parameter.
 @item writeout=@var{writeout}
 This is an optional argument. The only supported value is "immediate".
@@ -1088,7 +1088,7 @@ The general form of a Virtual File system pass-through options are:
 @table @option
 @item @var{fsdriver}
 This option specifies the fs driver backend to use.
-Currently "local", "handle" and "proxy" file system drivers are supported.
+Currently "local" and "proxy" file system drivers are supported.
 @item id=@var{id}
 Specifies identifier for this device
 @item path=@var{path}
@@ -1106,7 +1106,7 @@ hidden .virtfs_metadata directory. Directories exported by this security model c
 interact with other unix tools. "none" security model is same as
 passthrough except the sever won't report failures if it fails to
 set file attributes like ownership. Security model is mandatory only
-for local fsdriver. Other fsdrivers (like handle, proxy) don't take security
+for local fsdriver. Other fsdrivers (like proxy) don't take security
 model as a parameter.
 @item writeout=@var{writeout}
 This is an optional argument. The only supported value is "immediate".
@@ -1216,7 +1216,8 @@ DEF("display", HAS_ARG, QEMU_OPTION_display,
     "-display gtk[,grab_on_hover=on|off][,gl=on|off]|\n"
     "-display vnc=<display>[,<optargs>]\n"
     "-display curses\n"
-    "-display none"
+    "-display none\n"
+    "-display egl-headless[,rendernode=<file>]"
     "                select display type\n"
     "The default display is equivalent to\n"
 #if defined(CONFIG_GTK)
@@ -1258,6 +1259,9 @@ menus and other UI elements to configure and control the VM during
 runtime.
 @item vnc
 Start a VNC server on display <arg>
+@item egl-headless
+Offload all OpenGL operations to a local DRI device. For any graphical display,
+this display needs to be paired with either VNC or SPICE displays.
 @end table
 ETEXI
 
@@ -1823,7 +1827,7 @@ DEF("netdev", HAS_ARG, QEMU_OPTION_netdev,
     "         [,ipv6[=on|off]][,ipv6-net=addr[/int]][,ipv6-host=addr]\n"
     "         [,restrict=on|off][,hostname=host][,dhcpstart=addr]\n"
     "         [,dns=addr][,ipv6-dns=addr][,dnssearch=domain][,domainname=domain]\n"
-    "         [,tftp=dir][,bootfile=f][,hostfwd=rule][,guestfwd=rule]"
+    "         [,tftp=dir][,tftp-server-name=name][,bootfile=f][,hostfwd=rule][,guestfwd=rule]"
 #ifndef _WIN32
                                              "[,smb=dir[,smbserver=addr]]\n"
 #endif
@@ -2060,6 +2064,11 @@ server. The files in @var{dir} will be exposed as the root of a TFTP server.
 The TFTP client on the guest must be configured in binary mode (use the command
 @code{bin} of the Unix TFTP client).
 
+@item tftp-server-name=@var{name}
+In BOOTP reply, broadcast @var{name} as the "TFTP server name" (RFC2132 option
+66). This can be used to advise the guest to load boot files or configurations
+from a different server than the host address.
+
 @item bootfile=@var{file}
 When using the user mode network stack, broadcast @var{file} as the BOOTP
 filename. In conjunction with @option{tftp}, this can be used to network boot
@@ -2256,7 +2265,7 @@ qemu-system-i386 linux.img \
                  -netdev socket,id=n2,mcast=230.0.0.1:1234
 # launch yet another QEMU instance on same "bus"
 qemu-system-i386 linux.img \
-                 -device e1000,netdev=n3,macaddr=52:54:00:12:34:58 \
+                 -device e1000,netdev=n3,mac=52:54:00:12:34:58 \
                  -netdev socket,id=n3,mcast=230.0.0.1:1234
 @end example
 
@@ -2409,9 +2418,9 @@ DEF("chardev", HAS_ARG, QEMU_OPTION_chardev,
     "-chardev help\n"
     "-chardev null,id=id[,mux=on|off][,logfile=PATH][,logappend=on|off]\n"
     "-chardev socket,id=id[,host=host],port=port[,to=to][,ipv4][,ipv6][,nodelay][,reconnect=seconds]\n"
-    "         [,server][,nowait][,telnet][,reconnect=seconds][,mux=on|off]\n"
+    "         [,server][,nowait][,telnet][,websocket][,reconnect=seconds][,mux=on|off]\n"
     "         [,logfile=PATH][,logappend=on|off][,tls-creds=ID] (tcp)\n"
-    "-chardev socket,id=id,path=path[,server][,nowait][,telnet][,reconnect=seconds]\n"
+    "-chardev socket,id=id,path=path[,server][,nowait][,telnet][,websocket][,reconnect=seconds]\n"
     "         [,mux=on|off][,logfile=PATH][,logappend=on|off] (unix)\n"
     "-chardev udp,id=id[,host=host],port=port[,localaddr=localaddr]\n"
     "         [,localport=localport][,ipv4][,ipv6][,mux=on|off]\n"
@@ -2539,7 +2548,7 @@ The available backends are:
 A void device. This device will not emit any data, and will drop any data it
 receives. The null backend does not take any options.
 
-@item -chardev socket,id=@var{id}[,@var{TCP options} or @var{unix options}][,server][,nowait][,telnet][,reconnect=@var{seconds}][,tls-creds=@var{id}]
+@item -chardev socket,id=@var{id}[,@var{TCP options} or @var{unix options}][,server][,nowait][,telnet][,websocket][,reconnect=@var{seconds}][,tls-creds=@var{id}]
 
 Create a two-way stream socket, which can be either a TCP or a unix socket. A
 unix socket will be created if @option{path} is specified. Behaviour is
@@ -2552,6 +2561,9 @@ connect to a listening socket.
 
 @option{telnet} specifies that traffic on the socket should interpret telnet
 escape sequences.
+
+@option{websocket} specifies that the socket uses WebSocket protocol for
+communication.
 
 @option{reconnect} sets the timeout for reconnecting on non-server sockets when
 the remote end goes away.  qemu will delay this many seconds and then attempt
@@ -2763,6 +2775,10 @@ the first @code{-bt hci[...]} option is valid and defines the HCI's
 logic.  The Transport Layer is decided by the machine type.  Currently
 the machines @code{n800} and @code{n810} have one HCI and all other
 machines have none.
+
+Note: This option and the whole bluetooth subsystem is considered as deprecated.
+If you still use it, please send a mail to @email{qemu-devel@@nongnu.org} where
+you describe your usecase.
 
 @anchor{bt-hcis}
 The following three types are recognized:
@@ -3100,6 +3116,10 @@ telnet option negotiation.  This will also allow you to send the
 MAGIC_SYSRQ sequence if you use a telnet that supports sending the break
 sequence.  Typically in unix telnet you do it with Control-] and then
 type "send break" followed by pressing the enter key.
+
+@item websocket:@var{host}:@var{port},server[,nowait][,nodelay]
+The WebSocket protocol is used instead of raw tcp socket. The port acts as
+a WebSocket server. Client mode is not supported.
 
 @item unix:@var{path}[,server][,nowait][,reconnect=@var{seconds}]
 A unix domain socket is used instead of a tcp socket.  The option works the
@@ -3458,25 +3478,29 @@ HXCOMM Silently ignored for compatibility
 DEF("clock", HAS_ARG, QEMU_OPTION_clock, "", QEMU_ARCH_ALL)
 
 DEF("rtc", HAS_ARG, QEMU_OPTION_rtc, \
-    "-rtc [base=utc|localtime|date][,clock=host|rt|vm][,driftfix=none|slew]\n" \
+    "-rtc [base=utc|localtime|<datetime>][,clock=host|rt|vm][,driftfix=none|slew]\n" \
     "                set the RTC base and clock, enable drift fix for clock ticks (x86 only)\n",
     QEMU_ARCH_ALL)
 
 STEXI
 
-@item -rtc [base=utc|localtime|@var{date}][,clock=host|vm][,driftfix=none|slew]
+@item -rtc [base=utc|localtime|@var{datetime}][,clock=host|rt|vm][,driftfix=none|slew]
 @findex -rtc
 Specify @option{base} as @code{utc} or @code{localtime} to let the RTC start at the current
 UTC or local time, respectively. @code{localtime} is required for correct date in
-MS-DOS or Windows. To start at a specific point in time, provide @var{date} in the
+MS-DOS or Windows. To start at a specific point in time, provide @var{datetime} in the
 format @code{2006-06-17T16:01:21} or @code{2006-06-17}. The default base is UTC.
 
 By default the RTC is driven by the host system time. This allows using of the
 RTC as accurate reference clock inside the guest, specifically if the host
 time is smoothly following an accurate external reference clock, e.g. via NTP.
 If you want to isolate the guest time from the host, you can set @option{clock}
-to @code{rt} instead.  To even prevent it from progressing during suspension,
-you can set it to @code{vm}.
+to @code{rt} instead, which provides a host monotonic clock if host support it.
+To even prevent the RTC from progressing during suspension, you can set @option{clock}
+to @code{vm} (virtual clock). @samp{clock=vm} is recommended especially in
+icount mode in order to preserve determinism; however, note that in icount mode
+the speed of the virtual clock is variable and can in general differ from the
+host clock.
 
 Enable @option{driftfix} (i386 targets only) if you experience time drift problems,
 specifically with Windows' ACPI HAL. This option will try to figure out how
@@ -4001,7 +4025,7 @@ Memory backend objects offer more control than the @option{-m} option that is
 traditionally used to define guest RAM. Please refer to
 @option{memory-backend-file} for a description of the options.
 
-@item -object memory-backend-memfd,id=@var{id},merge=@var{on|off},dump=@var{on|off},prealloc=@var{on|off},size=@var{size},host-nodes=@var{host-nodes},policy=@var{default|preferred|bind|interleave},seal=@var{on|off},hugetlb=@var{on|off},hugetlbsize=@var{size}
+@item -object memory-backend-memfd,id=@var{id},merge=@var{on|off},dump=@var{on|off},share=@var{on|off},prealloc=@var{on|off},size=@var{size},host-nodes=@var{host-nodes},policy=@var{default|preferred|bind|interleave},seal=@var{on|off},hugetlb=@var{on|off},hugetlbsize=@var{size}
 
 Creates an anonymous memory file backend object, which allows QEMU to
 share the memory with an external process (e.g. when using
@@ -4022,6 +4046,8 @@ with the @option{seal} option (requires at least Linux 4.16).
 
 Please refer to @option{memory-backend-file} for a description of the
 other options.
+
+The @option{share} boolean option is @var{on} by default with memfd.
 
 @item -object rng-random,id=@var{id},filename=@var{/dev/random}
 

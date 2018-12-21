@@ -2009,15 +2009,6 @@ void tb_invalidate_phys_page_fast(struct page_collection *pages,
 {
     PageDesc *p;
 
-#if 0
-    if (1) {
-        qemu_log("modifying code at 0x%x size=%d EIP=%x PC=%08x\n",
-                  cpu_single_env->mem_io_vaddr, len,
-                  cpu_single_env->eip,
-                  cpu_single_env->eip +
-                  (intptr_t)cpu_single_env->segs[R_CS].base);
-    }
-#endif
     assert_memory_lock();
 
     p = page_find(start >> TARGET_PAGE_BITS);
@@ -2299,7 +2290,7 @@ void dump_exec_info(FILE *f, fprintf_function cpu_fprintf)
 {
     struct tb_tree_stats tst = {};
     struct qht_stats hst;
-    size_t nb_tbs;
+    size_t nb_tbs, flush_full, flush_part, flush_elide;
 
     tcg_tb_foreach(tb_tree_stats_iter, &tst);
     nb_tbs = tst.nb_tbs;
@@ -2335,7 +2326,11 @@ void dump_exec_info(FILE *f, fprintf_function cpu_fprintf)
     cpu_fprintf(f, "TB flush count      %u\n",
                 atomic_read(&tb_ctx.tb_flush_count));
     cpu_fprintf(f, "TB invalidate count %zu\n", tcg_tb_phys_invalidate_count());
-    cpu_fprintf(f, "TLB flush count     %zu\n", tlb_flush_count());
+
+    tlb_flush_counts(&flush_full, &flush_part, &flush_elide);
+    cpu_fprintf(f, "TLB full flushes    %zu\n", flush_full);
+    cpu_fprintf(f, "TLB partial flushes %zu\n", flush_part);
+    cpu_fprintf(f, "TLB elided flushes  %zu\n", flush_elide);
     tcg_dump_info(f, cpu_fprintf);
 }
 
@@ -2350,7 +2345,7 @@ void cpu_interrupt(CPUState *cpu, int mask)
 {
     g_assert(qemu_mutex_iothread_locked());
     cpu->interrupt_request |= mask;
-    cpu->icount_decr.u16.high = -1;
+    atomic_set(&cpu->icount_decr.u16.high, -1);
 }
 
 /*

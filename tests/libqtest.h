@@ -55,14 +55,12 @@ QTestState *qtest_init(const char *extra_args);
 
 /**
  * qtest_init_without_qmp_handshake:
- * @use_oob: true to have the server advertise OOB support
  * @extra_args: other arguments to pass to QEMU.  CAUTION: these
  * arguments are subject to word splitting and shell evaluation.
  *
  * Returns: #QTestState instance.
  */
-QTestState *qtest_init_without_qmp_handshake(bool use_oob,
-                                             const char *extra_args);
+QTestState *qtest_init_without_qmp_handshake(const char *extra_args);
 
 /**
  * qtest_quit:
@@ -1012,5 +1010,13 @@ bool qmp_rsp_is_err(QDict *rsp);
  * Assert the response has the given error class and discard @rsp.
  */
 void qmp_assert_error_class(QDict *rsp, const char *class);
+
+/**
+ * qtest_probe_child:
+ * @s: QTestState instance to operate on.
+ *
+ * Returns: true if the child is still alive.
+ */
+bool qtest_probe_child(QTestState *s);
 
 #endif

@@ -25,7 +25,6 @@ owner=jcody@redhat.com
 seq="$(basename $0)"
 echo "QA output created by $seq"
 
-here="$PWD"
 status=1	# failure is the default!
 
 _cleanup()
@@ -70,7 +69,6 @@ echo
 _send_qemu_cmd $QEMU_HANDLE \
     "{'execute': 'drive-mirror',
                  'arguments': {'device': 'testdisk',
-                               'mode':   'absolute-paths',
                                'format': '$IMGFMT',
                                'target': '$DEST_IMG',
                                'sync':   'full',

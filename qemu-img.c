@@ -261,15 +261,16 @@ static int print_block_option_help(const char *filename, const char *fmt)
             return 1;
         }
         if (!proto_drv->create_opts) {
-            error_report("Protocal driver '%s' does not support image creation",
+            error_report("Protocol driver '%s' does not support image creation",
                          proto_drv->format_name);
+            qemu_opts_free(create_opts);
             return 1;
         }
         create_opts = qemu_opts_append(create_opts, proto_drv->create_opts);
     }
 
     printf("Supported options:\n");
-    qemu_opts_print_help(create_opts);
+    qemu_opts_print_help(create_opts, false);
     qemu_opts_free(create_opts);
     return 0;
 }
@@ -1029,6 +1030,7 @@ static int img_commit(int argc, char **argv)
     }
 
     job = block_job_get("commit");
+    assert(job);
     run_block_job(job, &local_err);
     if (local_err) {
         goto unref_backing;
@@ -3773,7 +3775,7 @@ static int print_amend_option_help(const char *format)
     assert(drv->create_opts);
 
     printf("Creation options for '%s':\n", format);
-    qemu_opts_print_help(drv->create_opts);
+    qemu_opts_print_help(drv->create_opts, false);
     printf("\nNote that not all of these options may be amendable.\n");
     return 0;
 }

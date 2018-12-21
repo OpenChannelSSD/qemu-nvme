@@ -199,7 +199,6 @@ static void coroutine_fn mirror_write_complete(MirrorOp *op, int ret)
 {
     MirrorBlockJob *s = op->s;
 
-    aio_context_acquire(blk_get_aio_context(s->common.blk));
     if (ret < 0) {
         BlockErrorAction action;
 
@@ -209,15 +208,14 @@ static void coroutine_fn mirror_write_complete(MirrorOp *op, int ret)
             s->ret = ret;
         }
     }
+
     mirror_iteration_done(op, ret);
-    aio_context_release(blk_get_aio_context(s->common.blk));
 }
 
 static void coroutine_fn mirror_read_complete(MirrorOp *op, int ret)
 {
     MirrorBlockJob *s = op->s;
 
-    aio_context_acquire(blk_get_aio_context(s->common.blk));
     if (ret < 0) {
         BlockErrorAction action;
 
@@ -228,12 +226,11 @@ static void coroutine_fn mirror_read_complete(MirrorOp *op, int ret)
         }
 
         mirror_iteration_done(op, ret);
-    } else {
-        ret = blk_co_pwritev(s->target, op->offset,
-                             op->qiov.size, &op->qiov, 0);
-        mirror_write_complete(op, ret);
+        return;
     }
-    aio_context_release(blk_get_aio_context(s->common.blk));
+
+    ret = blk_co_pwritev(s->target, op->offset, op->qiov.size, &op->qiov, 0);
+    mirror_write_complete(op, ret);
 }
 
 /* Clip bytes relative to offset to not exceed end-of-file */
@@ -280,7 +277,8 @@ static int mirror_cow_align(MirrorBlockJob *s, int64_t *offset,
     return ret;
 }
 
-static inline void mirror_wait_for_any_operation(MirrorBlockJob *s, bool active)
+static inline void coroutine_fn
+mirror_wait_for_any_operation(MirrorBlockJob *s, bool active)
 {
     MirrorOp *op;
 
@@ -298,7 +296,8 @@ static inline void mirror_wait_for_any_operation(MirrorBlockJob *s, bool active)
     abort();
 }
 
-static inline void mirror_wait_for_free_in_flight_slot(MirrorBlockJob *s)
+static inline void coroutine_fn
+mirror_wait_for_free_in_flight_slot(MirrorBlockJob *s)
 {
     /* Only non-active operations use up in-flight slots */
     mirror_wait_for_any_operation(s, false);
@@ -601,7 +600,7 @@ static void mirror_free_init(MirrorBlockJob *s)
  * mirror_resume() because mirror_run() will begin iterating again
  * when the job is resumed.
  */
-static void mirror_wait_for_all_io(MirrorBlockJob *s)
+static void coroutine_fn mirror_wait_for_all_io(MirrorBlockJob *s)
 {
     while (s->in_flight > 0) {
         mirror_wait_for_free_in_flight_slot(s);
@@ -672,9 +671,10 @@ static int mirror_exit_common(Job *job)
 
     if (s->should_complete && !abort) {
         BlockDriverState *to_replace = s->to_replace ?: src;
+        bool ro = bdrv_is_read_only(to_replace);
 
-        if (bdrv_get_flags(target_bs) != bdrv_get_flags(to_replace)) {
-            bdrv_reopen(target_bs, bdrv_get_flags(to_replace), NULL);
+        if (ro != bdrv_is_read_only(target_bs)) {
+            bdrv_reopen_set_read_only(target_bs, ro, NULL);
         }
 
         /* The mirror job has no requests in flight any more, but we need to
@@ -734,7 +734,7 @@ static void mirror_abort(Job *job)
     assert(ret == 0);
 }
 
-static void mirror_throttle(MirrorBlockJob *s)
+static void coroutine_fn mirror_throttle(MirrorBlockJob *s)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
@@ -1109,7 +1109,7 @@ static void mirror_complete(Job *job, Error **errp)
     job_enter(job);
 }
 
-static void mirror_pause(Job *job)
+static void coroutine_fn mirror_pause(Job *job)
 {
     MirrorBlockJob *s = container_of(job, MirrorBlockJob, common.job);
 
@@ -1180,9 +1180,10 @@ static const BlockJobDriver commit_active_job_driver = {
     .drain                  = mirror_drain,
 };
 
-static void do_sync_target_write(MirrorBlockJob *job, MirrorMethod method,
-                                 uint64_t offset, uint64_t bytes,
-                                 QEMUIOVector *qiov, int flags)
+static void coroutine_fn
+do_sync_target_write(MirrorBlockJob *job, MirrorMethod method,
+                     uint64_t offset, uint64_t bytes,
+                     QEMUIOVector *qiov, int flags)
 {
     BdrvDirtyBitmapIter *iter;
     QEMUIOVector target_qiov;
@@ -1692,13 +1693,15 @@ void commit_active_start(const char *job_id, BlockDriverState *bs,
                          BlockCompletionFunc *cb, void *opaque,
                          bool auto_complete, Error **errp)
 {
-    int orig_base_flags;
+    bool base_read_only;
     Error *local_err = NULL;
 
-    orig_base_flags = bdrv_get_flags(base);
+    base_read_only = bdrv_is_read_only(base);
 
-    if (bdrv_reopen(base, bs->open_flags, errp)) {
-        return;
+    if (base_read_only) {
+        if (bdrv_reopen_set_read_only(base, false, errp) < 0) {
+            return;
+        }
     }
 
     mirror_start_job(job_id, bs, creation_flags, base, NULL, speed, 0, 0,
@@ -1717,6 +1720,8 @@ void commit_active_start(const char *job_id, BlockDriverState *bs,
 error_restore_flags:
     /* ignore error and errp for bdrv_reopen, because we want to propagate
      * the original error */
-    bdrv_reopen(base, orig_base_flags, NULL);
+    if (base_read_only) {
+        bdrv_reopen_set_read_only(base, true, NULL);
+    }
     return;
 }

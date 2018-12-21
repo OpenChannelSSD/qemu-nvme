@@ -14,6 +14,7 @@
 #include "hw/9pfs/9p.h"
 #include "hw/xen/xen_backend.h"
 #include "hw/9pfs/xen-9pfs.h"
+#include "qapi/error.h"
 #include "qemu/config-file.h"
 #include "qemu/option.h"
 #include "fsdev/qemu-fsdev.h"
@@ -177,7 +178,7 @@ static void xen_9pfs_init_out_iov_from_pdu(V9fsPDU *pdu,
 
     g_free(ring->sg);
 
-    ring->sg = g_malloc0(sizeof(*ring->sg) * 2);
+    ring->sg = g_new0(struct iovec, 2);
     xen_9pfs_out_sg(ring, ring->sg, &num, pdu->idx);
     *piov = ring->sg;
     *pniov = num;
@@ -195,7 +196,7 @@ static void xen_9pfs_init_in_iov_from_pdu(V9fsPDU *pdu,
 
     g_free(ring->sg);
 
-    ring->sg = g_malloc0(sizeof(*ring->sg) * 2);
+    ring->sg = g_new0(struct iovec, 2);
     xen_9pfs_in_sg(ring, ring->sg, &num, pdu->idx, size);
 
     buf_size = iov_size(ring->sg, num);
@@ -355,6 +356,7 @@ static int xen_9pfs_free(struct XenDevice *xendev)
 
 static int xen_9pfs_connect(struct XenDevice *xendev)
 {
+    Error *err = NULL;
     int i;
     Xen9pfsDev *xen_9pdev = container_of(xendev, Xen9pfsDev, xendev);
     V9fsState *s = &xen_9pdev->state;
@@ -366,7 +368,7 @@ static int xen_9pfs_connect(struct XenDevice *xendev)
         return -1;
     }
 
-    xen_9pdev->rings = g_malloc0(xen_9pdev->num_rings * sizeof(Xen9pfsRing));
+    xen_9pdev->rings = g_new0(Xen9pfsRing, xen_9pdev->num_rings);
     for (i = 0; i < xen_9pdev->num_rings; i++) {
         char *str;
         int ring_order;
@@ -452,7 +454,10 @@ static int xen_9pfs_connect(struct XenDevice *xendev)
     qemu_opt_set(fsdev, "path", xen_9pdev->path, NULL);
     qemu_opt_set(fsdev, "security_model", xen_9pdev->security_model, NULL);
     qemu_opts_set_id(fsdev, s->fsconf.fsdev_id);
-    qemu_fsdev_add(fsdev);
+    qemu_fsdev_add(fsdev, &err);
+    if (err) {
+        error_report_err(err);
+    }
     v9fs_device_realize_common(s, &xen_9p_transport, NULL);
 
     return 0;

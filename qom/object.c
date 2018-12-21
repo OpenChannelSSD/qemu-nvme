@@ -49,7 +49,6 @@ struct TypeImpl
 
     void (*class_init)(ObjectClass *klass, void *data);
     void (*class_base_init)(ObjectClass *klass, void *data);
-    void (*class_finalize)(ObjectClass *klass, void *data);
 
     void *class_data;
 
@@ -114,7 +113,6 @@ static TypeImpl *type_new(const TypeInfo *info)
 
     ti->class_init = info->class_init;
     ti->class_base_init = info->class_base_init;
-    ti->class_finalize = info->class_finalize;
     ti->class_data = info->class_data;
 
     ti->instance_init = info->instance_init;
@@ -286,7 +284,14 @@ static void type_initialize(TypeImpl *ti)
     if (ti->instance_size == 0) {
         ti->abstract = true;
     }
-
+    if (type_is_ancestor(ti, type_interface)) {
+        assert(ti->instance_size == 0);
+        assert(ti->abstract);
+        assert(!ti->instance_init);
+        assert(!ti->instance_post_init);
+        assert(!ti->instance_finalize);
+        assert(!ti->num_interfaces);
+    }
     ti->class = g_malloc0(ti->class_size);
 
     parent = type_get_parent(ti);
@@ -410,6 +415,7 @@ void object_initialize_childv(Object *parentobj, const char *propname,
 {
     Error *local_err = NULL;
     Object *obj;
+    UserCreatable *uc;
 
     object_initialize(childobj, size, type);
     obj = OBJECT(childobj);
@@ -424,8 +430,9 @@ void object_initialize_childv(Object *parentobj, const char *propname,
         goto out;
     }
 
-    if (object_dynamic_cast(obj, TYPE_USER_CREATABLE)) {
-        user_creatable_complete(obj, &local_err);
+    uc = (UserCreatable *)object_dynamic_cast(obj, TYPE_USER_CREATABLE);
+    if (uc) {
+        user_creatable_complete(uc, &local_err);
         if (local_err) {
             object_unparent(obj);
             goto out;
@@ -583,6 +590,7 @@ Object *object_new_with_propv(const char *typename,
     Object *obj;
     ObjectClass *klass;
     Error *local_err = NULL;
+    UserCreatable *uc;
 
     klass = object_class_by_name(typename);
     if (!klass) {
@@ -605,8 +613,9 @@ Object *object_new_with_propv(const char *typename,
         goto error;
     }
 
-    if (object_dynamic_cast(obj, TYPE_USER_CREATABLE)) {
-        user_creatable_complete(obj, &local_err);
+    uc = (UserCreatable *)object_dynamic_cast(obj, TYPE_USER_CREATABLE);
+    if (uc) {
+        user_creatable_complete(uc, &local_err);
         if (local_err) {
             object_unparent(obj);
             goto error;
@@ -1108,7 +1117,7 @@ void object_class_property_iter_init(ObjectPropertyIterator *iter,
                                      ObjectClass *klass)
 {
     g_hash_table_iter_init(&iter->iter, klass->properties);
-    iter->nextclass = klass;
+    iter->nextclass = object_class_get_parent(klass);
 }
 
 ObjectProperty *object_class_property_find(ObjectClass *klass, const char *name,
@@ -2423,9 +2432,10 @@ void object_class_property_set_description(ObjectClass *klass,
     op->description = g_strdup(description);
 }
 
-static void object_instance_init(Object *obj)
+static void object_class_init(ObjectClass *klass, void *data)
 {
-    object_property_add_str(obj, "type", qdev_get_type, NULL, NULL);
+    object_class_property_add_str(klass, "type", qdev_get_type,
+                                  NULL, &error_abort);
 }
 
 static void register_types(void)
@@ -2439,7 +2449,7 @@ static void register_types(void)
     static TypeInfo object_info = {
         .name = TYPE_OBJECT,
         .instance_size = sizeof(Object),
-        .instance_init = object_instance_init,
+        .class_init = object_class_init,
         .abstract = true,
     };
 

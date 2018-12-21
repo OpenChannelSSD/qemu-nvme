@@ -39,18 +39,15 @@ struct QTestState
 {
     int fd;
     int qmp_fd;
+    pid_t qemu_pid;  /* our child QEMU process */
+    int wstatus;
+    bool big_endian;
     bool irq_level[MAX_IRQ];
     GString *rx;
-    pid_t qemu_pid;  /* our child QEMU process */
-    bool big_endian;
 };
 
 static GHookList abrt_hooks;
 static struct sigaction sigact_old;
-
-#define g_assert_no_errno(ret) do { \
-    g_assert_cmpint(ret, !=, -1); \
-} while (0)
 
 static int qtest_query_target_endianness(QTestState *s);
 
@@ -61,7 +58,7 @@ static int init_socket(const char *socket_path)
     int ret;
 
     sock = socket(PF_UNIX, SOCK_STREAM, 0);
-    g_assert_no_errno(sock);
+    g_assert_cmpint(sock, !=, -1);
 
     addr.sun_family = AF_UNIX;
     snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", socket_path);
@@ -70,9 +67,9 @@ static int init_socket(const char *socket_path)
     do {
         ret = bind(sock, (struct sockaddr *)&addr, sizeof(addr));
     } while (ret == -1 && errno == EINTR);
-    g_assert_no_errno(ret);
+    g_assert_cmpint(ret, !=, -1);
     ret = listen(sock, 1);
-    g_assert_no_errno(ret);
+    g_assert_cmpint(ret, !=, -1);
 
     return sock;
 }
@@ -100,36 +97,52 @@ static int socket_accept(int sock)
     return ret;
 }
 
+bool qtest_probe_child(QTestState *s)
+{
+    pid_t pid = s->qemu_pid;
+
+    if (pid != -1) {
+        pid = waitpid(pid, &s->wstatus, WNOHANG);
+        if (pid == 0) {
+            return true;
+        }
+        s->qemu_pid = -1;
+    }
+    return false;
+}
+
 static void kill_qemu(QTestState *s)
 {
-    if (s->qemu_pid != -1) {
-        int wstatus = 0;
-        pid_t pid;
+    pid_t pid = s->qemu_pid;
+    int wstatus;
 
-        kill(s->qemu_pid, SIGTERM);
-        TFR(pid = waitpid(s->qemu_pid, &wstatus, 0));
-
+    /* Skip wait if qtest_probe_child already reaped.  */
+    if (pid != -1) {
+        kill(pid, SIGTERM);
+        TFR(pid = waitpid(s->qemu_pid, &s->wstatus, 0));
         assert(pid == s->qemu_pid);
-        /*
-         * We expect qemu to exit with status 0; anything else is
-         * fishy and should be logged with as much detail as possible.
-         */
-        if (wstatus) {
-            if (WIFEXITED(wstatus)) {
-                fprintf(stderr, "%s:%d: kill_qemu() tried to terminate QEMU "
-                        "process but encountered exit status %d\n",
-                        __FILE__, __LINE__, WEXITSTATUS(wstatus));
-            } else if (WIFSIGNALED(wstatus)) {
-                int sig = WTERMSIG(wstatus);
-                const char *signame = strsignal(sig) ?: "unknown ???";
-                const char *dump = WCOREDUMP(wstatus) ? " (core dumped)" : "";
+    }
 
-                fprintf(stderr, "%s:%d: kill_qemu() detected QEMU death "
-                        "from signal %d (%s)%s\n",
-                        __FILE__, __LINE__, sig, signame, dump);
-            }
-            abort();
+    /*
+     * We expect qemu to exit with status 0; anything else is
+     * fishy and should be logged with as much detail as possible.
+     */
+    wstatus = s->wstatus;
+    if (wstatus) {
+        if (WIFEXITED(wstatus)) {
+            fprintf(stderr, "%s:%d: kill_qemu() tried to terminate QEMU "
+                    "process but encountered exit status %d\n",
+                    __FILE__, __LINE__, WEXITSTATUS(wstatus));
+        } else if (WIFSIGNALED(wstatus)) {
+            int sig = WTERMSIG(wstatus);
+            const char *signame = strsignal(sig) ?: "unknown ???";
+            const char *dump = WCOREDUMP(wstatus) ? " (core dumped)" : "";
+
+            fprintf(stderr, "%s:%d: kill_qemu() detected QEMU death "
+                    "from signal %d (%s)%s\n",
+                    __FILE__, __LINE__, sig, signame, dump);
         }
+        abort();
     }
 }
 
@@ -191,8 +204,7 @@ static const char *qtest_qemu_binary(void)
     return qemu_bin;
 }
 
-QTestState *qtest_init_without_qmp_handshake(bool use_oob,
-                                             const char *extra_args)
+QTestState *qtest_init_without_qmp_handshake(const char *extra_args)
 {
     QTestState *s;
     int sock, qmpsock, i;
@@ -219,24 +231,29 @@ QTestState *qtest_init_without_qmp_handshake(bool use_oob,
 
     qtest_add_abrt_handler(kill_qemu_hook_func, s);
 
+    command = g_strdup_printf("exec %s "
+                              "-qtest unix:%s,nowait "
+                              "-qtest-log %s "
+                              "-chardev socket,path=%s,nowait,id=char0 "
+                              "-mon chardev=char0,mode=control "
+                              "-machine accel=qtest "
+                              "-display none "
+                              "%s", qemu_binary, socket_path,
+                              getenv("QTEST_LOG") ? "/dev/fd/2" : "/dev/null",
+                              qmp_socket_path,
+                              extra_args ?: "");
+
+    g_test_message("starting QEMU: %s", command);
+
+    s->wstatus = 0;
     s->qemu_pid = fork();
     if (s->qemu_pid == 0) {
         setenv("QEMU_AUDIO_DRV", "none", true);
-        command = g_strdup_printf("exec %s "
-                                  "-qtest unix:%s,nowait "
-                                  "-qtest-log %s "
-                                  "-chardev socket,path=%s,nowait,id=char0 "
-                                  "-mon chardev=char0,mode=control%s "
-                                  "-machine accel=qtest "
-                                  "-display none "
-                                  "%s", qemu_binary, socket_path,
-                                  getenv("QTEST_LOG") ? "/dev/fd/2" : "/dev/null",
-                                  qmp_socket_path, use_oob ? ",x-oob=on" : "",
-                                  extra_args ?: "");
         execlp("/bin/sh", "sh", "-c", command, NULL);
         exit(1);
     }
 
+    g_free(command);
     s->fd = socket_accept(sock);
     if (s->fd >= 0) {
         s->qmp_fd = socket_accept(qmpsock);
@@ -266,7 +283,7 @@ QTestState *qtest_init_without_qmp_handshake(bool use_oob,
 
 QTestState *qtest_init(const char *extra_args)
 {
-    QTestState *s = qtest_init_without_qmp_handshake(false, extra_args);
+    QTestState *s = qtest_init_without_qmp_handshake(extra_args);
     QDict *greeting;
 
     /* Read the QMP greeting and then do the handshake */
@@ -325,7 +342,6 @@ static void socket_send(int fd, const char *buf, size_t size)
             continue;
         }
 
-        g_assert_no_errno(len);
         g_assert_cmpint(len, >, 0);
 
         offset += len;
