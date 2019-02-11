@@ -82,8 +82,8 @@ typedef struct NvmeSQueue {
     uint64_t    *prp_list;
     QEMUTimer   *timer;
     NvmeRequest *io_req;
-    QTAILQ_HEAD(sq_req_list, NvmeRequest) req_list;
-    QTAILQ_HEAD(out_req_list, NvmeRequest) out_req_list;
+    QTAILQ_HEAD(, NvmeRequest) req_list;
+    QTAILQ_HEAD(, NvmeRequest) out_req_list;
     QTAILQ_ENTRY(NvmeSQueue) entry;
     /* Mapped memory location where the tail pointer is stored by the guest
      * without triggering MMIO exits. */
@@ -107,8 +107,8 @@ typedef struct NvmeCQueue {
     uint64_t    dma_addr;
     uint64_t    *prp_list;
     QEMUTimer   *timer;
-    QTAILQ_HEAD(sq_list, NvmeSQueue) sq_list;
-    QTAILQ_HEAD(cq_req_list, NvmeRequest) req_list;
+    QTAILQ_HEAD(, NvmeSQueue) sq_list;
+    QTAILQ_HEAD(, NvmeRequest) req_list;
     /* Mapped memory location where the head pointer is stored by the guest
      * without triggering MMIO exits. */
     uint64_t    db_addr;

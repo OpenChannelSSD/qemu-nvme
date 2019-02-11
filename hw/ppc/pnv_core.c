@@ -114,7 +114,7 @@ static void pnv_realize_vcpu(PowerPCCPU *cpu, PnvChip *chip, Error **errp)
         return;
     }
 
-    cpu->intc = pcc->intc_create(chip, OBJECT(cpu), &local_err);
+    pcc->intc_create(chip, cpu, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
         return;
@@ -155,7 +155,10 @@ static void pnv_core_realize(DeviceState *dev, Error **errp)
 
     pc->threads = g_new(PowerPCCPU *, cc->nr_threads);
     for (i = 0; i < cc->nr_threads; i++) {
+        PowerPCCPU *cpu;
+
         obj = object_new(typename);
+        cpu = POWERPC_CPU(obj);
 
         pc->threads[i] = POWERPC_CPU(obj);
 
@@ -163,6 +166,9 @@ static void pnv_core_realize(DeviceState *dev, Error **errp)
         object_property_add_child(OBJECT(pc), name, obj, &error_abort);
         object_property_add_alias(obj, "core-pir", OBJECT(pc),
                                   "pir", &error_abort);
+
+        cpu->machine_data = g_new0(PnvCPUState, 1);
+
         object_unref(obj);
     }
 
@@ -189,9 +195,13 @@ err:
 
 static void pnv_unrealize_vcpu(PowerPCCPU *cpu)
 {
+    PnvCPUState *pnv_cpu = pnv_cpu_state(cpu);
+
     qemu_unregister_reset(pnv_cpu_reset, cpu);
-    object_unparent(cpu->intc);
+    object_unparent(OBJECT(pnv_cpu_state(cpu)->icp));
     cpu_remove_sync(CPU(cpu));
+    cpu->machine_data = NULL;
+    g_free(pnv_cpu);
     object_unparent(OBJECT(cpu));
 }
 

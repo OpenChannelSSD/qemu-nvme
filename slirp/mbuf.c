@@ -15,7 +15,6 @@
  * the flags
  */
 
-#include "qemu/osdep.h"
 #include "slirp.h"
 
 #define MBUF_THRESH 30
@@ -232,7 +231,7 @@ dtom(Slirp *slirp, void *dat)
 	  }
 	}
 
-	DEBUG_ERROR((dfd, "dtom failed"));
+	DEBUG_ERROR("dtom failed");
 
 	return (struct mbuf *)0;
 }

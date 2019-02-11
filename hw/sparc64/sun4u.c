@@ -33,7 +33,6 @@
 #include "hw/pci/pci_bus.h"
 #include "hw/pci/pci_host.h"
 #include "hw/pci-host/sabre.h"
-#include "hw/i386/pc.h"
 #include "hw/char/serial.h"
 #include "hw/char/parallel.h"
 #include "hw/timer/m48t59.h"
@@ -153,7 +152,7 @@ static uint64_t sun4u_load_kernel(const char *kernel_filename,
 #else
         bswap_needed = 0;
 #endif
-        kernel_size = load_elf(kernel_filename, NULL, NULL, kernel_entry,
+        kernel_size = load_elf(kernel_filename, NULL, NULL, NULL, kernel_entry,
                                kernel_addr, &kernel_top, 1, EM_SPARCV9, 0, 0);
         if (kernel_size < 0) {
             *kernel_addr = KERNEL_LOAD_ADDR;
@@ -214,6 +213,11 @@ typedef struct PowerDevice {
 } PowerDevice;
 
 /* Power */
+static uint64_t power_mem_read(void *opaque, hwaddr addr, unsigned size)
+{
+    return 0;
+}
+
 static void power_mem_write(void *opaque, hwaddr addr,
                             uint64_t val, unsigned size)
 {
@@ -224,6 +228,7 @@ static void power_mem_write(void *opaque, hwaddr addr,
 }
 
 static const MemoryRegionOps power_mem_ops = {
+    .read = power_mem_read,
     .write = power_mem_write,
     .endianness = DEVICE_NATIVE_ENDIAN,
     .valid = {
@@ -411,7 +416,7 @@ static void prom_init(hwaddr addr, const char *bios_name)
     }
     filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, bios_name);
     if (filename) {
-        ret = load_elf(filename, translate_prom_address, &addr,
+        ret = load_elf(filename, NULL, translate_prom_address, &addr,
                        NULL, NULL, NULL, 1, EM_SPARCV9, 0, 0);
         if (ret < 0 || ret > PROM_SIZE_MAX) {
             ret = load_image_targphys(filename, addr, PROM_SIZE_MAX);
@@ -596,7 +601,15 @@ static void sun4uv_init(MemoryRegion *address_space_mem,
     qdev_connect_gpio_out_named(DEVICE(ebus), "isa-irq", 4,
         qdev_get_gpio_in_named(DEVICE(sabre), "pbm-irq", OBIO_SER_IRQ));
 
-    pci_dev = pci_create_simple(pci_busA, PCI_DEVFN(2, 0), "VGA");
+    switch (vga_interface_type) {
+    case VGA_STD:
+        pci_create_simple(pci_busA, PCI_DEVFN(2, 0), "VGA");
+        break;
+    case VGA_NONE:
+        break;
+    default:
+        abort();   /* Should not happen - types are checked in vl.c already */
+    }
 
     memset(&macaddr, 0, sizeof(MACAddr));
     onboard_nic = false;

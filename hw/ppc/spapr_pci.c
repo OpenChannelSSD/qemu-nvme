@@ -964,7 +964,7 @@ static void populate_resource_props(PCIDevice *d, ResourceProps *rp)
         }
 
         assigned = &rp->assigned[assigned_idx++];
-        assigned->phys_hi = cpu_to_be32(reg->phys_hi | b_n(1));
+        assigned->phys_hi = cpu_to_be32(be32_to_cpu(reg->phys_hi) | b_n(1));
         assigned->phys_mid = cpu_to_be32(d->io_regions[i].addr >> 32);
         assigned->phys_lo = cpu_to_be32(d->io_regions[i].addr);
         assigned->size_hi = reg->size_hi;
@@ -1370,18 +1370,9 @@ static int spapr_create_pci_child_dt(sPAPRPHBState *phb, PCIDevice *dev,
 /* Callback to be called during DRC release. */
 void spapr_phb_remove_pci_device_cb(DeviceState *dev)
 {
-    /* some version guests do not wait for completion of a device
-     * cleanup (generally done asynchronously by the kernel) before
-     * signaling to QEMU that the device is safe, but instead sleep
-     * for some 'safe' period of time. unfortunately on a busy host
-     * this sleep isn't guaranteed to be long enough, resulting in
-     * bad things like IRQ lines being left asserted during final
-     * device removal. to deal with this we call reset just prior
-     * to finalizing the device, which will put the device back into
-     * an 'idle' state, as the device cleanup code expects.
-     */
-    pci_device_reset(PCI_DEVICE(dev));
-    object_unparent(OBJECT(dev));
+    HotplugHandler *hotplug_ctrl = qdev_get_hotplug_handler(dev);
+
+    hotplug_handler_unplug(hotplug_ctrl, dev, &error_abort);
 }
 
 static sPAPRDRConnector *spapr_phb_get_pci_func_drc(sPAPRPHBState *phb,
@@ -1488,6 +1479,23 @@ out:
         error_propagate(errp, local_err);
         g_free(fdt);
     }
+}
+
+static void spapr_pci_unplug(HotplugHandler *plug_handler,
+                             DeviceState *plugged_dev, Error **errp)
+{
+    /* some version guests do not wait for completion of a device
+     * cleanup (generally done asynchronously by the kernel) before
+     * signaling to QEMU that the device is safe, but instead sleep
+     * for some 'safe' period of time. unfortunately on a busy host
+     * this sleep isn't guaranteed to be long enough, resulting in
+     * bad things like IRQ lines being left asserted during final
+     * device removal. to deal with this we call reset just prior
+     * to finalizing the device, which will put the device back into
+     * an 'idle' state, as the device cleanup code expects.
+     */
+    pci_device_reset(PCI_DEVICE(plugged_dev));
+    object_unparent(OBJECT(plugged_dev));
 }
 
 static void spapr_pci_unplug_request(HotplugHandler *plug_handler,
@@ -1965,6 +1973,7 @@ static void spapr_phb_class_init(ObjectClass *klass, void *data)
     dc->user_creatable = true;
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
     hp->plug = spapr_pci_plug;
+    hp->unplug = spapr_pci_unplug;
     hp->unplug_request = spapr_pci_unplug_request;
 }
 
@@ -1978,17 +1987,6 @@ static const TypeInfo spapr_phb_info = {
         { }
     }
 };
-
-PCIHostState *spapr_create_phb(sPAPRMachineState *spapr, int index)
-{
-    DeviceState *dev;
-
-    dev = qdev_create(NULL, TYPE_SPAPR_PCI_HOST_BRIDGE);
-    qdev_prop_set_uint32(dev, "index", index);
-    qdev_init_nofail(dev);
-
-    return PCI_HOST_BRIDGE(dev);
-}
 
 typedef struct sPAPRFDT {
     void *fdt;
@@ -2032,8 +2030,6 @@ static void spapr_phb_pci_enumerate_bridge(PCIBus *bus, PCIDevice *pdev,
                                            void *opaque)
 {
     unsigned int *bus_no = opaque;
-    unsigned int primary = *bus_no;
-    unsigned int subordinate = 0xff;
     PCIBus *sec_bus = NULL;
 
     if ((pci_default_read_config(pdev, PCI_HEADER_TYPE, 1) !=
@@ -2042,7 +2038,7 @@ static void spapr_phb_pci_enumerate_bridge(PCIBus *bus, PCIDevice *pdev,
     }
 
     (*bus_no)++;
-    pci_default_write_config(pdev, PCI_PRIMARY_BUS, primary, 1);
+    pci_default_write_config(pdev, PCI_PRIMARY_BUS, pci_dev_bus_num(pdev), 1);
     pci_default_write_config(pdev, PCI_SECONDARY_BUS, *bus_no, 1);
     pci_default_write_config(pdev, PCI_SUBORDINATE_BUS, *bus_no, 1);
 
@@ -2051,7 +2047,6 @@ static void spapr_phb_pci_enumerate_bridge(PCIBus *bus, PCIDevice *pdev,
         return;
     }
 
-    pci_default_write_config(pdev, PCI_SUBORDINATE_BUS, subordinate, 1);
     pci_for_each_device(sec_bus, pci_bus_num(sec_bus),
                         spapr_phb_pci_enumerate_bridge, bus_no);
     pci_default_write_config(pdev, PCI_SUBORDINATE_BUS, *bus_no, 1);

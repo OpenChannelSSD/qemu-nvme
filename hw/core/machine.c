@@ -21,6 +21,132 @@
 #include "sysemu/numa.h"
 #include "qemu/error-report.h"
 #include "sysemu/qtest.h"
+#include "hw/pci/pci.h"
+
+GlobalProperty hw_compat_3_1[] = {
+    { "pcie-root-port", "x-speed", "2_5" },
+    { "pcie-root-port", "x-width", "1" },
+    { "memory-backend-file", "x-use-canonical-path-for-ramblock-id", "true" },
+    { "memory-backend-memfd", "x-use-canonical-path-for-ramblock-id", "true" },
+    { "tpm-crb", "ppi", "false" },
+    { "tpm-tis", "ppi", "false" },
+    { "usb-kbd", "serial", "42" },
+    { "usb-mouse", "serial", "42" },
+    { "usb-kbd", "serial", "42" },
+};
+const size_t hw_compat_3_1_len = G_N_ELEMENTS(hw_compat_3_1);
+
+GlobalProperty hw_compat_3_0[] = {};
+const size_t hw_compat_3_0_len = G_N_ELEMENTS(hw_compat_3_0);
+
+GlobalProperty hw_compat_2_12[] = {
+    { "migration", "decompress-error-check", "off" },
+    { "hda-audio", "use-timer", "false" },
+    { "cirrus-vga", "global-vmstate", "true" },
+    { "VGA", "global-vmstate", "true" },
+    { "vmware-svga", "global-vmstate", "true" },
+    { "qxl-vga", "global-vmstate", "true" },
+};
+const size_t hw_compat_2_12_len = G_N_ELEMENTS(hw_compat_2_12);
+
+GlobalProperty hw_compat_2_11[] = {
+    { "hpet", "hpet-offset-saved", "false" },
+    { "virtio-blk-pci", "vectors", "2" },
+    { "vhost-user-blk-pci", "vectors", "2" },
+    { "e1000", "migrate_tso_props", "off" },
+};
+const size_t hw_compat_2_11_len = G_N_ELEMENTS(hw_compat_2_11);
+
+GlobalProperty hw_compat_2_10[] = {
+    { "virtio-mouse-device", "wheel-axis", "false" },
+    { "virtio-tablet-device", "wheel-axis", "false" },
+};
+const size_t hw_compat_2_10_len = G_N_ELEMENTS(hw_compat_2_10);
+
+GlobalProperty hw_compat_2_9[] = {
+    { "pci-bridge", "shpc", "off" },
+    { "intel-iommu", "pt", "off" },
+    { "virtio-net-device", "x-mtu-bypass-backend", "off" },
+    { "pcie-root-port", "x-migrate-msix", "false" },
+};
+const size_t hw_compat_2_9_len = G_N_ELEMENTS(hw_compat_2_9);
+
+GlobalProperty hw_compat_2_8[] = {
+    { "fw_cfg_mem", "x-file-slots", "0x10" },
+    { "fw_cfg_io", "x-file-slots", "0x10" },
+    { "pflash_cfi01", "old-multiple-chip-handling", "on" },
+    { "pci-bridge", "shpc", "on" },
+    { TYPE_PCI_DEVICE, "x-pcie-extcap-init", "off" },
+    { "virtio-pci", "x-pcie-deverr-init", "off" },
+    { "virtio-pci", "x-pcie-lnkctl-init", "off" },
+    { "virtio-pci", "x-pcie-pm-init", "off" },
+    { "cirrus-vga", "vgamem_mb", "8" },
+    { "isa-cirrus-vga", "vgamem_mb", "8" },
+};
+const size_t hw_compat_2_8_len = G_N_ELEMENTS(hw_compat_2_8);
+
+GlobalProperty hw_compat_2_7[] = {
+    { "virtio-pci", "page-per-vq", "on" },
+    { "virtio-serial-device", "emergency-write", "off" },
+    { "ioapic", "version", "0x11" },
+    { "intel-iommu", "x-buggy-eim", "true" },
+    { "virtio-pci", "x-ignore-backend-features", "on" },
+};
+const size_t hw_compat_2_7_len = G_N_ELEMENTS(hw_compat_2_7);
+
+GlobalProperty hw_compat_2_6[] = {
+    { "virtio-mmio", "format_transport_address", "off" },
+    /* Optional because not all virtio-pci devices support legacy mode */
+    { "virtio-pci", "disable-modern", "on",  .optional = true },
+    { "virtio-pci", "disable-legacy", "off", .optional = true },
+};
+const size_t hw_compat_2_6_len = G_N_ELEMENTS(hw_compat_2_6);
+
+GlobalProperty hw_compat_2_5[] = {
+    { "isa-fdc", "fallback", "144" },
+    { "pvscsi", "x-old-pci-configuration", "on" },
+    { "pvscsi", "x-disable-pcie", "on" },
+    { "vmxnet3", "x-old-msi-offsets", "on" },
+    { "vmxnet3", "x-disable-pcie", "on" },
+};
+const size_t hw_compat_2_5_len = G_N_ELEMENTS(hw_compat_2_5);
+
+GlobalProperty hw_compat_2_4[] = {
+    { "virtio-blk-device", "scsi", "true" },
+    { "e1000", "extra_mac_registers", "off" },
+    { "virtio-pci", "x-disable-pcie", "on" },
+    { "virtio-pci", "migrate-extra", "off" },
+    { "fw_cfg_mem", "dma_enabled", "off" },
+    { "fw_cfg_io", "dma_enabled", "off" }
+};
+const size_t hw_compat_2_4_len = G_N_ELEMENTS(hw_compat_2_4);
+
+GlobalProperty hw_compat_2_3[] = {
+    { "virtio-blk-pci", "any_layout", "off" },
+    { "virtio-balloon-pci", "any_layout", "off" },
+    { "virtio-serial-pci", "any_layout", "off" },
+    { "virtio-9p-pci", "any_layout", "off" },
+    { "virtio-rng-pci", "any_layout", "off" },
+    { TYPE_PCI_DEVICE, "x-pcie-lnksta-dllla", "off" },
+    { "migration", "send-configuration", "off" },
+    { "migration", "send-section-footer", "off" },
+    { "migration", "store-global-state", "off" },
+};
+const size_t hw_compat_2_3_len = G_N_ELEMENTS(hw_compat_2_3);
+
+GlobalProperty hw_compat_2_2[] = {};
+const size_t hw_compat_2_2_len = G_N_ELEMENTS(hw_compat_2_2);
+
+GlobalProperty hw_compat_2_1[] = {
+    { "intel-hda", "old_msi_addr", "on" },
+    { "VGA", "qemu-extended-regs", "off" },
+    { "secondary-vga", "qemu-extended-regs", "off" },
+    { "virtio-scsi-pci", "any_layout", "off" },
+    { "usb-mouse", "usb_version", "1" },
+    { "usb-kbd", "usb_version", "1" },
+    { "virtio-pci", "virtio-pci-bus-master-bug-migration", "on" },
+};
+const size_t hw_compat_2_1_len = G_N_ELEMENTS(hw_compat_2_1);
 
 static char *machine_get_accel(Object *obj, Error **errp)
 {
@@ -591,7 +717,7 @@ static void machine_class_init(ObjectClass *oc, void *data)
     object_class_property_add_bool(oc, "dump-guest-core",
         machine_get_dump_guest_core, machine_set_dump_guest_core, &error_abort);
     object_class_property_set_description(oc, "dump-guest-core",
-        "Include guest memory in  a core dump", &error_abort);
+        "Include guest memory in a core dump", &error_abort);
 
     object_class_property_add_bool(oc, "mem-merge",
         machine_get_mem_merge, machine_set_mem_merge, &error_abort);
@@ -647,14 +773,17 @@ static void machine_class_base_init(ObjectClass *oc, void *data)
         assert(g_str_has_suffix(cname, TYPE_MACHINE_SUFFIX));
         mc->name = g_strndup(cname,
                             strlen(cname) - strlen(TYPE_MACHINE_SUFFIX));
+        mc->compat_props = g_ptr_array_new();
     }
 }
 
 static void machine_initfn(Object *obj)
 {
     MachineState *ms = MACHINE(obj);
+    MachineClass *mc = MACHINE_GET_CLASS(obj);
 
     ms->kernel_irqchip_allowed = true;
+    ms->kernel_irqchip_split = mc->default_kernel_irqchip_split;
     ms->kvm_shadow_mem = -1;
     ms->dump_guest_core = true;
     ms->mem_merge = true;
@@ -832,24 +961,6 @@ void machine_run_board_init(MachineState *machine)
     }
 
     machine_class->init(machine);
-}
-
-void machine_register_compat_props(MachineState *machine)
-{
-    MachineClass *mc = MACHINE_GET_CLASS(machine);
-    int i;
-    GlobalProperty *p;
-
-    if (!mc->compat_props) {
-        return;
-    }
-
-    for (i = 0; i < mc->compat_props->len; i++) {
-        p = g_array_index(mc->compat_props, GlobalProperty *, i);
-        /* Machine compat_props must never cause errors: */
-        p->errp = &error_abort;
-        qdev_prop_register_global(p);
-    }
 }
 
 static const TypeInfo machine_info = {

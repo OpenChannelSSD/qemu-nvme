@@ -1778,7 +1778,7 @@ static void qemu_cpu_kick_thread(CPUState *cpu)
     }
     cpu->thread_kicked = true;
     err = pthread_kill(cpu->thread->thread, SIG_IPI);
-    if (err) {
+    if (err && err != ESRCH) {
         fprintf(stderr, "qemu:%s: %s", __func__, strerror(err));
         exit(1);
     }
@@ -2100,7 +2100,8 @@ void qemu_init_vcpu(CPUState *cpu)
 void cpu_stop_current(void)
 {
     if (current_cpu) {
-        qemu_cpu_stop(current_cpu, true);
+        current_cpu->stop = true;
+        cpu_exit(current_cpu);
     }
 }
 

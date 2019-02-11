@@ -484,12 +484,16 @@ static void *qemu_thread_start(void *args)
     void *arg = qemu_thread_args->arg;
     void *r;
 
-#ifdef CONFIG_PTHREAD_SETNAME_NP
+#ifdef CONFIG_THREAD_SETNAME_BYTHREAD
     /* Attempt to set the threads name; note that this is for debug, so
      * we're not going to fail if we can't set it.
      */
     if (name_threads && qemu_thread_args->name) {
+# if defined(CONFIG_PTHREAD_SETNAME_NP_W_TID)
         pthread_setname_np(pthread_self(), qemu_thread_args->name);
+# elif defined(CONFIG_PTHREAD_SETNAME_NP_WO_TID)
+        pthread_setname_np(qemu_thread_args->name);
+# endif
     }
 #endif
     g_free(qemu_thread_args->name);
@@ -520,6 +524,11 @@ void qemu_thread_create(QemuThread *thread, const char *name,
 
     /* Leave signal handling to the iothread.  */
     sigfillset(&set);
+    /* Blocking the signals can result in undefined behaviour. */
+    sigdelset(&set, SIGSEGV);
+    sigdelset(&set, SIGFPE);
+    sigdelset(&set, SIGILL);
+    /* TODO avoid SIGBUS loss on macOS */
     pthread_sigmask(SIG_SETMASK, &set, &oldset);
 
     qemu_thread_args = g_new0(QemuThreadArgs, 1);

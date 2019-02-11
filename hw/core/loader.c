@@ -77,21 +77,20 @@ int64_t get_image_size(const char *filename)
 ssize_t load_image_size(const char *filename, void *addr, size_t size)
 {
     int fd;
-    ssize_t actsize;
+    ssize_t actsize, l = 0;
 
     fd = open(filename, O_RDONLY | O_BINARY);
     if (fd < 0) {
         return -1;
     }
 
-    actsize = read(fd, addr, size);
-    if (actsize < 0) {
-        close(fd);
-        return -1;
+    while ((actsize = read(fd, addr + l, size - l)) > 0) {
+        l += actsize;
     }
+
     close(fd);
 
-    return actsize;
+    return actsize < 0 ? -1 : l;
 }
 
 /* read()-like version */
@@ -244,26 +243,26 @@ int load_aout(const char *filename, hwaddr addr, int max_sz,
     case OMAGIC:
         if (e.a_text + e.a_data > max_sz)
             goto fail;
-	lseek(fd, N_TXTOFF(e), SEEK_SET);
-	size = read_targphys(filename, fd, addr, e.a_text + e.a_data);
-	if (size < 0)
-	    goto fail;
-	break;
+        lseek(fd, N_TXTOFF(e), SEEK_SET);
+        size = read_targphys(filename, fd, addr, e.a_text + e.a_data);
+        if (size < 0)
+            goto fail;
+        break;
     case NMAGIC:
         if (N_DATADDR(e, target_page_size) + e.a_data > max_sz)
             goto fail;
-	lseek(fd, N_TXTOFF(e), SEEK_SET);
-	size = read_targphys(filename, fd, addr, e.a_text);
-	if (size < 0)
-	    goto fail;
+        lseek(fd, N_TXTOFF(e), SEEK_SET);
+        size = read_targphys(filename, fd, addr, e.a_text);
+        if (size < 0)
+            goto fail;
         ret = read_targphys(filename, fd, addr + N_DATADDR(e, target_page_size),
                             e.a_data);
-	if (ret < 0)
-	    goto fail;
-	size += ret;
-	break;
+        if (ret < 0)
+            goto fail;
+        size += ret;
+        break;
     default:
-	goto fail;
+        goto fail;
     }
     close(fd);
     return size;
@@ -396,37 +395,42 @@ fail:
 }
 
 /* return < 0 if error, otherwise the number of bytes loaded in memory */
-int load_elf(const char *filename, uint64_t (*translate_fn)(void *, uint64_t),
+int load_elf(const char *filename,
+             uint64_t (*elf_note_fn)(void *, void *, bool),
+             uint64_t (*translate_fn)(void *, uint64_t),
              void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
              uint64_t *highaddr, int big_endian, int elf_machine,
              int clear_lsb, int data_swab)
 {
-    return load_elf_as(filename, translate_fn, translate_opaque, pentry,
-                       lowaddr, highaddr, big_endian, elf_machine, clear_lsb,
-                       data_swab, NULL);
+    return load_elf_as(filename, elf_note_fn, translate_fn, translate_opaque,
+                       pentry, lowaddr, highaddr, big_endian, elf_machine,
+                       clear_lsb, data_swab, NULL);
 }
 
 /* return < 0 if error, otherwise the number of bytes loaded in memory */
 int load_elf_as(const char *filename,
+                uint64_t (*elf_note_fn)(void *, void *, bool),
                 uint64_t (*translate_fn)(void *, uint64_t),
                 void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
                 uint64_t *highaddr, int big_endian, int elf_machine,
                 int clear_lsb, int data_swab, AddressSpace *as)
 {
-    return load_elf_ram(filename, translate_fn, translate_opaque,
+    return load_elf_ram(filename, elf_note_fn, translate_fn, translate_opaque,
                         pentry, lowaddr, highaddr, big_endian, elf_machine,
                         clear_lsb, data_swab, as, true);
 }
 
 /* return < 0 if error, otherwise the number of bytes loaded in memory */
 int load_elf_ram(const char *filename,
+                 uint64_t (*elf_note_fn)(void *, void *, bool),
                  uint64_t (*translate_fn)(void *, uint64_t),
                  void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
                  uint64_t *highaddr, int big_endian, int elf_machine,
                  int clear_lsb, int data_swab, AddressSpace *as,
                  bool load_rom)
 {
-    return load_elf_ram_sym(filename, translate_fn, translate_opaque,
+    return load_elf_ram_sym(filename, elf_note_fn,
+                            translate_fn, translate_opaque,
                             pentry, lowaddr, highaddr, big_endian,
                             elf_machine, clear_lsb, data_swab, as,
                             load_rom, NULL);
@@ -434,6 +438,7 @@ int load_elf_ram(const char *filename,
 
 /* return < 0 if error, otherwise the number of bytes loaded in memory */
 int load_elf_ram_sym(const char *filename,
+                     uint64_t (*elf_note_fn)(void *, void *, bool),
                      uint64_t (*translate_fn)(void *, uint64_t),
                      void *translate_opaque, uint64_t *pentry,
                      uint64_t *lowaddr, uint64_t *highaddr, int big_endian,
@@ -476,11 +481,13 @@ int load_elf_ram_sym(const char *filename,
 
     lseek(fd, 0, SEEK_SET);
     if (e_ident[EI_CLASS] == ELFCLASS64) {
-        ret = load_elf64(filename, fd, translate_fn, translate_opaque, must_swab,
+        ret = load_elf64(filename, fd, elf_note_fn,
+                         translate_fn, translate_opaque, must_swab,
                          pentry, lowaddr, highaddr, elf_machine, clear_lsb,
                          data_swab, as, load_rom, sym_cb);
     } else {
-        ret = load_elf32(filename, fd, translate_fn, translate_opaque, must_swab,
+        ret = load_elf32(filename, fd, elf_note_fn,
+                         translate_fn, translate_opaque, must_swab,
                          pentry, lowaddr, highaddr, elf_machine, clear_lsb,
                          data_swab, as, load_rom, sym_cb);
     }
@@ -613,13 +620,26 @@ static int load_uboot_image(const char *filename, hwaddr *ep, hwaddr *loadaddr,
         goto out;
 
     if (hdr->ih_type != image_type) {
-        fprintf(stderr, "Wrong image type %d, expected %d\n", hdr->ih_type,
-                image_type);
-        goto out;
+        if (!(image_type == IH_TYPE_KERNEL &&
+            hdr->ih_type == IH_TYPE_KERNEL_NOLOAD)) {
+            fprintf(stderr, "Wrong image type %d, expected %d\n", hdr->ih_type,
+                    image_type);
+            goto out;
+        }
     }
 
     /* TODO: Implement other image types.  */
     switch (hdr->ih_type) {
+    case IH_TYPE_KERNEL_NOLOAD:
+        if (!loadaddr || *loadaddr == LOAD_UIMAGE_LOADADDR_INVALID) {
+            fprintf(stderr, "this image format (kernel_noload) cannot be "
+                    "loaded on this machine type");
+            goto out;
+        }
+
+        hdr->ih_load = *loadaddr + sizeof(*hdr);
+        hdr->ih_ep += hdr->ih_load;
+        /* fall through */
     case IH_TYPE_KERNEL:
         address = hdr->ih_load;
         if (translate_fn) {

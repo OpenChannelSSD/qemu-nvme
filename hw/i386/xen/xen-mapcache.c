@@ -14,7 +14,7 @@
 
 #include <sys/resource.h>
 
-#include "hw/xen/xen_backend.h"
+#include "hw/xen/xen-legacy-backend.h"
 #include "qemu/bitmap.h"
 
 #include <xen/hvm/params.h>
@@ -71,7 +71,7 @@ typedef struct MapCacheRev {
 typedef struct MapCache {
     MapCacheEntry *entry;
     unsigned long nr_buckets;
-    QTAILQ_HEAD(map_cache_head, MapCacheRev) locked_entries;
+    QTAILQ_HEAD(, MapCacheRev) locked_entries;
 
     /* For most cases (>99.9%), the page address is the same. */
     MapCacheEntry *last_entry;

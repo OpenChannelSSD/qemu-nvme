@@ -552,10 +552,8 @@ static void tsc2102_data_register_write(
         return;
 
     default:
-#ifdef TSC_VERBOSE
-        fprintf(stderr, "tsc2102_data_register_write: "
-                        "no such register: 0x%02x\n", reg);
-#endif
+        qemu_log_mask(LOG_GUEST_ERROR, "tsc2102_data_register_write: "
+                                       "no such register: 0x%02x\n", reg);
     }
 }
 
@@ -577,7 +575,7 @@ static void tsc2102_control_register_write(
     case 0x01:	/* Status / Keypad Control */
         if ((s->model & 0xff00) == 0x2100)
             s->pin_func = value >> 14;
-	else {
+        else {
             s->kb.scan = (value >> 14) & 1;
             s->kb.debounce = (value >> 11) & 7;
             if (s->kb.intr && s->kb.scan) {
@@ -636,10 +634,8 @@ static void tsc2102_control_register_write(
 
     default:
     bad_reg:
-#ifdef TSC_VERBOSE
-        fprintf(stderr, "tsc2102_control_register_write: "
-                        "no such register: 0x%02x\n", reg);
-#endif
+        qemu_log_mask(LOG_GUEST_ERROR, "tsc2102_control_register_write: "
+                                       "no such register: 0x%02x\n", reg);
     }
 }
 
@@ -764,10 +760,8 @@ static void tsc2102_audio_register_write(
         return;
 
     default:
-#ifdef TSC_VERBOSE
-        fprintf(stderr, "tsc2102_audio_register_write: "
-                        "no such register: 0x%02x\n", reg);
-#endif
+        qemu_log_mask(LOG_GUEST_ERROR, "tsc2102_audio_register_write: "
+                                       "no such register: 0x%02x\n", reg);
     }
 }
 

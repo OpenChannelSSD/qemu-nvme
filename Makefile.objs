@@ -1,5 +1,6 @@
 QAPI_MODULES = block-core block char common crypto introspect job migration
-QAPI_MODULES += misc net rocker run-state sockets tpm trace transaction ui
+QAPI_MODULES += misc net rdma rocker run-state sockets tpm trace transaction
+QAPI_MODULES += ui
 
 #######################################################################
 # Common libraries for tools and emulators
@@ -16,6 +17,7 @@ util-obj-y += $(QAPI_MODULES:%=qapi/qapi-events-%.o)
 util-obj-y += qapi/qapi-introspect.o
 
 chardev-obj-y = chardev/
+slirp-obj-$(CONFIG_SLIRP) = slirp/
 
 #######################################################################
 # block-obj-y is code used by both qemu system emulation and qemu-img
@@ -78,8 +80,6 @@ common-obj-y += vl.o
 vl.o-cflags := $(GPROF_CFLAGS) $(SDL_CFLAGS)
 common-obj-$(CONFIG_TPM) += tpm.o
 
-common-obj-$(CONFIG_SLIRP) += slirp/
-
 common-obj-y += backends/
 common-obj-y += chardev/
 
@@ -133,6 +133,7 @@ vhost-user-scsi.o-cflags := $(LIBISCSI_CFLAGS)
 vhost-user-scsi.o-libs := $(LIBISCSI_LIBS)
 vhost-user-scsi-obj-y = contrib/vhost-user-scsi/
 vhost-user-blk-obj-y = contrib/vhost-user-blk/
+rdmacm-mux-obj-y = contrib/rdmacm-mux/
 
 ######################################################################
 trace-events-subdirs =
@@ -182,6 +183,7 @@ trace-events-subdirs += hw/vfio
 trace-events-subdirs += hw/virtio
 trace-events-subdirs += hw/watchdog
 trace-events-subdirs += hw/xen
+trace-events-subdirs += hw/gpio
 trace-events-subdirs += io
 trace-events-subdirs += linux-user
 trace-events-subdirs += migration

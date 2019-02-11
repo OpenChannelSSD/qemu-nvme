@@ -11,7 +11,6 @@
 #include "hw/ppc/spapr_cpu_core.h"
 #include "target/ppc/cpu.h"
 #include "hw/ppc/spapr.h"
-#include "hw/ppc/xics.h" /* for icp_create() - to be removed */
 #include "hw/boards.h"
 #include "qapi/error.h"
 #include "sysemu/cpus.h"
@@ -195,7 +194,12 @@ static void spapr_unrealize_vcpu(PowerPCCPU *cpu, sPAPRCPUCore *sc)
         vmstate_unregister(NULL, &vmstate_spapr_cpu_state, cpu->machine_data);
     }
     qemu_unregister_reset(spapr_cpu_reset, cpu);
-    object_unparent(cpu->intc);
+    if (spapr_cpu_state(cpu)->icp) {
+        object_unparent(OBJECT(spapr_cpu_state(cpu)->icp));
+    }
+    if (spapr_cpu_state(cpu)->tctx) {
+        object_unparent(OBJECT(spapr_cpu_state(cpu)->tctx));
+    }
     cpu_remove_sync(CPU(cpu));
     object_unparent(OBJECT(cpu));
 }
@@ -233,8 +237,7 @@ static void spapr_realize_vcpu(PowerPCCPU *cpu, sPAPRMachineState *spapr,
     qemu_register_reset(spapr_cpu_reset, cpu);
     spapr_cpu_reset(cpu);
 
-    cpu->intc = icp_create(OBJECT(cpu), spapr->icp_type, XICS_FABRIC(spapr),
-                           &local_err);
+    spapr->irq->cpu_intc_create(spapr, cpu, &local_err);
     if (local_err) {
         goto error_unregister;
     }

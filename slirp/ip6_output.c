@@ -3,8 +3,6 @@
  * Guillaume Subiron, Yann Bordenave, Serigne Modou Wagne.
  */
 
-#include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "slirp.h"
 
 /* Number of packets queued before we start sending
@@ -19,8 +17,8 @@ int ip6_output(struct socket *so, struct mbuf *m, int fast)
     struct ip6 *ip = mtod(m, struct ip6 *);
 
     DEBUG_CALL("ip6_output");
-    DEBUG_ARG("so = %lx", (long)so);
-    DEBUG_ARG("m = %lx", (long)m);
+    DEBUG_ARG("so = %p", so);
+    DEBUG_ARG("m = %p", m);
 
     /* Fill IPv6 header */
     ip->ip_v = IP6VERSION;

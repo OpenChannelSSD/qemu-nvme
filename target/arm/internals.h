@@ -104,6 +104,13 @@ void QEMU_NORETURN raise_exception(CPUARMState *env, uint32_t excp,
                                    uint32_t syndrome, uint32_t target_el);
 
 /*
+ * Similarly, but also use unwinding to restore cpu state.
+ */
+void QEMU_NORETURN raise_exception_ra(CPUARMState *env, uint32_t excp,
+                                      uint32_t syndrome, uint32_t target_el,
+                                      uintptr_t ra);
+
+/*
  * For AArch64, map a given EL to an index in the banked_spsr array.
  * Note that this mapping and the AArch32 mapping defined in bank_number()
  * must agree such that the AArch64<->AArch32 SPSRs have the architecturally
@@ -259,7 +266,9 @@ enum arm_exception_class {
     EC_CP14DTTRAP             = 0x06,
     EC_ADVSIMDFPACCESSTRAP    = 0x07,
     EC_FPIDTRAP               = 0x08,
+    EC_PACTRAP                = 0x09,
     EC_CP14RRTTRAP            = 0x0c,
+    EC_BTITRAP                = 0x0d,
     EC_ILLEGALSTATE           = 0x0e,
     EC_AA32_SVC               = 0x11,
     EC_AA32_HVC               = 0x12,
@@ -424,6 +433,16 @@ static inline uint32_t syn_simd_access_trap(int cv, int cond, bool is_16bit)
 static inline uint32_t syn_sve_access_trap(void)
 {
     return EC_SVEACCESSTRAP << ARM_EL_EC_SHIFT;
+}
+
+static inline uint32_t syn_pactrap(void)
+{
+    return EC_PACTRAP << ARM_EL_EC_SHIFT;
+}
+
+static inline uint32_t syn_btitrap(int btype)
+{
+    return (EC_BTITRAP << ARM_EL_EC_SHIFT) | btype;
 }
 
 static inline uint32_t syn_insn_abort(int same_el, int ea, int s1ptw, int fsc)
@@ -905,5 +924,48 @@ void arm_cpu_update_virq(ARMCPU *cpu);
  * Must be called with the iothread lock held.
  */
 void arm_cpu_update_vfiq(ARMCPU *cpu);
+
+/**
+ * arm_mmu_idx:
+ * @env: The cpu environment
+ *
+ * Return the full ARMMMUIdx for the current translation regime.
+ */
+ARMMMUIdx arm_mmu_idx(CPUARMState *env);
+
+/**
+ * arm_stage1_mmu_idx:
+ * @env: The cpu environment
+ *
+ * Return the ARMMMUIdx for the stage1 traversal for the current regime.
+ */
+#ifdef CONFIG_USER_ONLY
+static inline ARMMMUIdx arm_stage1_mmu_idx(CPUARMState *env)
+{
+    return ARMMMUIdx_S1NSE0;
+}
+#else
+ARMMMUIdx arm_stage1_mmu_idx(CPUARMState *env);
+#endif
+
+/*
+ * Parameters of a given virtual address, as extracted from the
+ * translation control register (TCR) for a given regime.
+ */
+typedef struct ARMVAParameters {
+    unsigned tsz    : 8;
+    unsigned select : 1;
+    bool tbi        : 1;
+    bool tbid       : 1;
+    bool epd        : 1;
+    bool hpd        : 1;
+    bool using16k   : 1;
+    bool using64k   : 1;
+} ARMVAParameters;
+
+ARMVAParameters aa64_va_parameters_both(CPUARMState *env, uint64_t va,
+                                        ARMMMUIdx mmu_idx);
+ARMVAParameters aa64_va_parameters(CPUARMState *env, uint64_t va,
+                                   ARMMMUIdx mmu_idx, bool data);
 
 #endif

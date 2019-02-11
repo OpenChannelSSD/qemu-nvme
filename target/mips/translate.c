@@ -1399,10 +1399,12 @@ enum {
 
 
 /*
- *    AN OVERVIEW OF MXU EXTENSION INSTRUCTION SET
- *    ============================================
  *
- * MXU (full name: MIPS eXtension/enhanced Unit) is an SIMD extension of MIPS32
+ *       AN OVERVIEW OF MXU EXTENSION INSTRUCTION SET
+ *       ============================================
+ *
+ *
+ * MXU (full name: MIPS eXtension/enhanced Unit) is a SIMD extension of MIPS32
  * instructions set. It is designed to fit the needs of signal, graphical and
  * video processing applications. MXU instruction set is used in Xburst family
  * of microprocessors by Ingenic.
@@ -1410,39 +1412,31 @@ enum {
  * MXU unit contains 17 registers called X0-X16. X0 is always zero, and X16 is
  * the control register.
  *
- * The notation used in MXU assembler mnemonics
- * --------------------------------------------
  *
- *  Registers:
+ *     The notation used in MXU assembler mnemonics
+ *     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *
+ *  Register operands:
  *
  *   XRa, XRb, XRc, XRd - MXU registers
  *   Rb, Rc, Rd, Rs, Rt - general purpose MIPS registers
  *
- *  Subfields:
+ *  Non-register operands:
  *
- *   aptn1              - 1-bit accumulate add/subtract pattern
- *   aptn2              - 2-bit accumulate add/subtract pattern
- *   eptn2              - 2-bit execute add/subtract pattern
- *   optn2              - 2-bit operand pattern
- *   optn3              - 3-bit operand pattern
- *   sft4               - 4-bit shift amount
- *   strd2              - 2-bit stride amount
+ *   aptn1 - 1-bit accumulate add/subtract pattern
+ *   aptn2 - 2-bit accumulate add/subtract pattern
+ *   eptn2 - 2-bit execute add/subtract pattern
+ *   optn2 - 2-bit operand pattern
+ *   optn3 - 3-bit operand pattern
+ *   sft4  - 4-bit shift amount
+ *   strd2 - 2-bit stride amount
  *
  *  Prefixes:
  *
- *   <Operation parallel level><Operand size>
- *     S                         32
- *     D                         16
- *     Q                          8
- *
- *  Suffixes:
- *
- *   E - Expand results
- *   F - Fixed point multiplication
- *   L - Low part result
- *   R - Doing rounding
- *   V - Variable instead of immediate
- *   W - Combine above L and V
+ *   Level of parallelism:                Operand size:
+ *    S - single operation at a time       32 - word
+ *    D - two operations in parallel       16 - half word
+ *    Q - four operations in parallel       8 - byte
  *
  *  Operations:
  *
@@ -1485,6 +1479,19 @@ enum {
  *   SFL   - Shuffle
  *   SCOP  - Calculate x’s scope (-1, means x<0; 0, means x==0; 1, means x>0)
  *   XOR   - Logical bitwise 'exclusive or' operation
+ *
+ *  Suffixes:
+ *
+ *   E - Expand results
+ *   F - Fixed point multiplication
+ *   L - Low part result
+ *   R - Doing rounding
+ *   V - Variable instead of immediate
+ *   W - Combine above L and V
+ *
+ *
+ *     The list of MXU instructions grouped by functionality
+ *     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *
  * Load/Store instructions           Multiplication instructions
  * -----------------------           ---------------------------
@@ -1562,6 +1569,13 @@ enum {
  *  Q16SCOP XRa, XRb, XRc, XRd        S32M2I XRa, Rb
  *  Q16SAT XRa, XRb, XRc              S32I2M XRa, Rb
  *
+ *
+ *     The opcode organization of MXU instructions
+ *     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *
+ * The bits 31..26 of all MXU instructions are equal to 0x1C (also referred
+ * as opcode SPECIAL2 in the base MIPS ISA). The organization and meaning of
+ * other bits up to the instruction level is as follows:
  *
  *              bits
  *             05..00
@@ -1663,12 +1677,21 @@ enum {
  *          │                               20..18
  *          ├─ 100111 ─ OPC_MXU__POOL16 ─┬─ 000 ─ OPC_MXU_D32SARW
  *          │                            ├─ 001 ─ OPC_MXU_S32ALN
- *          ├─ 101000 ─ OPC_MXU_LXB      ├─ 010 ─ OPC_MXU_S32ALNI
- *          ├─ 101001 ─ <not assigned>   ├─ 011 ─ OPC_MXU_S32NOR
- *          ├─ 101010 ─ OPC_MXU_S16LDD   ├─ 100 ─ OPC_MXU_S32AND
- *          ├─ 101011 ─ OPC_MXU_S16STD   ├─ 101 ─ OPC_MXU_S32OR
- *          ├─ 101100 ─ OPC_MXU_S16LDI   ├─ 110 ─ OPC_MXU_S32XOR
- *          ├─ 101101 ─ OPC_MXU_S16SDI   └─ 111 ─ OPC_MXU_S32LUI
+ *          │                            ├─ 010 ─ OPC_MXU_S32ALNI
+ *          │                            ├─ 011 ─ OPC_MXU_S32LUI
+ *          │                            ├─ 100 ─ OPC_MXU_S32NOR
+ *          │                            ├─ 101 ─ OPC_MXU_S32AND
+ *          │                            ├─ 110 ─ OPC_MXU_S32OR
+ *          │                            └─ 111 ─ OPC_MXU_S32XOR
+ *          │
+ *          │                               7..5
+ *          ├─ 101000 ─ OPC_MXU__POOL17 ─┬─ 000 ─ OPC_MXU_LXB
+ *          │                            ├─ 001 ─ OPC_MXU_LXH
+ *          ├─ 101001 ─ <not assigned>   ├─ 011 ─ OPC_MXU_LXW
+ *          ├─ 101010 ─ OPC_MXU_S16LDD   ├─ 100 ─ OPC_MXU_LXBU
+ *          ├─ 101011 ─ OPC_MXU_S16STD   └─ 101 ─ OPC_MXU_LXHU
+ *          ├─ 101100 ─ OPC_MXU_S16LDI
+ *          ├─ 101101 ─ OPC_MXU_S16SDI
  *          ├─ 101110 ─ OPC_MXU_S32M2I
  *          ├─ 101111 ─ OPC_MXU_S32I2M
  *          ├─ 110000 ─ OPC_MXU_D32SLL
@@ -1678,23 +1701,23 @@ enum {
  *          ├─ 110100 ─ OPC_MXU_Q16SLL   ├─ 010 ─ OPC_MXU_D32SARV
  *          ├─ 110101 ─ OPC_MXU_Q16SLR   ├─ 011 ─ OPC_MXU_Q16SLLV
  *          │                            ├─ 100 ─ OPC_MXU_Q16SLRV
- *          ├─ 110110 ─ OPC_MXU__POOL17 ─┴─ 101 ─ OPC_MXU_Q16SARV
+ *          ├─ 110110 ─ OPC_MXU__POOL18 ─┴─ 101 ─ OPC_MXU_Q16SARV
  *          │
  *          ├─ 110111 ─ OPC_MXU_Q16SAR
  *          │                               23..22
- *          ├─ 111000 ─ OPC_MXU__POOL18 ─┬─ 00 ─ OPC_MXU_Q8MUL
+ *          ├─ 111000 ─ OPC_MXU__POOL19 ─┬─ 00 ─ OPC_MXU_Q8MUL
  *          │                            └─ 01 ─ OPC_MXU_Q8MULSU
  *          │
  *          │                               20..18
- *          ├─ 111001 ─ OPC_MXU__POOL19 ─┬─ 000 ─ OPC_MXU_Q8MOVZ
+ *          ├─ 111001 ─ OPC_MXU__POOL20 ─┬─ 000 ─ OPC_MXU_Q8MOVZ
  *          │                            ├─ 001 ─ OPC_MXU_Q8MOVN
  *          │                            ├─ 010 ─ OPC_MXU_D16MOVZ
  *          │                            ├─ 011 ─ OPC_MXU_D16MOVN
  *          │                            ├─ 100 ─ OPC_MXU_S32MOVZ
- *          │                            └─ 101 ─ OPC_MXU_S32MOV
+ *          │                            └─ 101 ─ OPC_MXU_S32MOVN
  *          │
  *          │                               23..22
- *          ├─ 111010 ─ OPC_MXU__POOL20 ─┬─ 00 ─ OPC_MXU_Q8MAC
+ *          ├─ 111010 ─ OPC_MXU__POOL21 ─┬─ 00 ─ OPC_MXU_Q8MAC
  *          │                            └─ 10 ─ OPC_MXU_Q8MACSU
  *          ├─ 111011 ─ OPC_MXU_Q16SCOP
  *          ├─ 111100 ─ OPC_MXU_Q8MADL
@@ -1703,10 +1726,10 @@ enum {
  *          └─ 111111 ─ <not assigned>   (overlaps with SDBBP)
  *
  *
- *   Compiled after:
+ * Compiled after:
  *
  *   "XBurst® Instruction Set Architecture MIPS eXtension/enhanced Unit
- *   Programming Manual", Ingenic Semiconductor Co, Ltd., 2017
+ *   Programming Manual", Ingenic Semiconductor Co, Ltd., revision June 2, 2017
  */
 
 enum {
@@ -1750,7 +1773,7 @@ enum {
     OPC_MXU_S8SDI    = 0x25,
     OPC_MXU__POOL15  = 0x26,
     OPC_MXU__POOL16  = 0x27,
-    OPC_MXU_LXB      = 0x28,
+    OPC_MXU__POOL17  = 0x28,
     /* not assigned 0x29 */
     OPC_MXU_S16LDD   = 0x2A,
     OPC_MXU_S16STD   = 0x2B,
@@ -1764,11 +1787,11 @@ enum {
     OPC_MXU_D32SAR   = 0x33,
     OPC_MXU_Q16SLL   = 0x34,
     OPC_MXU_Q16SLR   = 0x35,
-    OPC_MXU__POOL17  = 0x36,
+    OPC_MXU__POOL18  = 0x36,
     OPC_MXU_Q16SAR   = 0x37,
-    OPC_MXU__POOL18  = 0x38,
-    OPC_MXU__POOL19  = 0x39,
-    OPC_MXU__POOL20  = 0x3A,
+    OPC_MXU__POOL19  = 0x38,
+    OPC_MXU__POOL20  = 0x39,
+    OPC_MXU__POOL21  = 0x3A,
     OPC_MXU_Q16SCOP  = 0x3B,
     OPC_MXU_Q8MADL   = 0x3C,
     OPC_MXU_S32SFL   = 0x3D,
@@ -1930,15 +1953,26 @@ enum {
     OPC_MXU_D32SARW  = 0x00,
     OPC_MXU_S32ALN   = 0x01,
     OPC_MXU_S32ALNI  = 0x02,
-    OPC_MXU_S32NOR   = 0x03,
-    OPC_MXU_S32AND   = 0x04,
-    OPC_MXU_S32OR    = 0x05,
-    OPC_MXU_S32XOR   = 0x06,
-    OPC_MXU_S32LUI   = 0x07,
+    OPC_MXU_S32LUI   = 0x03,
+    OPC_MXU_S32NOR   = 0x04,
+    OPC_MXU_S32AND   = 0x05,
+    OPC_MXU_S32OR    = 0x06,
+    OPC_MXU_S32XOR   = 0x07,
 };
 
 /*
  * MXU pool 17
+ */
+enum {
+    OPC_MXU_LXB      = 0x00,
+    OPC_MXU_LXH      = 0x01,
+    OPC_MXU_LXW      = 0x03,
+    OPC_MXU_LXBU     = 0x04,
+    OPC_MXU_LXHU     = 0x05,
+};
+
+/*
+ * MXU pool 18
  */
 enum {
     OPC_MXU_D32SLLV  = 0x00,
@@ -1950,7 +1984,7 @@ enum {
 };
 
 /*
- * MXU pool 18
+ * MXU pool 19
  */
 enum {
     OPC_MXU_Q8MUL    = 0x00,
@@ -1958,7 +1992,7 @@ enum {
 };
 
 /*
- * MXU pool 19
+ * MXU pool 20
  */
 enum {
     OPC_MXU_Q8MOVZ   = 0x00,
@@ -1970,7 +2004,7 @@ enum {
 };
 
 /*
- * MXU pool 20
+ * MXU pool 21
  */
 enum {
     OPC_MXU_Q8MAC    = 0x00,
@@ -2421,9 +2455,16 @@ static TCGv_i32 fpu_fcr0, fpu_fcr31;
 static TCGv_i64 fpu_f64[32];
 static TCGv_i64 msa_wr_d[64];
 
+#if defined(TARGET_MIPS64)
+/* Upper halves of R5900's 128-bit registers: MMRs (multimedia registers) */
+static TCGv_i64 cpu_mmr[32];
+#endif
+
+#if !defined(TARGET_MIPS64)
 /* MXU registers */
 static TCGv mxu_gpr[NUMBER_OF_MXU_REGISTERS - 1];
 static TCGv mxu_CR;
+#endif
 
 #include "exec/gen-icount.h"
 
@@ -2501,6 +2542,7 @@ typedef struct DisasContext {
     bool mrp;
     bool nan2008;
     bool abs2008;
+    bool saar;
 } DisasContext;
 
 #define DISAS_STOP       DISAS_TARGET_0
@@ -2547,10 +2589,12 @@ static const char * const msaregnames[] = {
     "w30.d0", "w30.d1", "w31.d0", "w31.d1",
 };
 
+#if !defined(TARGET_MIPS64)
 static const char * const mxuregnames[] = {
     "XR1",  "XR2",  "XR3",  "XR4",  "XR5",  "XR6",  "XR7",  "XR8",
     "XR9",  "XR10", "XR11", "XR12", "XR13", "XR14", "XR15", "MXU_CR",
 };
+#endif
 
 #define LOG_DISAS(...)                                                        \
     do {                                                                      \
@@ -2633,6 +2677,7 @@ static inline void gen_store_srsgpr (int from, int to)
     }
 }
 
+#if !defined(TARGET_MIPS64)
 /* MXU General purpose registers moves. */
 static inline void gen_load_mxu_gpr(TCGv t, unsigned int reg)
 {
@@ -2661,6 +2706,7 @@ static inline void gen_store_mxu_cr(TCGv t)
     /* TODO: Add handling of RW rules for MXU_CR. */
     tcg_gen_mov_tl(mxu_CR, t);
 }
+#endif
 
 
 /* Tests */
@@ -3668,7 +3714,7 @@ static void gen_st_cond (DisasContext *ctx, uint32_t opc, int rt,
 }
 
 static void gen_scwp(DisasContext *ctx, uint32_t base, int16_t offset,
-                    uint32_t reg1, uint32_t reg2)
+                    uint32_t reg1, uint32_t reg2, bool eva)
 {
     TCGv taddr = tcg_temp_local_new();
     TCGv lladdr = tcg_temp_local_new();
@@ -3696,7 +3742,7 @@ static void gen_scwp(DisasContext *ctx, uint32_t base, int16_t offset,
 
     tcg_gen_ld_i64(llval, cpu_env, offsetof(CPUMIPSState, llval_wp));
     tcg_gen_atomic_cmpxchg_i64(val, taddr, llval, tval,
-                               ctx->mem_idx, MO_64);
+                               eva ? MIPS_HFLAG_UM : ctx->mem_idx, MO_64);
     if (reg1 != 0) {
         tcg_gen_movi_tl(cpu_gpr[reg1], 1);
     }
@@ -4993,8 +5039,8 @@ static void gen_muldiv(DisasContext *ctx, uint32_t opc,
 }
 
 /*
- * These MULT and MULTU instructions implemented in for example the
- * Toshiba/Sony R5900 and the Toshiba TX19, TX39 and TX79 core
+ * These MULT[U] and MADD[U] instructions implemented in for example
+ * the Toshiba/Sony R5900 and the Toshiba TX19, TX39 and TX79 core
  * architectures are special three-operand variants with the syntax
  *
  *     MULT[U][1] rd, rs, rt
@@ -5002,6 +5048,14 @@ static void gen_muldiv(DisasContext *ctx, uint32_t opc,
  * such that
  *
  *     (rd, LO, HI) <- rs * rt
+ *
+ * and
+ *
+ *     MADD[U][1] rd, rs, rt
+ *
+ * such that
+ *
+ *     (rd, LO, HI) <- (LO, HI) + rs * rt
  *
  * where the low-order 32-bits of the result is placed into both the
  * GPR rd and the special register LO. The high-order 32-bits of the
@@ -5059,8 +5113,54 @@ static void gen_mul_txx9(DisasContext *ctx, uint32_t opc,
             tcg_temp_free_i32(t3);
         }
         break;
+    case MMI_OPC_MADD1:
+        acc = 1;
+        /* Fall through */
+    case MMI_OPC_MADD:
+        {
+            TCGv_i64 t2 = tcg_temp_new_i64();
+            TCGv_i64 t3 = tcg_temp_new_i64();
+
+            tcg_gen_ext_tl_i64(t2, t0);
+            tcg_gen_ext_tl_i64(t3, t1);
+            tcg_gen_mul_i64(t2, t2, t3);
+            tcg_gen_concat_tl_i64(t3, cpu_LO[acc], cpu_HI[acc]);
+            tcg_gen_add_i64(t2, t2, t3);
+            tcg_temp_free_i64(t3);
+            gen_move_low32(cpu_LO[acc], t2);
+            gen_move_high32(cpu_HI[acc], t2);
+            if (rd) {
+                gen_move_low32(cpu_gpr[rd], t2);
+            }
+            tcg_temp_free_i64(t2);
+        }
+        break;
+    case MMI_OPC_MADDU1:
+        acc = 1;
+        /* Fall through */
+    case MMI_OPC_MADDU:
+        {
+            TCGv_i64 t2 = tcg_temp_new_i64();
+            TCGv_i64 t3 = tcg_temp_new_i64();
+
+            tcg_gen_ext32u_tl(t0, t0);
+            tcg_gen_ext32u_tl(t1, t1);
+            tcg_gen_extu_tl_i64(t2, t0);
+            tcg_gen_extu_tl_i64(t3, t1);
+            tcg_gen_mul_i64(t2, t2, t3);
+            tcg_gen_concat_tl_i64(t3, cpu_LO[acc], cpu_HI[acc]);
+            tcg_gen_add_i64(t2, t2, t3);
+            tcg_temp_free_i64(t3);
+            gen_move_low32(cpu_LO[acc], t2);
+            gen_move_high32(cpu_HI[acc], t2);
+            if (rd) {
+                gen_move_low32(cpu_gpr[rd], t2);
+            }
+            tcg_temp_free_i64(t2);
+        }
+        break;
     default:
-        MIPS_INVAL("mul TXx9");
+        MIPS_INVAL("mul/madd TXx9");
         generate_exception_end(ctx, EXCP_RI);
         goto out;
     }
@@ -6473,55 +6573,66 @@ static inline void gen_mtc0_store32 (TCGv arg, target_ulong off)
 
 static void gen_mfhc0(DisasContext *ctx, TCGv arg, int reg, int sel)
 {
-    const char *rn = "invalid";
+    const char *register_name = "invalid";
 
     switch (reg) {
-    case 2:
+    case CP0_REGISTER_02:
         switch (sel) {
         case 0:
             CP0_CHECK(ctx->hflags & MIPS_HFLAG_ELPA);
             gen_mfhc0_entrylo(arg, offsetof(CPUMIPSState, CP0_EntryLo0));
-            rn = "EntryLo0";
+            register_name = "EntryLo0";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 3:
+    case CP0_REGISTER_03:
         switch (sel) {
         case 0:
             CP0_CHECK(ctx->hflags & MIPS_HFLAG_ELPA);
             gen_mfhc0_entrylo(arg, offsetof(CPUMIPSState, CP0_EntryLo1));
-            rn = "EntryLo1";
+            register_name = "EntryLo1";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 17:
+    case CP0_REGISTER_09:
+        switch (sel) {
+        case 7:
+            CP0_CHECK(ctx->saar);
+            gen_helper_mfhc0_saar(arg, cpu_env);
+            register_name = "SAAR";
+            break;
+        default:
+            goto cp0_unimplemented;
+        }
+        break;
+    case CP0_REGISTER_17:
         switch (sel) {
         case 0:
             gen_mfhc0_load64(arg, offsetof(CPUMIPSState, lladdr),
                              ctx->CP0_LLAddr_shift);
-            rn = "LLAddr";
+            register_name = "LLAddr";
             break;
         case 1:
             CP0_CHECK(ctx->mrp);
             gen_helper_mfhc0_maar(arg, cpu_env);
-            rn = "MAAR";
+            register_name = "MAAR";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 28:
+    case CP0_REGISTER_28:
         switch (sel) {
         case 0:
         case 2:
         case 4:
         case 6:
             gen_mfhc0_load64(arg, offsetof(CPUMIPSState, CP0_TagLo), 0);
-            rn = "TagLo";
+            register_name = "TagLo";
             break;
         default:
             goto cp0_unimplemented;
@@ -6530,63 +6641,74 @@ static void gen_mfhc0(DisasContext *ctx, TCGv arg, int reg, int sel)
     default:
         goto cp0_unimplemented;
     }
-    trace_mips_translate_c0("mfhc0", rn, reg, sel);
+    trace_mips_translate_c0("mfhc0", register_name, reg, sel);
     return;
 
 cp0_unimplemented:
-    qemu_log_mask(LOG_UNIMP, "mfhc0 %s (reg %d sel %d)\n", rn, reg, sel);
+    qemu_log_mask(LOG_UNIMP, "mfhc0 %s (reg %d sel %d)\n",
+                  register_name, reg, sel);
     tcg_gen_movi_tl(arg, 0);
 }
 
 static void gen_mthc0(DisasContext *ctx, TCGv arg, int reg, int sel)
 {
-    const char *rn = "invalid";
+    const char *register_name = "invalid";
     uint64_t mask = ctx->PAMask >> 36;
 
     switch (reg) {
-    case 2:
+    case CP0_REGISTER_02:
         switch (sel) {
         case 0:
             CP0_CHECK(ctx->hflags & MIPS_HFLAG_ELPA);
             tcg_gen_andi_tl(arg, arg, mask);
             gen_mthc0_entrylo(arg, offsetof(CPUMIPSState, CP0_EntryLo0));
-            rn = "EntryLo0";
+            register_name = "EntryLo0";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 3:
+    case CP0_REGISTER_03:
         switch (sel) {
         case 0:
             CP0_CHECK(ctx->hflags & MIPS_HFLAG_ELPA);
             tcg_gen_andi_tl(arg, arg, mask);
             gen_mthc0_entrylo(arg, offsetof(CPUMIPSState, CP0_EntryLo1));
-            rn = "EntryLo1";
+            register_name = "EntryLo1";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 17:
+    case CP0_REGISTER_09:
+        switch (sel) {
+        case 7:
+            CP0_CHECK(ctx->saar);
+            gen_helper_mthc0_saar(cpu_env, arg);
+            register_name = "SAAR";
+            break;
+        default:
+            goto cp0_unimplemented;
+        }
+    case CP0_REGISTER_17:
         switch (sel) {
         case 0:
             /* LLAddr is read-only (the only exception is bit 0 if LLB is
                supported); the CP0_LLAddr_rw_bitmask does not seem to be
                relevant for modern MIPS cores supporting MTHC0, therefore
                treating MTHC0 to LLAddr as NOP. */
-            rn = "LLAddr";
+            register_name = "LLAddr";
             break;
         case 1:
             CP0_CHECK(ctx->mrp);
             gen_helper_mthc0_maar(cpu_env, arg);
-            rn = "MAAR";
+            register_name = "MAAR";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 28:
+    case CP0_REGISTER_28:
         switch (sel) {
         case 0:
         case 2:
@@ -6594,7 +6716,7 @@ static void gen_mthc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case 6:
             tcg_gen_andi_tl(arg, arg, mask);
             gen_mthc0_store64(arg, offsetof(CPUMIPSState, CP0_TagLo));
-            rn = "TagLo";
+            register_name = "TagLo";
             break;
         default:
             goto cp0_unimplemented;
@@ -6603,10 +6725,11 @@ static void gen_mthc0(DisasContext *ctx, TCGv arg, int reg, int sel)
     default:
         goto cp0_unimplemented;
     }
-    trace_mips_translate_c0("mthc0", rn, reg, sel);
+    trace_mips_translate_c0("mthc0", register_name, reg, sel);
 
 cp0_unimplemented:
-    qemu_log_mask(LOG_UNIMP, "mthc0 %s (reg %d sel %d)\n", rn, reg, sel);
+    qemu_log_mask(LOG_UNIMP, "mthc0 %s (reg %d sel %d)\n",
+                  register_name, reg, sel);
 }
 
 static inline void gen_mfc0_unimplemented(DisasContext *ctx, TCGv arg)
@@ -6620,89 +6743,89 @@ static inline void gen_mfc0_unimplemented(DisasContext *ctx, TCGv arg)
 
 static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
 {
-    const char *rn = "invalid";
+    const char *register_name = "invalid";
 
     if (sel != 0)
         check_insn(ctx, ISA_MIPS32);
 
     switch (reg) {
-    case 0:
+    case CP0_REGISTER_00:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Index));
-            rn = "Index";
+            register_name = "Index";
             break;
         case 1:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_mvpcontrol(arg, cpu_env);
-            rn = "MVPControl";
+            register_name = "MVPControl";
             break;
         case 2:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_mvpconf0(arg, cpu_env);
-            rn = "MVPConf0";
+            register_name = "MVPConf0";
             break;
         case 3:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_mvpconf1(arg, cpu_env);
-            rn = "MVPConf1";
+            register_name = "MVPConf1";
             break;
         case 4:
             CP0_CHECK(ctx->vp);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_VPControl));
-            rn = "VPControl";
+            register_name = "VPControl";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 1:
+    case CP0_REGISTER_01:
         switch (sel) {
         case 0:
             CP0_CHECK(!(ctx->insn_flags & ISA_MIPS32R6));
             gen_helper_mfc0_random(arg, cpu_env);
-            rn = "Random";
+            register_name = "Random";
             break;
         case 1:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_VPEControl));
-            rn = "VPEControl";
+            register_name = "VPEControl";
             break;
         case 2:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_VPEConf0));
-            rn = "VPEConf0";
+            register_name = "VPEConf0";
             break;
         case 3:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_VPEConf1));
-            rn = "VPEConf1";
+            register_name = "VPEConf1";
             break;
         case 4:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_mfc0_load64(arg, offsetof(CPUMIPSState, CP0_YQMask));
-            rn = "YQMask";
+            register_name = "YQMask";
             break;
         case 5:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_mfc0_load64(arg, offsetof(CPUMIPSState, CP0_VPESchedule));
-            rn = "VPESchedule";
+            register_name = "VPESchedule";
             break;
         case 6:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_mfc0_load64(arg, offsetof(CPUMIPSState, CP0_VPEScheFBack));
-            rn = "VPEScheFBack";
+            register_name = "VPEScheFBack";
             break;
         case 7:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_VPEOpt));
-            rn = "VPEOpt";
+            register_name = "VPEOpt";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 2:
+    case CP0_REGISTER_02:
         switch (sel) {
         case 0:
             {
@@ -6719,48 +6842,48 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
                 gen_move_low32(arg, tmp);
                 tcg_temp_free_i64(tmp);
             }
-            rn = "EntryLo0";
+            register_name = "EntryLo0";
             break;
         case 1:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_tcstatus(arg, cpu_env);
-            rn = "TCStatus";
+            register_name = "TCStatus";
             break;
         case 2:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_tcbind(arg, cpu_env);
-            rn = "TCBind";
+            register_name = "TCBind";
             break;
         case 3:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_tcrestart(arg, cpu_env);
-            rn = "TCRestart";
+            register_name = "TCRestart";
             break;
         case 4:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_tchalt(arg, cpu_env);
-            rn = "TCHalt";
+            register_name = "TCHalt";
             break;
         case 5:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_tccontext(arg, cpu_env);
-            rn = "TCContext";
+            register_name = "TCContext";
             break;
         case 6:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_tcschedule(arg, cpu_env);
-            rn = "TCSchedule";
+            register_name = "TCSchedule";
             break;
         case 7:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_tcschefback(arg, cpu_env);
-            rn = "TCScheFBack";
+            register_name = "TCScheFBack";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 3:
+    case CP0_REGISTER_03:
         switch (sel) {
         case 0:
             {
@@ -6777,172 +6900,172 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
                 gen_move_low32(arg, tmp);
                 tcg_temp_free_i64(tmp);
             }
-            rn = "EntryLo1";
+            register_name = "EntryLo1";
             break;
         case 1:
             CP0_CHECK(ctx->vp);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_GlobalNumber));
-            rn = "GlobalNumber";
+            register_name = "GlobalNumber";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 4:
+    case CP0_REGISTER_04:
         switch (sel) {
         case 0:
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_Context));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "Context";
+            register_name = "Context";
             break;
         case 1:
 //            gen_helper_mfc0_contextconfig(arg); /* SmartMIPS ASE */
-            rn = "ContextConfig";
+            register_name = "ContextConfig";
             goto cp0_unimplemented;
         case 2:
             CP0_CHECK(ctx->ulri);
             tcg_gen_ld_tl(arg, cpu_env,
                           offsetof(CPUMIPSState, active_tc.CP0_UserLocal));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "UserLocal";
+            register_name = "UserLocal";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 5:
+    case CP0_REGISTER_05:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_PageMask));
-            rn = "PageMask";
+            register_name = "PageMask";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_PageGrain));
-            rn = "PageGrain";
+            register_name = "PageGrain";
             break;
         case 2:
             CP0_CHECK(ctx->sc);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_SegCtl0));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "SegCtl0";
+            register_name = "SegCtl0";
             break;
         case 3:
             CP0_CHECK(ctx->sc);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_SegCtl1));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "SegCtl1";
+            register_name = "SegCtl1";
             break;
         case 4:
             CP0_CHECK(ctx->sc);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_SegCtl2));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "SegCtl2";
+            register_name = "SegCtl2";
             break;
         case 5:
             check_pw(ctx);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_PWBase));
-            rn = "PWBase";
+            register_name = "PWBase";
             break;
         case 6:
             check_pw(ctx);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_PWField));
-            rn = "PWField";
+            register_name = "PWField";
             break;
         case 7:
             check_pw(ctx);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_PWSize));
-            rn = "PWSize";
+            register_name = "PWSize";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 6:
+    case CP0_REGISTER_06:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Wired));
-            rn = "Wired";
+            register_name = "Wired";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSConf0));
-            rn = "SRSConf0";
+            register_name = "SRSConf0";
             break;
         case 2:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSConf1));
-            rn = "SRSConf1";
+            register_name = "SRSConf1";
             break;
         case 3:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSConf2));
-            rn = "SRSConf2";
+            register_name = "SRSConf2";
             break;
         case 4:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSConf3));
-            rn = "SRSConf3";
+            register_name = "SRSConf3";
             break;
         case 5:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSConf4));
-            rn = "SRSConf4";
+            register_name = "SRSConf4";
             break;
         case 6:
             check_pw(ctx);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_PWCtl));
-            rn = "PWCtl";
+            register_name = "PWCtl";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 7:
+    case CP0_REGISTER_07:
         switch (sel) {
         case 0:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_HWREna));
-            rn = "HWREna";
+            register_name = "HWREna";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 8:
+    case CP0_REGISTER_08:
         switch (sel) {
         case 0:
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_BadVAddr));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "BadVAddr";
+            register_name = "BadVAddr";
             break;
         case 1:
             CP0_CHECK(ctx->bi);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_BadInstr));
-            rn = "BadInstr";
+            register_name = "BadInstr";
             break;
         case 2:
             CP0_CHECK(ctx->bp);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_BadInstrP));
-            rn = "BadInstrP";
+            register_name = "BadInstrP";
             break;
         case 3:
             CP0_CHECK(ctx->bi);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_BadInstrX));
             tcg_gen_andi_tl(arg, arg, ~0xffff);
-            rn = "BadInstrX";
+            register_name = "BadInstrX";
             break;
        default:
             goto cp0_unimplemented;
         }
         break;
-    case 9:
+    case CP0_REGISTER_09:
         switch (sel) {
         case 0:
             /* Mark as an IO operation because we read the time.  */
             if (tb_cflags(ctx->base.tb) & CF_USE_ICOUNT) {
                 gen_io_start();
-	    }
+            }
             gen_helper_mfc0_count(arg, cpu_env);
             if (tb_cflags(ctx->base.tb) & CF_USE_ICOUNT) {
                 gen_io_end();
@@ -6952,164 +7075,173 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
                ensure we break completely out of translated code.  */
             gen_save_pc(ctx->base.pc_next + 4);
             ctx->base.is_jmp = DISAS_EXIT;
-            rn = "Count";
+            register_name = "Count";
             break;
-        /* 6,7 are implementation dependent */
+        case 6:
+            CP0_CHECK(ctx->saar);
+            gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SAARI));
+            register_name = "SAARI";
+            break;
+        case 7:
+            CP0_CHECK(ctx->saar);
+            gen_helper_mfc0_saar(arg, cpu_env);
+            register_name = "SAAR";
+            break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 10:
+    case CP0_REGISTER_10:
         switch (sel) {
         case 0:
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_EntryHi));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "EntryHi";
+            register_name = "EntryHi";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 11:
+    case CP0_REGISTER_11:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Compare));
-            rn = "Compare";
+            register_name = "Compare";
             break;
         /* 6,7 are implementation dependent */
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 12:
+    case CP0_REGISTER_12:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Status));
-            rn = "Status";
+            register_name = "Status";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_IntCtl));
-            rn = "IntCtl";
+            register_name = "IntCtl";
             break;
         case 2:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSCtl));
-            rn = "SRSCtl";
+            register_name = "SRSCtl";
             break;
         case 3:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSMap));
-            rn = "SRSMap";
+            register_name = "SRSMap";
             break;
         default:
             goto cp0_unimplemented;
        }
         break;
-    case 13:
+    case CP0_REGISTER_13:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Cause));
-            rn = "Cause";
+            register_name = "Cause";
             break;
         default:
             goto cp0_unimplemented;
        }
         break;
-    case 14:
+    case CP0_REGISTER_14:
         switch (sel) {
         case 0:
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_EPC));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "EPC";
+            register_name = "EPC";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 15:
+    case CP0_REGISTER_15:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_PRid));
-            rn = "PRid";
+            register_name = "PRid";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_EBase));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "EBase";
+            register_name = "EBase";
             break;
         case 3:
             check_insn(ctx, ISA_MIPS32R2);
             CP0_CHECK(ctx->cmgcr);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_CMGCRBase));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "CMGCRBase";
+            register_name = "CMGCRBase";
             break;
         default:
             goto cp0_unimplemented;
        }
         break;
-    case 16:
+    case CP0_REGISTER_16:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config0));
-            rn = "Config";
+            register_name = "Config";
             break;
         case 1:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config1));
-            rn = "Config1";
+            register_name = "Config1";
             break;
         case 2:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config2));
-            rn = "Config2";
+            register_name = "Config2";
             break;
         case 3:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config3));
-            rn = "Config3";
+            register_name = "Config3";
             break;
         case 4:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config4));
-            rn = "Config4";
+            register_name = "Config4";
             break;
         case 5:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config5));
-            rn = "Config5";
+            register_name = "Config5";
             break;
         /* 6,7 are implementation dependent */
         case 6:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config6));
-            rn = "Config6";
+            register_name = "Config6";
             break;
         case 7:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config7));
-            rn = "Config7";
+            register_name = "Config7";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 17:
+    case CP0_REGISTER_17:
         switch (sel) {
         case 0:
             gen_helper_mfc0_lladdr(arg, cpu_env);
-            rn = "LLAddr";
+            register_name = "LLAddr";
             break;
         case 1:
             CP0_CHECK(ctx->mrp);
             gen_helper_mfc0_maar(arg, cpu_env);
-            rn = "MAAR";
+            register_name = "MAAR";
             break;
         case 2:
             CP0_CHECK(ctx->mrp);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_MAARI));
-            rn = "MAARI";
+            register_name = "MAARI";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 18:
+    case CP0_REGISTER_18:
         switch (sel) {
         case 0:
         case 1:
@@ -7121,13 +7253,13 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case 7:
             CP0_CHECK(ctx->CP0_Config1 & (1 << CP0C1_WR));
             gen_helper_1e0i(mfc0_watchlo, arg, sel);
-            rn = "WatchLo";
+            register_name = "WatchLo";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 19:
+    case CP0_REGISTER_19:
         switch (sel) {
         case 0:
         case 1:
@@ -7139,142 +7271,142 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case 7:
             CP0_CHECK(ctx->CP0_Config1 & (1 << CP0C1_WR));
             gen_helper_1e0i(mfc0_watchhi, arg, sel);
-            rn = "WatchHi";
+            register_name = "WatchHi";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 20:
+    case CP0_REGISTER_20:
         switch (sel) {
         case 0:
 #if defined(TARGET_MIPS64)
             check_insn(ctx, ISA_MIPS3);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_XContext));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "XContext";
+            register_name = "XContext";
             break;
 #endif
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 21:
+    case CP0_REGISTER_21:
        /* Officially reserved, but sel 0 is used for R1x000 framemask */
         CP0_CHECK(!(ctx->insn_flags & ISA_MIPS32R6));
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Framemask));
-            rn = "Framemask";
+            register_name = "Framemask";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 22:
+    case CP0_REGISTER_22:
         tcg_gen_movi_tl(arg, 0); /* unimplemented */
-        rn = "'Diagnostic"; /* implementation dependent */
+        register_name = "'Diagnostic"; /* implementation dependent */
         break;
-    case 23:
+    case CP0_REGISTER_23:
         switch (sel) {
         case 0:
             gen_helper_mfc0_debug(arg, cpu_env); /* EJTAG support */
-            rn = "Debug";
+            register_name = "Debug";
             break;
         case 1:
 //            gen_helper_mfc0_tracecontrol(arg); /* PDtrace support */
-            rn = "TraceControl";
+            register_name = "TraceControl";
             goto cp0_unimplemented;
         case 2:
 //            gen_helper_mfc0_tracecontrol2(arg); /* PDtrace support */
-            rn = "TraceControl2";
+            register_name = "TraceControl2";
             goto cp0_unimplemented;
         case 3:
 //            gen_helper_mfc0_usertracedata(arg); /* PDtrace support */
-            rn = "UserTraceData";
+            register_name = "UserTraceData";
             goto cp0_unimplemented;
         case 4:
 //            gen_helper_mfc0_tracebpc(arg); /* PDtrace support */
-            rn = "TraceBPC";
+            register_name = "TraceBPC";
             goto cp0_unimplemented;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 24:
+    case CP0_REGISTER_24:
         switch (sel) {
         case 0:
             /* EJTAG support */
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_DEPC));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "DEPC";
+            register_name = "DEPC";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 25:
+    case CP0_REGISTER_25:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Performance0));
-            rn = "Performance0";
+            register_name = "Performance0";
             break;
         case 1:
 //            gen_helper_mfc0_performance1(arg);
-            rn = "Performance1";
+            register_name = "Performance1";
             goto cp0_unimplemented;
         case 2:
 //            gen_helper_mfc0_performance2(arg);
-            rn = "Performance2";
+            register_name = "Performance2";
             goto cp0_unimplemented;
         case 3:
 //            gen_helper_mfc0_performance3(arg);
-            rn = "Performance3";
+            register_name = "Performance3";
             goto cp0_unimplemented;
         case 4:
 //            gen_helper_mfc0_performance4(arg);
-            rn = "Performance4";
+            register_name = "Performance4";
             goto cp0_unimplemented;
         case 5:
 //            gen_helper_mfc0_performance5(arg);
-            rn = "Performance5";
+            register_name = "Performance5";
             goto cp0_unimplemented;
         case 6:
 //            gen_helper_mfc0_performance6(arg);
-            rn = "Performance6";
+            register_name = "Performance6";
             goto cp0_unimplemented;
         case 7:
 //            gen_helper_mfc0_performance7(arg);
-            rn = "Performance7";
+            register_name = "Performance7";
             goto cp0_unimplemented;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 26:
+    case CP0_REGISTER_26:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_ErrCtl));
-            rn = "ErrCtl";
+            register_name = "ErrCtl";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 27:
+    case CP0_REGISTER_27:
         switch (sel) {
         case 0:
         case 1:
         case 2:
         case 3:
             tcg_gen_movi_tl(arg, 0); /* unimplemented */
-            rn = "CacheErr";
+            register_name = "CacheErr";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 28:
+    case CP0_REGISTER_28:
         switch (sel) {
         case 0:
         case 2:
@@ -7286,56 +7418,56 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
                 gen_move_low32(arg, tmp);
                 tcg_temp_free_i64(tmp);
             }
-            rn = "TagLo";
+            register_name = "TagLo";
             break;
         case 1:
         case 3:
         case 5:
         case 7:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_DataLo));
-            rn = "DataLo";
+            register_name = "DataLo";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 29:
+    case CP0_REGISTER_29:
         switch (sel) {
         case 0:
         case 2:
         case 4:
         case 6:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_TagHi));
-            rn = "TagHi";
+            register_name = "TagHi";
             break;
         case 1:
         case 3:
         case 5:
         case 7:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_DataHi));
-            rn = "DataHi";
+            register_name = "DataHi";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 30:
+    case CP0_REGISTER_30:
         switch (sel) {
         case 0:
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_ErrorEPC));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "ErrorEPC";
+            register_name = "ErrorEPC";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 31:
+    case CP0_REGISTER_31:
         switch (sel) {
         case 0:
             /* EJTAG support */
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_DESAVE));
-            rn = "DESAVE";
+            register_name = "DESAVE";
             break;
         case 2:
         case 3:
@@ -7347,7 +7479,7 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
             tcg_gen_ld_tl(arg, cpu_env,
                           offsetof(CPUMIPSState, CP0_KScratch[sel-2]));
             tcg_gen_ext32s_tl(arg, arg);
-            rn = "KScratch";
+            register_name = "KScratch";
             break;
         default:
             goto cp0_unimplemented;
@@ -7356,17 +7488,18 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
     default:
        goto cp0_unimplemented;
     }
-    trace_mips_translate_c0("mfc0", rn, reg, sel);
+    trace_mips_translate_c0("mfc0", register_name, reg, sel);
     return;
 
 cp0_unimplemented:
-    qemu_log_mask(LOG_UNIMP, "mfc0 %s (reg %d sel %d)\n", rn, reg, sel);
+    qemu_log_mask(LOG_UNIMP, "mfc0 %s (reg %d sel %d)\n",
+                  register_name, reg, sel);
     gen_mfc0_unimplemented(ctx, arg);
 }
 
 static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
 {
-    const char *rn = "invalid";
+    const char *register_name = "invalid";
 
     if (sel != 0)
         check_insn(ctx, ISA_MIPS32);
@@ -7376,316 +7509,325 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
     }
 
     switch (reg) {
-    case 0:
+    case CP0_REGISTER_00:
         switch (sel) {
         case 0:
             gen_helper_mtc0_index(cpu_env, arg);
-            rn = "Index";
+            register_name = "Index";
             break;
         case 1:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_mvpcontrol(cpu_env, arg);
-            rn = "MVPControl";
+            register_name = "MVPControl";
             break;
         case 2:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             /* ignored */
-            rn = "MVPConf0";
+            register_name = "MVPConf0";
             break;
         case 3:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             /* ignored */
-            rn = "MVPConf1";
+            register_name = "MVPConf1";
             break;
         case 4:
             CP0_CHECK(ctx->vp);
             /* ignored */
-            rn = "VPControl";
+            register_name = "VPControl";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 1:
+    case CP0_REGISTER_01:
         switch (sel) {
         case 0:
             /* ignored */
-            rn = "Random";
+            register_name = "Random";
             break;
         case 1:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_vpecontrol(cpu_env, arg);
-            rn = "VPEControl";
+            register_name = "VPEControl";
             break;
         case 2:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_vpeconf0(cpu_env, arg);
-            rn = "VPEConf0";
+            register_name = "VPEConf0";
             break;
         case 3:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_vpeconf1(cpu_env, arg);
-            rn = "VPEConf1";
+            register_name = "VPEConf1";
             break;
         case 4:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_yqmask(cpu_env, arg);
-            rn = "YQMask";
+            register_name = "YQMask";
             break;
         case 5:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             tcg_gen_st_tl(arg, cpu_env,
                           offsetof(CPUMIPSState, CP0_VPESchedule));
-            rn = "VPESchedule";
+            register_name = "VPESchedule";
             break;
         case 6:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             tcg_gen_st_tl(arg, cpu_env,
                           offsetof(CPUMIPSState, CP0_VPEScheFBack));
-            rn = "VPEScheFBack";
+            register_name = "VPEScheFBack";
             break;
         case 7:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_vpeopt(cpu_env, arg);
-            rn = "VPEOpt";
+            register_name = "VPEOpt";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 2:
+    case CP0_REGISTER_02:
         switch (sel) {
         case 0:
             gen_helper_mtc0_entrylo0(cpu_env, arg);
-            rn = "EntryLo0";
+            register_name = "EntryLo0";
             break;
         case 1:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tcstatus(cpu_env, arg);
-            rn = "TCStatus";
+            register_name = "TCStatus";
             break;
         case 2:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tcbind(cpu_env, arg);
-            rn = "TCBind";
+            register_name = "TCBind";
             break;
         case 3:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tcrestart(cpu_env, arg);
-            rn = "TCRestart";
+            register_name = "TCRestart";
             break;
         case 4:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tchalt(cpu_env, arg);
-            rn = "TCHalt";
+            register_name = "TCHalt";
             break;
         case 5:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tccontext(cpu_env, arg);
-            rn = "TCContext";
+            register_name = "TCContext";
             break;
         case 6:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tcschedule(cpu_env, arg);
-            rn = "TCSchedule";
+            register_name = "TCSchedule";
             break;
         case 7:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tcschefback(cpu_env, arg);
-            rn = "TCScheFBack";
+            register_name = "TCScheFBack";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 3:
+    case CP0_REGISTER_03:
         switch (sel) {
         case 0:
             gen_helper_mtc0_entrylo1(cpu_env, arg);
-            rn = "EntryLo1";
+            register_name = "EntryLo1";
             break;
         case 1:
             CP0_CHECK(ctx->vp);
             /* ignored */
-            rn = "GlobalNumber";
+            register_name = "GlobalNumber";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 4:
+    case CP0_REGISTER_04:
         switch (sel) {
         case 0:
             gen_helper_mtc0_context(cpu_env, arg);
-            rn = "Context";
+            register_name = "Context";
             break;
         case 1:
 //            gen_helper_mtc0_contextconfig(cpu_env, arg); /* SmartMIPS ASE */
-            rn = "ContextConfig";
+            register_name = "ContextConfig";
             goto cp0_unimplemented;
         case 2:
             CP0_CHECK(ctx->ulri);
             tcg_gen_st_tl(arg, cpu_env,
                           offsetof(CPUMIPSState, active_tc.CP0_UserLocal));
-            rn = "UserLocal";
+            register_name = "UserLocal";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 5:
+    case CP0_REGISTER_05:
         switch (sel) {
         case 0:
             gen_helper_mtc0_pagemask(cpu_env, arg);
-            rn = "PageMask";
+            register_name = "PageMask";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_pagegrain(cpu_env, arg);
-            rn = "PageGrain";
+            register_name = "PageGrain";
             ctx->base.is_jmp = DISAS_STOP;
             break;
         case 2:
             CP0_CHECK(ctx->sc);
             gen_helper_mtc0_segctl0(cpu_env, arg);
-            rn = "SegCtl0";
+            register_name = "SegCtl0";
             break;
         case 3:
             CP0_CHECK(ctx->sc);
             gen_helper_mtc0_segctl1(cpu_env, arg);
-            rn = "SegCtl1";
+            register_name = "SegCtl1";
             break;
         case 4:
             CP0_CHECK(ctx->sc);
             gen_helper_mtc0_segctl2(cpu_env, arg);
-            rn = "SegCtl2";
+            register_name = "SegCtl2";
             break;
         case 5:
             check_pw(ctx);
             gen_mtc0_store32(arg, offsetof(CPUMIPSState, CP0_PWBase));
-            rn = "PWBase";
+            register_name = "PWBase";
             break;
         case 6:
             check_pw(ctx);
             gen_helper_mtc0_pwfield(cpu_env, arg);
-            rn = "PWField";
+            register_name = "PWField";
             break;
         case 7:
             check_pw(ctx);
             gen_helper_mtc0_pwsize(cpu_env, arg);
-            rn = "PWSize";
+            register_name = "PWSize";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 6:
+    case CP0_REGISTER_06:
         switch (sel) {
         case 0:
             gen_helper_mtc0_wired(cpu_env, arg);
-            rn = "Wired";
+            register_name = "Wired";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_srsconf0(cpu_env, arg);
-            rn = "SRSConf0";
+            register_name = "SRSConf0";
             break;
         case 2:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_srsconf1(cpu_env, arg);
-            rn = "SRSConf1";
+            register_name = "SRSConf1";
             break;
         case 3:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_srsconf2(cpu_env, arg);
-            rn = "SRSConf2";
+            register_name = "SRSConf2";
             break;
         case 4:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_srsconf3(cpu_env, arg);
-            rn = "SRSConf3";
+            register_name = "SRSConf3";
             break;
         case 5:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_srsconf4(cpu_env, arg);
-            rn = "SRSConf4";
+            register_name = "SRSConf4";
             break;
         case 6:
             check_pw(ctx);
             gen_helper_mtc0_pwctl(cpu_env, arg);
-            rn = "PWCtl";
+            register_name = "PWCtl";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 7:
+    case CP0_REGISTER_07:
         switch (sel) {
         case 0:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_hwrena(cpu_env, arg);
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "HWREna";
+            register_name = "HWREna";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 8:
+    case CP0_REGISTER_08:
         switch (sel) {
         case 0:
             /* ignored */
-            rn = "BadVAddr";
+            register_name = "BadVAddr";
             break;
         case 1:
             /* ignored */
-            rn = "BadInstr";
+            register_name = "BadInstr";
             break;
         case 2:
             /* ignored */
-            rn = "BadInstrP";
+            register_name = "BadInstrP";
             break;
         case 3:
             /* ignored */
-            rn = "BadInstrX";
+            register_name = "BadInstrX";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 9:
+    case CP0_REGISTER_09:
         switch (sel) {
         case 0:
             gen_helper_mtc0_count(cpu_env, arg);
-            rn = "Count";
+            register_name = "Count";
             break;
-        /* 6,7 are implementation dependent */
+        case 6:
+            CP0_CHECK(ctx->saar);
+            gen_helper_mtc0_saari(cpu_env, arg);
+            register_name = "SAARI";
+            break;
+        case 7:
+            CP0_CHECK(ctx->saar);
+            gen_helper_mtc0_saar(cpu_env, arg);
+            register_name = "SAAR";
+            break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 10:
+    case CP0_REGISTER_10:
         switch (sel) {
         case 0:
             gen_helper_mtc0_entryhi(cpu_env, arg);
-            rn = "EntryHi";
+            register_name = "EntryHi";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 11:
+    case CP0_REGISTER_11:
         switch (sel) {
         case 0:
             gen_helper_mtc0_compare(cpu_env, arg);
-            rn = "Compare";
+            register_name = "Compare";
             break;
         /* 6,7 are implementation dependent */
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 12:
+    case CP0_REGISTER_12:
         switch (sel) {
         case 0:
             save_cpu_state(ctx, 1);
@@ -7693,34 +7835,34 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
             /* DISAS_STOP isn't good enough here, hflags may have changed. */
             gen_save_pc(ctx->base.pc_next + 4);
             ctx->base.is_jmp = DISAS_EXIT;
-            rn = "Status";
+            register_name = "Status";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_intctl(cpu_env, arg);
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "IntCtl";
+            register_name = "IntCtl";
             break;
         case 2:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_srsctl(cpu_env, arg);
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "SRSCtl";
+            register_name = "SRSCtl";
             break;
         case 3:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mtc0_store32(arg, offsetof(CPUMIPSState, CP0_SRSMap));
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "SRSMap";
+            register_name = "SRSMap";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 13:
+    case CP0_REGISTER_13:
         switch (sel) {
         case 0:
             save_cpu_state(ctx, 1);
@@ -7730,107 +7872,107 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
              * translated code to check for pending interrupts.  */
             gen_save_pc(ctx->base.pc_next + 4);
             ctx->base.is_jmp = DISAS_EXIT;
-            rn = "Cause";
+            register_name = "Cause";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 14:
+    case CP0_REGISTER_14:
         switch (sel) {
         case 0:
             tcg_gen_st_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_EPC));
-            rn = "EPC";
+            register_name = "EPC";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 15:
+    case CP0_REGISTER_15:
         switch (sel) {
         case 0:
             /* ignored */
-            rn = "PRid";
+            register_name = "PRid";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_ebase(cpu_env, arg);
-            rn = "EBase";
+            register_name = "EBase";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 16:
+    case CP0_REGISTER_16:
         switch (sel) {
         case 0:
             gen_helper_mtc0_config0(cpu_env, arg);
-            rn = "Config";
+            register_name = "Config";
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
             break;
         case 1:
             /* ignored, read only */
-            rn = "Config1";
+            register_name = "Config1";
             break;
         case 2:
             gen_helper_mtc0_config2(cpu_env, arg);
-            rn = "Config2";
+            register_name = "Config2";
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
             break;
         case 3:
             gen_helper_mtc0_config3(cpu_env, arg);
-            rn = "Config3";
+            register_name = "Config3";
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
             break;
         case 4:
             gen_helper_mtc0_config4(cpu_env, arg);
-            rn = "Config4";
+            register_name = "Config4";
             ctx->base.is_jmp = DISAS_STOP;
             break;
         case 5:
             gen_helper_mtc0_config5(cpu_env, arg);
-            rn = "Config5";
+            register_name = "Config5";
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
             break;
         /* 6,7 are implementation dependent */
         case 6:
             /* ignored */
-            rn = "Config6";
+            register_name = "Config6";
             break;
         case 7:
             /* ignored */
-            rn = "Config7";
+            register_name = "Config7";
             break;
         default:
-            rn = "Invalid config selector";
+            register_name = "Invalid config selector";
             goto cp0_unimplemented;
         }
         break;
-    case 17:
+    case CP0_REGISTER_17:
         switch (sel) {
         case 0:
             gen_helper_mtc0_lladdr(cpu_env, arg);
-            rn = "LLAddr";
+            register_name = "LLAddr";
             break;
         case 1:
             CP0_CHECK(ctx->mrp);
             gen_helper_mtc0_maar(cpu_env, arg);
-            rn = "MAAR";
+            register_name = "MAAR";
             break;
         case 2:
             CP0_CHECK(ctx->mrp);
             gen_helper_mtc0_maari(cpu_env, arg);
-            rn = "MAARI";
+            register_name = "MAARI";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 18:
+    case CP0_REGISTER_18:
         switch (sel) {
         case 0:
         case 1:
@@ -7842,13 +7984,13 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case 7:
             CP0_CHECK(ctx->CP0_Config1 & (1 << CP0C1_WR));
             gen_helper_0e1i(mtc0_watchlo, arg, sel);
-            rn = "WatchLo";
+            register_name = "WatchLo";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 19:
+    case CP0_REGISTER_19:
         switch (sel) {
         case 0:
         case 1:
@@ -7860,59 +8002,59 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case 7:
             CP0_CHECK(ctx->CP0_Config1 & (1 << CP0C1_WR));
             gen_helper_0e1i(mtc0_watchhi, arg, sel);
-            rn = "WatchHi";
+            register_name = "WatchHi";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 20:
+    case CP0_REGISTER_20:
         switch (sel) {
         case 0:
 #if defined(TARGET_MIPS64)
             check_insn(ctx, ISA_MIPS3);
             gen_helper_mtc0_xcontext(cpu_env, arg);
-            rn = "XContext";
+            register_name = "XContext";
             break;
 #endif
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 21:
+    case CP0_REGISTER_21:
        /* Officially reserved, but sel 0 is used for R1x000 framemask */
         CP0_CHECK(!(ctx->insn_flags & ISA_MIPS32R6));
         switch (sel) {
         case 0:
             gen_helper_mtc0_framemask(cpu_env, arg);
-            rn = "Framemask";
+            register_name = "Framemask";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 22:
+    case CP0_REGISTER_22:
         /* ignored */
-        rn = "Diagnostic"; /* implementation dependent */
+        register_name = "Diagnostic"; /* implementation dependent */
         break;
-    case 23:
+    case CP0_REGISTER_23:
         switch (sel) {
         case 0:
             gen_helper_mtc0_debug(cpu_env, arg); /* EJTAG support */
             /* DISAS_STOP isn't good enough here, hflags may have changed. */
             gen_save_pc(ctx->base.pc_next + 4);
             ctx->base.is_jmp = DISAS_EXIT;
-            rn = "Debug";
+            register_name = "Debug";
             break;
         case 1:
 //            gen_helper_mtc0_tracecontrol(cpu_env, arg); /* PDtrace support */
-            rn = "TraceControl";
+            register_name = "TraceControl";
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
             goto cp0_unimplemented;
         case 2:
 //            gen_helper_mtc0_tracecontrol2(cpu_env, arg); /* PDtrace support */
-            rn = "TraceControl2";
+            register_name = "TraceControl2";
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
             goto cp0_unimplemented;
@@ -7920,7 +8062,7 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
 //            gen_helper_mtc0_usertracedata(cpu_env, arg); /* PDtrace support */
-            rn = "UserTraceData";
+            register_name = "UserTraceData";
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
             goto cp0_unimplemented;
@@ -7928,142 +8070,142 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
 //            gen_helper_mtc0_tracebpc(cpu_env, arg); /* PDtrace support */
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "TraceBPC";
+            register_name = "TraceBPC";
             goto cp0_unimplemented;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 24:
+    case CP0_REGISTER_24:
         switch (sel) {
         case 0:
             /* EJTAG support */
             tcg_gen_st_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_DEPC));
-            rn = "DEPC";
+            register_name = "DEPC";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 25:
+    case CP0_REGISTER_25:
         switch (sel) {
         case 0:
             gen_helper_mtc0_performance0(cpu_env, arg);
-            rn = "Performance0";
+            register_name = "Performance0";
             break;
         case 1:
 //            gen_helper_mtc0_performance1(arg);
-            rn = "Performance1";
+            register_name = "Performance1";
             goto cp0_unimplemented;
         case 2:
 //            gen_helper_mtc0_performance2(arg);
-            rn = "Performance2";
+            register_name = "Performance2";
             goto cp0_unimplemented;
         case 3:
 //            gen_helper_mtc0_performance3(arg);
-            rn = "Performance3";
+            register_name = "Performance3";
             goto cp0_unimplemented;
         case 4:
 //            gen_helper_mtc0_performance4(arg);
-            rn = "Performance4";
+            register_name = "Performance4";
             goto cp0_unimplemented;
         case 5:
 //            gen_helper_mtc0_performance5(arg);
-            rn = "Performance5";
+            register_name = "Performance5";
             goto cp0_unimplemented;
         case 6:
 //            gen_helper_mtc0_performance6(arg);
-            rn = "Performance6";
+            register_name = "Performance6";
             goto cp0_unimplemented;
         case 7:
 //            gen_helper_mtc0_performance7(arg);
-            rn = "Performance7";
+            register_name = "Performance7";
             goto cp0_unimplemented;
         default:
             goto cp0_unimplemented;
         }
        break;
-    case 26:
+    case CP0_REGISTER_26:
         switch (sel) {
         case 0:
             gen_helper_mtc0_errctl(cpu_env, arg);
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "ErrCtl";
+            register_name = "ErrCtl";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 27:
+    case CP0_REGISTER_27:
         switch (sel) {
         case 0:
         case 1:
         case 2:
         case 3:
             /* ignored */
-            rn = "CacheErr";
+            register_name = "CacheErr";
             break;
         default:
             goto cp0_unimplemented;
         }
        break;
-    case 28:
+    case CP0_REGISTER_28:
         switch (sel) {
         case 0:
         case 2:
         case 4:
         case 6:
             gen_helper_mtc0_taglo(cpu_env, arg);
-            rn = "TagLo";
+            register_name = "TagLo";
             break;
         case 1:
         case 3:
         case 5:
         case 7:
             gen_helper_mtc0_datalo(cpu_env, arg);
-            rn = "DataLo";
+            register_name = "DataLo";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 29:
+    case CP0_REGISTER_29:
         switch (sel) {
         case 0:
         case 2:
         case 4:
         case 6:
             gen_helper_mtc0_taghi(cpu_env, arg);
-            rn = "TagHi";
+            register_name = "TagHi";
             break;
         case 1:
         case 3:
         case 5:
         case 7:
             gen_helper_mtc0_datahi(cpu_env, arg);
-            rn = "DataHi";
+            register_name = "DataHi";
             break;
         default:
-            rn = "invalid sel";
+            register_name = "invalid sel";
             goto cp0_unimplemented;
         }
        break;
-    case 30:
+    case CP0_REGISTER_30:
         switch (sel) {
         case 0:
             tcg_gen_st_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_ErrorEPC));
-            rn = "ErrorEPC";
+            register_name = "ErrorEPC";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 31:
+    case CP0_REGISTER_31:
         switch (sel) {
         case 0:
             /* EJTAG support */
             gen_mtc0_store32(arg, offsetof(CPUMIPSState, CP0_DESAVE));
-            rn = "DESAVE";
+            register_name = "DESAVE";
             break;
         case 2:
         case 3:
@@ -8074,7 +8216,7 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
             CP0_CHECK(ctx->kscrexist & (1 << sel));
             tcg_gen_st_tl(arg, cpu_env,
                           offsetof(CPUMIPSState, CP0_KScratch[sel-2]));
-            rn = "KScratch";
+            register_name = "KScratch";
             break;
         default:
             goto cp0_unimplemented;
@@ -8083,7 +8225,7 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
     default:
        goto cp0_unimplemented;
     }
-    trace_mips_translate_c0("mtc0", rn, reg, sel);
+    trace_mips_translate_c0("mtc0", register_name, reg, sel);
 
     /* For simplicity assume that all writes can cause interrupts.  */
     if (tb_cflags(ctx->base.tb) & CF_USE_ICOUNT) {
@@ -8096,297 +8238,298 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
     return;
 
 cp0_unimplemented:
-    qemu_log_mask(LOG_UNIMP, "mtc0 %s (reg %d sel %d)\n", rn, reg, sel);
+    qemu_log_mask(LOG_UNIMP, "mtc0 %s (reg %d sel %d)\n",
+                  register_name, reg, sel);
 }
 
 #if defined(TARGET_MIPS64)
 static void gen_dmfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
 {
-    const char *rn = "invalid";
+    const char *register_name = "invalid";
 
     if (sel != 0)
         check_insn(ctx, ISA_MIPS64);
 
     switch (reg) {
-    case 0:
+    case CP0_REGISTER_00:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Index));
-            rn = "Index";
+            register_name = "Index";
             break;
         case 1:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_mvpcontrol(arg, cpu_env);
-            rn = "MVPControl";
+            register_name = "MVPControl";
             break;
         case 2:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_mvpconf0(arg, cpu_env);
-            rn = "MVPConf0";
+            register_name = "MVPConf0";
             break;
         case 3:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_mvpconf1(arg, cpu_env);
-            rn = "MVPConf1";
+            register_name = "MVPConf1";
             break;
         case 4:
             CP0_CHECK(ctx->vp);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_VPControl));
-            rn = "VPControl";
+            register_name = "VPControl";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 1:
+    case CP0_REGISTER_01:
         switch (sel) {
         case 0:
             CP0_CHECK(!(ctx->insn_flags & ISA_MIPS32R6));
             gen_helper_mfc0_random(arg, cpu_env);
-            rn = "Random";
+            register_name = "Random";
             break;
         case 1:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_VPEControl));
-            rn = "VPEControl";
+            register_name = "VPEControl";
             break;
         case 2:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_VPEConf0));
-            rn = "VPEConf0";
+            register_name = "VPEConf0";
             break;
         case 3:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_VPEConf1));
-            rn = "VPEConf1";
+            register_name = "VPEConf1";
             break;
         case 4:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_YQMask));
-            rn = "YQMask";
+            register_name = "YQMask";
             break;
         case 5:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_VPESchedule));
-            rn = "VPESchedule";
+            register_name = "VPESchedule";
             break;
         case 6:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_VPEScheFBack));
-            rn = "VPEScheFBack";
+            register_name = "VPEScheFBack";
             break;
         case 7:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_VPEOpt));
-            rn = "VPEOpt";
+            register_name = "VPEOpt";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 2:
+    case CP0_REGISTER_02:
         switch (sel) {
         case 0:
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_EntryLo0));
-            rn = "EntryLo0";
+            register_name = "EntryLo0";
             break;
         case 1:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_tcstatus(arg, cpu_env);
-            rn = "TCStatus";
+            register_name = "TCStatus";
             break;
         case 2:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mfc0_tcbind(arg, cpu_env);
-            rn = "TCBind";
+            register_name = "TCBind";
             break;
         case 3:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_dmfc0_tcrestart(arg, cpu_env);
-            rn = "TCRestart";
+            register_name = "TCRestart";
             break;
         case 4:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_dmfc0_tchalt(arg, cpu_env);
-            rn = "TCHalt";
+            register_name = "TCHalt";
             break;
         case 5:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_dmfc0_tccontext(arg, cpu_env);
-            rn = "TCContext";
+            register_name = "TCContext";
             break;
         case 6:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_dmfc0_tcschedule(arg, cpu_env);
-            rn = "TCSchedule";
+            register_name = "TCSchedule";
             break;
         case 7:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_dmfc0_tcschefback(arg, cpu_env);
-            rn = "TCScheFBack";
+            register_name = "TCScheFBack";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 3:
+    case CP0_REGISTER_03:
         switch (sel) {
         case 0:
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_EntryLo1));
-            rn = "EntryLo1";
+            register_name = "EntryLo1";
             break;
         case 1:
             CP0_CHECK(ctx->vp);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_GlobalNumber));
-            rn = "GlobalNumber";
+            register_name = "GlobalNumber";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 4:
+    case CP0_REGISTER_04:
         switch (sel) {
         case 0:
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_Context));
-            rn = "Context";
+            register_name = "Context";
             break;
         case 1:
 //            gen_helper_dmfc0_contextconfig(arg); /* SmartMIPS ASE */
-            rn = "ContextConfig";
+            register_name = "ContextConfig";
             goto cp0_unimplemented;
         case 2:
             CP0_CHECK(ctx->ulri);
             tcg_gen_ld_tl(arg, cpu_env,
                           offsetof(CPUMIPSState, active_tc.CP0_UserLocal));
-            rn = "UserLocal";
+            register_name = "UserLocal";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 5:
+    case CP0_REGISTER_05:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_PageMask));
-            rn = "PageMask";
+            register_name = "PageMask";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_PageGrain));
-            rn = "PageGrain";
+            register_name = "PageGrain";
             break;
         case 2:
             CP0_CHECK(ctx->sc);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_SegCtl0));
-            rn = "SegCtl0";
+            register_name = "SegCtl0";
             break;
         case 3:
             CP0_CHECK(ctx->sc);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_SegCtl1));
-            rn = "SegCtl1";
+            register_name = "SegCtl1";
             break;
         case 4:
             CP0_CHECK(ctx->sc);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_SegCtl2));
-            rn = "SegCtl2";
+            register_name = "SegCtl2";
             break;
         case 5:
             check_pw(ctx);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_PWBase));
-            rn = "PWBase";
+            register_name = "PWBase";
             break;
         case 6:
             check_pw(ctx);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_PWField));
-            rn = "PWField";
+            register_name = "PWField";
             break;
         case 7:
             check_pw(ctx);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_PWSize));
-            rn = "PWSize";
+            register_name = "PWSize";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 6:
+    case CP0_REGISTER_06:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Wired));
-            rn = "Wired";
+            register_name = "Wired";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSConf0));
-            rn = "SRSConf0";
+            register_name = "SRSConf0";
             break;
         case 2:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSConf1));
-            rn = "SRSConf1";
+            register_name = "SRSConf1";
             break;
         case 3:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSConf2));
-            rn = "SRSConf2";
+            register_name = "SRSConf2";
             break;
         case 4:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSConf3));
-            rn = "SRSConf3";
+            register_name = "SRSConf3";
             break;
         case 5:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSConf4));
-            rn = "SRSConf4";
+            register_name = "SRSConf4";
             break;
         case 6:
             check_pw(ctx);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_PWCtl));
-            rn = "PWCtl";
+            register_name = "PWCtl";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 7:
+    case CP0_REGISTER_07:
         switch (sel) {
         case 0:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_HWREna));
-            rn = "HWREna";
+            register_name = "HWREna";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 8:
+    case CP0_REGISTER_08:
         switch (sel) {
         case 0:
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_BadVAddr));
-            rn = "BadVAddr";
+            register_name = "BadVAddr";
             break;
         case 1:
             CP0_CHECK(ctx->bi);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_BadInstr));
-            rn = "BadInstr";
+            register_name = "BadInstr";
             break;
         case 2:
             CP0_CHECK(ctx->bp);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_BadInstrP));
-            rn = "BadInstrP";
+            register_name = "BadInstrP";
             break;
         case 3:
             CP0_CHECK(ctx->bi);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_BadInstrX));
             tcg_gen_andi_tl(arg, arg, ~0xffff);
-            rn = "BadInstrX";
+            register_name = "BadInstrX";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 9:
+    case CP0_REGISTER_09:
         switch (sel) {
         case 0:
             /* Mark as an IO operation because we read the time.  */
@@ -8402,160 +8545,169 @@ static void gen_dmfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
                ensure we break completely out of translated code.  */
             gen_save_pc(ctx->base.pc_next + 4);
             ctx->base.is_jmp = DISAS_EXIT;
-            rn = "Count";
+            register_name = "Count";
             break;
-        /* 6,7 are implementation dependent */
+        case 6:
+            CP0_CHECK(ctx->saar);
+            gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SAARI));
+            register_name = "SAARI";
+            break;
+        case 7:
+            CP0_CHECK(ctx->saar);
+            gen_helper_dmfc0_saar(arg, cpu_env);
+            register_name = "SAAR";
+            break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 10:
+    case CP0_REGISTER_10:
         switch (sel) {
         case 0:
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_EntryHi));
-            rn = "EntryHi";
+            register_name = "EntryHi";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 11:
+    case CP0_REGISTER_11:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Compare));
-            rn = "Compare";
+            register_name = "Compare";
             break;
         /* 6,7 are implementation dependent */
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 12:
+    case CP0_REGISTER_12:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Status));
-            rn = "Status";
+            register_name = "Status";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_IntCtl));
-            rn = "IntCtl";
+            register_name = "IntCtl";
             break;
         case 2:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSCtl));
-            rn = "SRSCtl";
+            register_name = "SRSCtl";
             break;
         case 3:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_SRSMap));
-            rn = "SRSMap";
+            register_name = "SRSMap";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 13:
+    case CP0_REGISTER_13:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Cause));
-            rn = "Cause";
+            register_name = "Cause";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 14:
+    case CP0_REGISTER_14:
         switch (sel) {
         case 0:
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_EPC));
-            rn = "EPC";
+            register_name = "EPC";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 15:
+    case CP0_REGISTER_15:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_PRid));
-            rn = "PRid";
+            register_name = "PRid";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_EBase));
-            rn = "EBase";
+            register_name = "EBase";
             break;
         case 3:
             check_insn(ctx, ISA_MIPS32R2);
             CP0_CHECK(ctx->cmgcr);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_CMGCRBase));
-            rn = "CMGCRBase";
+            register_name = "CMGCRBase";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 16:
+    case CP0_REGISTER_16:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config0));
-            rn = "Config";
+            register_name = "Config";
             break;
         case 1:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config1));
-            rn = "Config1";
+            register_name = "Config1";
             break;
         case 2:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config2));
-            rn = "Config2";
+            register_name = "Config2";
             break;
         case 3:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config3));
-            rn = "Config3";
+            register_name = "Config3";
             break;
         case 4:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config4));
-            rn = "Config4";
+            register_name = "Config4";
             break;
         case 5:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config5));
-            rn = "Config5";
+            register_name = "Config5";
             break;
        /* 6,7 are implementation dependent */
         case 6:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config6));
-            rn = "Config6";
+            register_name = "Config6";
             break;
         case 7:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Config7));
-            rn = "Config7";
+            register_name = "Config7";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 17:
+    case CP0_REGISTER_17:
         switch (sel) {
         case 0:
             gen_helper_dmfc0_lladdr(arg, cpu_env);
-            rn = "LLAddr";
+            register_name = "LLAddr";
             break;
         case 1:
             CP0_CHECK(ctx->mrp);
             gen_helper_dmfc0_maar(arg, cpu_env);
-            rn = "MAAR";
+            register_name = "MAAR";
             break;
         case 2:
             CP0_CHECK(ctx->mrp);
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_MAARI));
-            rn = "MAARI";
+            register_name = "MAARI";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 18:
+    case CP0_REGISTER_18:
         switch (sel) {
         case 0:
         case 1:
@@ -8567,13 +8719,13 @@ static void gen_dmfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case 7:
             CP0_CHECK(ctx->CP0_Config1 & (1 << CP0C1_WR));
             gen_helper_1e0i(dmfc0_watchlo, arg, sel);
-            rn = "WatchLo";
+            register_name = "WatchLo";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 19:
+    case CP0_REGISTER_19:
         switch (sel) {
         case 0:
         case 1:
@@ -8585,125 +8737,125 @@ static void gen_dmfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case 7:
             CP0_CHECK(ctx->CP0_Config1 & (1 << CP0C1_WR));
             gen_helper_1e0i(mfc0_watchhi, arg, sel);
-            rn = "WatchHi";
+            register_name = "WatchHi";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 20:
+    case CP0_REGISTER_20:
         switch (sel) {
         case 0:
             check_insn(ctx, ISA_MIPS3);
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_XContext));
-            rn = "XContext";
+            register_name = "XContext";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 21:
+    case CP0_REGISTER_21:
        /* Officially reserved, but sel 0 is used for R1x000 framemask */
         CP0_CHECK(!(ctx->insn_flags & ISA_MIPS32R6));
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Framemask));
-            rn = "Framemask";
+            register_name = "Framemask";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 22:
+    case CP0_REGISTER_22:
         tcg_gen_movi_tl(arg, 0); /* unimplemented */
-        rn = "'Diagnostic"; /* implementation dependent */
+        register_name = "'Diagnostic"; /* implementation dependent */
         break;
-    case 23:
+    case CP0_REGISTER_23:
         switch (sel) {
         case 0:
             gen_helper_mfc0_debug(arg, cpu_env); /* EJTAG support */
-            rn = "Debug";
+            register_name = "Debug";
             break;
         case 1:
 //            gen_helper_dmfc0_tracecontrol(arg, cpu_env); /* PDtrace support */
-            rn = "TraceControl";
+            register_name = "TraceControl";
             goto cp0_unimplemented;
         case 2:
 //            gen_helper_dmfc0_tracecontrol2(arg, cpu_env); /* PDtrace support */
-            rn = "TraceControl2";
+            register_name = "TraceControl2";
             goto cp0_unimplemented;
         case 3:
 //            gen_helper_dmfc0_usertracedata(arg, cpu_env); /* PDtrace support */
-            rn = "UserTraceData";
+            register_name = "UserTraceData";
             goto cp0_unimplemented;
         case 4:
 //            gen_helper_dmfc0_tracebpc(arg, cpu_env); /* PDtrace support */
-            rn = "TraceBPC";
+            register_name = "TraceBPC";
             goto cp0_unimplemented;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 24:
+    case CP0_REGISTER_24:
         switch (sel) {
         case 0:
             /* EJTAG support */
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_DEPC));
-            rn = "DEPC";
+            register_name = "DEPC";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 25:
+    case CP0_REGISTER_25:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Performance0));
-            rn = "Performance0";
+            register_name = "Performance0";
             break;
         case 1:
 //            gen_helper_dmfc0_performance1(arg);
-            rn = "Performance1";
+            register_name = "Performance1";
             goto cp0_unimplemented;
         case 2:
 //            gen_helper_dmfc0_performance2(arg);
-            rn = "Performance2";
+            register_name = "Performance2";
             goto cp0_unimplemented;
         case 3:
 //            gen_helper_dmfc0_performance3(arg);
-            rn = "Performance3";
+            register_name = "Performance3";
             goto cp0_unimplemented;
         case 4:
 //            gen_helper_dmfc0_performance4(arg);
-            rn = "Performance4";
+            register_name = "Performance4";
             goto cp0_unimplemented;
         case 5:
 //            gen_helper_dmfc0_performance5(arg);
-            rn = "Performance5";
+            register_name = "Performance5";
             goto cp0_unimplemented;
         case 6:
 //            gen_helper_dmfc0_performance6(arg);
-            rn = "Performance6";
+            register_name = "Performance6";
             goto cp0_unimplemented;
         case 7:
 //            gen_helper_dmfc0_performance7(arg);
-            rn = "Performance7";
+            register_name = "Performance7";
             goto cp0_unimplemented;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 26:
+    case CP0_REGISTER_26:
         switch (sel) {
         case 0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_ErrCtl));
-            rn = "ErrCtl";
+            register_name = "ErrCtl";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 27:
+    case CP0_REGISTER_27:
         switch (sel) {
         /* ignored */
         case 0:
@@ -8711,68 +8863,68 @@ static void gen_dmfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case 2:
         case 3:
             tcg_gen_movi_tl(arg, 0); /* unimplemented */
-            rn = "CacheErr";
+            register_name = "CacheErr";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 28:
+    case CP0_REGISTER_28:
         switch (sel) {
         case 0:
         case 2:
         case 4:
         case 6:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_TagLo));
-            rn = "TagLo";
+            register_name = "TagLo";
             break;
         case 1:
         case 3:
         case 5:
         case 7:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_DataLo));
-            rn = "DataLo";
+            register_name = "DataLo";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 29:
+    case CP0_REGISTER_29:
         switch (sel) {
         case 0:
         case 2:
         case 4:
         case 6:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_TagHi));
-            rn = "TagHi";
+            register_name = "TagHi";
             break;
         case 1:
         case 3:
         case 5:
         case 7:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_DataHi));
-            rn = "DataHi";
+            register_name = "DataHi";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 30:
+    case CP0_REGISTER_30:
         switch (sel) {
         case 0:
             tcg_gen_ld_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_ErrorEPC));
-            rn = "ErrorEPC";
+            register_name = "ErrorEPC";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 31:
+    case CP0_REGISTER_31:
         switch (sel) {
         case 0:
             /* EJTAG support */
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_DESAVE));
-            rn = "DESAVE";
+            register_name = "DESAVE";
             break;
         case 2:
         case 3:
@@ -8783,7 +8935,7 @@ static void gen_dmfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
             CP0_CHECK(ctx->kscrexist & (1 << sel));
             tcg_gen_ld_tl(arg, cpu_env,
                           offsetof(CPUMIPSState, CP0_KScratch[sel-2]));
-            rn = "KScratch";
+            register_name = "KScratch";
             break;
         default:
             goto cp0_unimplemented;
@@ -8792,17 +8944,18 @@ static void gen_dmfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
     default:
         goto cp0_unimplemented;
     }
-    trace_mips_translate_c0("dmfc0", rn, reg, sel);
+    trace_mips_translate_c0("dmfc0", register_name, reg, sel);
     return;
 
 cp0_unimplemented:
-    qemu_log_mask(LOG_UNIMP, "dmfc0 %s (reg %d sel %d)\n", rn, reg, sel);
+    qemu_log_mask(LOG_UNIMP, "dmfc0 %s (reg %d sel %d)\n",
+                  register_name, reg, sel);
     gen_mfc0_unimplemented(ctx, arg);
 }
 
 static void gen_dmtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
 {
-    const char *rn = "invalid";
+    const char *register_name = "invalid";
 
     if (sel != 0)
         check_insn(ctx, ISA_MIPS64);
@@ -8812,308 +8965,317 @@ static void gen_dmtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
     }
 
     switch (reg) {
-    case 0:
+    case CP0_REGISTER_00:
         switch (sel) {
         case 0:
             gen_helper_mtc0_index(cpu_env, arg);
-            rn = "Index";
+            register_name = "Index";
             break;
         case 1:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_mvpcontrol(cpu_env, arg);
-            rn = "MVPControl";
+            register_name = "MVPControl";
             break;
         case 2:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             /* ignored */
-            rn = "MVPConf0";
+            register_name = "MVPConf0";
             break;
         case 3:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             /* ignored */
-            rn = "MVPConf1";
+            register_name = "MVPConf1";
             break;
         case 4:
             CP0_CHECK(ctx->vp);
             /* ignored */
-            rn = "VPControl";
+            register_name = "VPControl";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 1:
+    case CP0_REGISTER_01:
         switch (sel) {
         case 0:
             /* ignored */
-            rn = "Random";
+            register_name = "Random";
             break;
         case 1:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_vpecontrol(cpu_env, arg);
-            rn = "VPEControl";
+            register_name = "VPEControl";
             break;
         case 2:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_vpeconf0(cpu_env, arg);
-            rn = "VPEConf0";
+            register_name = "VPEConf0";
             break;
         case 3:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_vpeconf1(cpu_env, arg);
-            rn = "VPEConf1";
+            register_name = "VPEConf1";
             break;
         case 4:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_yqmask(cpu_env, arg);
-            rn = "YQMask";
+            register_name = "YQMask";
             break;
         case 5:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             tcg_gen_st_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_VPESchedule));
-            rn = "VPESchedule";
+            register_name = "VPESchedule";
             break;
         case 6:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             tcg_gen_st_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_VPEScheFBack));
-            rn = "VPEScheFBack";
+            register_name = "VPEScheFBack";
             break;
         case 7:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_vpeopt(cpu_env, arg);
-            rn = "VPEOpt";
+            register_name = "VPEOpt";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 2:
+    case CP0_REGISTER_02:
         switch (sel) {
         case 0:
             gen_helper_dmtc0_entrylo0(cpu_env, arg);
-            rn = "EntryLo0";
+            register_name = "EntryLo0";
             break;
         case 1:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tcstatus(cpu_env, arg);
-            rn = "TCStatus";
+            register_name = "TCStatus";
             break;
         case 2:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tcbind(cpu_env, arg);
-            rn = "TCBind";
+            register_name = "TCBind";
             break;
         case 3:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tcrestart(cpu_env, arg);
-            rn = "TCRestart";
+            register_name = "TCRestart";
             break;
         case 4:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tchalt(cpu_env, arg);
-            rn = "TCHalt";
+            register_name = "TCHalt";
             break;
         case 5:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tccontext(cpu_env, arg);
-            rn = "TCContext";
+            register_name = "TCContext";
             break;
         case 6:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tcschedule(cpu_env, arg);
-            rn = "TCSchedule";
+            register_name = "TCSchedule";
             break;
         case 7:
             CP0_CHECK(ctx->insn_flags & ASE_MT);
             gen_helper_mtc0_tcschefback(cpu_env, arg);
-            rn = "TCScheFBack";
+            register_name = "TCScheFBack";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 3:
+    case CP0_REGISTER_03:
         switch (sel) {
         case 0:
             gen_helper_dmtc0_entrylo1(cpu_env, arg);
-            rn = "EntryLo1";
+            register_name = "EntryLo1";
             break;
         case 1:
             CP0_CHECK(ctx->vp);
             /* ignored */
-            rn = "GlobalNumber";
+            register_name = "GlobalNumber";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 4:
+    case CP0_REGISTER_04:
         switch (sel) {
         case 0:
             gen_helper_mtc0_context(cpu_env, arg);
-            rn = "Context";
+            register_name = "Context";
             break;
         case 1:
 //           gen_helper_mtc0_contextconfig(cpu_env, arg); /* SmartMIPS ASE */
-            rn = "ContextConfig";
+            register_name = "ContextConfig";
             goto cp0_unimplemented;
         case 2:
             CP0_CHECK(ctx->ulri);
             tcg_gen_st_tl(arg, cpu_env,
                           offsetof(CPUMIPSState, active_tc.CP0_UserLocal));
-            rn = "UserLocal";
+            register_name = "UserLocal";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 5:
+    case CP0_REGISTER_05:
         switch (sel) {
         case 0:
             gen_helper_mtc0_pagemask(cpu_env, arg);
-            rn = "PageMask";
+            register_name = "PageMask";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_pagegrain(cpu_env, arg);
-            rn = "PageGrain";
+            register_name = "PageGrain";
             break;
         case 2:
             CP0_CHECK(ctx->sc);
             gen_helper_mtc0_segctl0(cpu_env, arg);
-            rn = "SegCtl0";
+            register_name = "SegCtl0";
             break;
         case 3:
             CP0_CHECK(ctx->sc);
             gen_helper_mtc0_segctl1(cpu_env, arg);
-            rn = "SegCtl1";
+            register_name = "SegCtl1";
             break;
         case 4:
             CP0_CHECK(ctx->sc);
             gen_helper_mtc0_segctl2(cpu_env, arg);
-            rn = "SegCtl2";
+            register_name = "SegCtl2";
             break;
         case 5:
             check_pw(ctx);
             tcg_gen_st_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_PWBase));
-            rn = "PWBase";
+            register_name = "PWBase";
             break;
         case 6:
             check_pw(ctx);
             gen_helper_mtc0_pwfield(cpu_env, arg);
-            rn = "PWField";
+            register_name = "PWField";
             break;
         case 7:
             check_pw(ctx);
             gen_helper_mtc0_pwsize(cpu_env, arg);
-            rn = "PWSize";
+            register_name = "PWSize";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 6:
+    case CP0_REGISTER_06:
         switch (sel) {
         case 0:
             gen_helper_mtc0_wired(cpu_env, arg);
-            rn = "Wired";
+            register_name = "Wired";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_srsconf0(cpu_env, arg);
-            rn = "SRSConf0";
+            register_name = "SRSConf0";
             break;
         case 2:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_srsconf1(cpu_env, arg);
-            rn = "SRSConf1";
+            register_name = "SRSConf1";
             break;
         case 3:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_srsconf2(cpu_env, arg);
-            rn = "SRSConf2";
+            register_name = "SRSConf2";
             break;
         case 4:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_srsconf3(cpu_env, arg);
-            rn = "SRSConf3";
+            register_name = "SRSConf3";
             break;
         case 5:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_srsconf4(cpu_env, arg);
-            rn = "SRSConf4";
+            register_name = "SRSConf4";
             break;
         case 6:
             check_pw(ctx);
             gen_helper_mtc0_pwctl(cpu_env, arg);
-            rn = "PWCtl";
+            register_name = "PWCtl";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 7:
+    case CP0_REGISTER_07:
         switch (sel) {
         case 0:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_hwrena(cpu_env, arg);
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "HWREna";
+            register_name = "HWREna";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 8:
+    case CP0_REGISTER_08:
         switch (sel) {
         case 0:
             /* ignored */
-            rn = "BadVAddr";
+            register_name = "BadVAddr";
             break;
         case 1:
             /* ignored */
-            rn = "BadInstr";
+            register_name = "BadInstr";
             break;
         case 2:
             /* ignored */
-            rn = "BadInstrP";
+            register_name = "BadInstrP";
             break;
         case 3:
             /* ignored */
-            rn = "BadInstrX";
+            register_name = "BadInstrX";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 9:
+    case CP0_REGISTER_09:
         switch (sel) {
         case 0:
             gen_helper_mtc0_count(cpu_env, arg);
-            rn = "Count";
+            register_name = "Count";
             break;
-        /* 6,7 are implementation dependent */
+        case 6:
+            CP0_CHECK(ctx->saar);
+            gen_helper_mtc0_saari(cpu_env, arg);
+            register_name = "SAARI";
+            break;
+        case 7:
+            CP0_CHECK(ctx->saar);
+            gen_helper_mtc0_saar(cpu_env, arg);
+            register_name = "SAAR";
+            break;
         default:
             goto cp0_unimplemented;
         }
         /* Stop translation as we may have switched the execution mode */
         ctx->base.is_jmp = DISAS_STOP;
         break;
-    case 10:
+    case CP0_REGISTER_10:
         switch (sel) {
         case 0:
             gen_helper_mtc0_entryhi(cpu_env, arg);
-            rn = "EntryHi";
+            register_name = "EntryHi";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 11:
+    case CP0_REGISTER_11:
         switch (sel) {
         case 0:
             gen_helper_mtc0_compare(cpu_env, arg);
-            rn = "Compare";
+            register_name = "Compare";
             break;
         /* 6,7 are implementation dependent */
         default:
@@ -9122,7 +9284,7 @@ static void gen_dmtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         /* Stop translation as we may have switched the execution mode */
         ctx->base.is_jmp = DISAS_STOP;
         break;
-    case 12:
+    case CP0_REGISTER_12:
         switch (sel) {
         case 0:
             save_cpu_state(ctx, 1);
@@ -9130,34 +9292,34 @@ static void gen_dmtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
             /* DISAS_STOP isn't good enough here, hflags may have changed. */
             gen_save_pc(ctx->base.pc_next + 4);
             ctx->base.is_jmp = DISAS_EXIT;
-            rn = "Status";
+            register_name = "Status";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_intctl(cpu_env, arg);
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "IntCtl";
+            register_name = "IntCtl";
             break;
         case 2:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_srsctl(cpu_env, arg);
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "SRSCtl";
+            register_name = "SRSCtl";
             break;
         case 3:
             check_insn(ctx, ISA_MIPS32R2);
             gen_mtc0_store32(arg, offsetof(CPUMIPSState, CP0_SRSMap));
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "SRSMap";
+            register_name = "SRSMap";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 13:
+    case CP0_REGISTER_13:
         switch (sel) {
         case 0:
             save_cpu_state(ctx, 1);
@@ -9167,98 +9329,98 @@ static void gen_dmtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
              * translated code to check for pending interrupts.  */
             gen_save_pc(ctx->base.pc_next + 4);
             ctx->base.is_jmp = DISAS_EXIT;
-            rn = "Cause";
+            register_name = "Cause";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 14:
+    case CP0_REGISTER_14:
         switch (sel) {
         case 0:
             tcg_gen_st_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_EPC));
-            rn = "EPC";
+            register_name = "EPC";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 15:
+    case CP0_REGISTER_15:
         switch (sel) {
         case 0:
             /* ignored */
-            rn = "PRid";
+            register_name = "PRid";
             break;
         case 1:
             check_insn(ctx, ISA_MIPS32R2);
             gen_helper_mtc0_ebase(cpu_env, arg);
-            rn = "EBase";
+            register_name = "EBase";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 16:
+    case CP0_REGISTER_16:
         switch (sel) {
         case 0:
             gen_helper_mtc0_config0(cpu_env, arg);
-            rn = "Config";
+            register_name = "Config";
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
             break;
         case 1:
             /* ignored, read only */
-            rn = "Config1";
+            register_name = "Config1";
             break;
         case 2:
             gen_helper_mtc0_config2(cpu_env, arg);
-            rn = "Config2";
+            register_name = "Config2";
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
             break;
         case 3:
             gen_helper_mtc0_config3(cpu_env, arg);
-            rn = "Config3";
+            register_name = "Config3";
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
             break;
         case 4:
             /* currently ignored */
-            rn = "Config4";
+            register_name = "Config4";
             break;
         case 5:
             gen_helper_mtc0_config5(cpu_env, arg);
-            rn = "Config5";
+            register_name = "Config5";
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
             break;
         /* 6,7 are implementation dependent */
         default:
-            rn = "Invalid config selector";
+            register_name = "Invalid config selector";
             goto cp0_unimplemented;
         }
         break;
-    case 17:
+    case CP0_REGISTER_17:
         switch (sel) {
         case 0:
             gen_helper_mtc0_lladdr(cpu_env, arg);
-            rn = "LLAddr";
+            register_name = "LLAddr";
             break;
         case 1:
             CP0_CHECK(ctx->mrp);
             gen_helper_mtc0_maar(cpu_env, arg);
-            rn = "MAAR";
+            register_name = "MAAR";
             break;
         case 2:
             CP0_CHECK(ctx->mrp);
             gen_helper_mtc0_maari(cpu_env, arg);
-            rn = "MAARI";
+            register_name = "MAARI";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 18:
+    case CP0_REGISTER_18:
         switch (sel) {
         case 0:
         case 1:
@@ -9270,13 +9432,13 @@ static void gen_dmtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case 7:
             CP0_CHECK(ctx->CP0_Config1 & (1 << CP0C1_WR));
             gen_helper_0e1i(mtc0_watchlo, arg, sel);
-            rn = "WatchLo";
+            register_name = "WatchLo";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 19:
+    case CP0_REGISTER_19:
         switch (sel) {
         case 0:
         case 1:
@@ -9288,206 +9450,206 @@ static void gen_dmtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case 7:
             CP0_CHECK(ctx->CP0_Config1 & (1 << CP0C1_WR));
             gen_helper_0e1i(mtc0_watchhi, arg, sel);
-            rn = "WatchHi";
+            register_name = "WatchHi";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 20:
+    case CP0_REGISTER_20:
         switch (sel) {
         case 0:
             check_insn(ctx, ISA_MIPS3);
             gen_helper_mtc0_xcontext(cpu_env, arg);
-            rn = "XContext";
+            register_name = "XContext";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 21:
+    case CP0_REGISTER_21:
        /* Officially reserved, but sel 0 is used for R1x000 framemask */
         CP0_CHECK(!(ctx->insn_flags & ISA_MIPS32R6));
         switch (sel) {
         case 0:
             gen_helper_mtc0_framemask(cpu_env, arg);
-            rn = "Framemask";
+            register_name = "Framemask";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 22:
+    case CP0_REGISTER_22:
         /* ignored */
-        rn = "Diagnostic"; /* implementation dependent */
+        register_name = "Diagnostic"; /* implementation dependent */
         break;
-    case 23:
+    case CP0_REGISTER_23:
         switch (sel) {
         case 0:
             gen_helper_mtc0_debug(cpu_env, arg); /* EJTAG support */
             /* DISAS_STOP isn't good enough here, hflags may have changed. */
             gen_save_pc(ctx->base.pc_next + 4);
             ctx->base.is_jmp = DISAS_EXIT;
-            rn = "Debug";
+            register_name = "Debug";
             break;
         case 1:
 //            gen_helper_mtc0_tracecontrol(cpu_env, arg); /* PDtrace support */
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "TraceControl";
+            register_name = "TraceControl";
             goto cp0_unimplemented;
         case 2:
 //            gen_helper_mtc0_tracecontrol2(cpu_env, arg); /* PDtrace support */
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "TraceControl2";
+            register_name = "TraceControl2";
             goto cp0_unimplemented;
         case 3:
 //            gen_helper_mtc0_usertracedata(cpu_env, arg); /* PDtrace support */
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "UserTraceData";
+            register_name = "UserTraceData";
             goto cp0_unimplemented;
         case 4:
 //            gen_helper_mtc0_tracebpc(cpu_env, arg); /* PDtrace support */
             /* Stop translation as we may have switched the execution mode */
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "TraceBPC";
+            register_name = "TraceBPC";
             goto cp0_unimplemented;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 24:
+    case CP0_REGISTER_24:
         switch (sel) {
         case 0:
             /* EJTAG support */
             tcg_gen_st_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_DEPC));
-            rn = "DEPC";
+            register_name = "DEPC";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 25:
+    case CP0_REGISTER_25:
         switch (sel) {
         case 0:
             gen_helper_mtc0_performance0(cpu_env, arg);
-            rn = "Performance0";
+            register_name = "Performance0";
             break;
         case 1:
 //            gen_helper_mtc0_performance1(cpu_env, arg);
-            rn = "Performance1";
+            register_name = "Performance1";
             goto cp0_unimplemented;
         case 2:
 //            gen_helper_mtc0_performance2(cpu_env, arg);
-            rn = "Performance2";
+            register_name = "Performance2";
             goto cp0_unimplemented;
         case 3:
 //            gen_helper_mtc0_performance3(cpu_env, arg);
-            rn = "Performance3";
+            register_name = "Performance3";
             goto cp0_unimplemented;
         case 4:
 //            gen_helper_mtc0_performance4(cpu_env, arg);
-            rn = "Performance4";
+            register_name = "Performance4";
             goto cp0_unimplemented;
         case 5:
 //            gen_helper_mtc0_performance5(cpu_env, arg);
-            rn = "Performance5";
+            register_name = "Performance5";
             goto cp0_unimplemented;
         case 6:
 //            gen_helper_mtc0_performance6(cpu_env, arg);
-            rn = "Performance6";
+            register_name = "Performance6";
             goto cp0_unimplemented;
         case 7:
 //            gen_helper_mtc0_performance7(cpu_env, arg);
-            rn = "Performance7";
+            register_name = "Performance7";
             goto cp0_unimplemented;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 26:
+    case CP0_REGISTER_26:
         switch (sel) {
         case 0:
             gen_helper_mtc0_errctl(cpu_env, arg);
             ctx->base.is_jmp = DISAS_STOP;
-            rn = "ErrCtl";
+            register_name = "ErrCtl";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 27:
+    case CP0_REGISTER_27:
         switch (sel) {
         case 0:
         case 1:
         case 2:
         case 3:
             /* ignored */
-            rn = "CacheErr";
+            register_name = "CacheErr";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 28:
+    case CP0_REGISTER_28:
         switch (sel) {
         case 0:
         case 2:
         case 4:
         case 6:
             gen_helper_mtc0_taglo(cpu_env, arg);
-            rn = "TagLo";
+            register_name = "TagLo";
             break;
         case 1:
         case 3:
         case 5:
         case 7:
             gen_helper_mtc0_datalo(cpu_env, arg);
-            rn = "DataLo";
+            register_name = "DataLo";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 29:
+    case CP0_REGISTER_29:
         switch (sel) {
         case 0:
         case 2:
         case 4:
         case 6:
             gen_helper_mtc0_taghi(cpu_env, arg);
-            rn = "TagHi";
+            register_name = "TagHi";
             break;
         case 1:
         case 3:
         case 5:
         case 7:
             gen_helper_mtc0_datahi(cpu_env, arg);
-            rn = "DataHi";
+            register_name = "DataHi";
             break;
         default:
-            rn = "invalid sel";
+            register_name = "invalid sel";
             goto cp0_unimplemented;
         }
         break;
-    case 30:
+    case CP0_REGISTER_30:
         switch (sel) {
         case 0:
             tcg_gen_st_tl(arg, cpu_env, offsetof(CPUMIPSState, CP0_ErrorEPC));
-            rn = "ErrorEPC";
+            register_name = "ErrorEPC";
             break;
         default:
             goto cp0_unimplemented;
         }
         break;
-    case 31:
+    case CP0_REGISTER_31:
         switch (sel) {
         case 0:
             /* EJTAG support */
             gen_mtc0_store32(arg, offsetof(CPUMIPSState, CP0_DESAVE));
-            rn = "DESAVE";
+            register_name = "DESAVE";
             break;
         case 2:
         case 3:
@@ -9498,7 +9660,7 @@ static void gen_dmtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
             CP0_CHECK(ctx->kscrexist & (1 << sel));
             tcg_gen_st_tl(arg, cpu_env,
                           offsetof(CPUMIPSState, CP0_KScratch[sel-2]));
-            rn = "KScratch";
+            register_name = "KScratch";
             break;
         default:
             goto cp0_unimplemented;
@@ -9507,7 +9669,7 @@ static void gen_dmtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
     default:
         goto cp0_unimplemented;
     }
-    trace_mips_translate_c0("dmtc0", rn, reg, sel);
+    trace_mips_translate_c0("dmtc0", register_name, reg, sel);
 
     /* For simplicity assume that all writes can cause interrupts.  */
     if (tb_cflags(ctx->base.tb) & CF_USE_ICOUNT) {
@@ -9520,7 +9682,8 @@ static void gen_dmtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
     return;
 
 cp0_unimplemented:
-    qemu_log_mask(LOG_UNIMP, "dmtc0 %s (reg %d sel %d)\n", rn, reg, sel);
+    qemu_log_mask(LOG_UNIMP, "dmtc0 %s (reg %d sel %d)\n",
+                  register_name, reg, sel);
 }
 #endif /* TARGET_MIPS64 */
 
@@ -18297,10 +18460,9 @@ enum {
 
 /* extraction utilities */
 
-#define NANOMIPS_EXTRACT_RD(op) ((op >> 7) & 0x7)
-#define NANOMIPS_EXTRACT_RS(op) ((op >> 4) & 0x7)
-#define NANOMIPS_EXTRACT_RS2(op) uMIPS_RS(op)
-#define NANOMIPS_EXTRACT_RS1(op) ((op >> 1) & 0x7)
+#define NANOMIPS_EXTRACT_RT3(op) ((op >> 7) & 0x7)
+#define NANOMIPS_EXTRACT_RS3(op) ((op >> 4) & 0x7)
+#define NANOMIPS_EXTRACT_RD3(op) ((op >> 1) & 0x7)
 #define NANOMIPS_EXTRACT_RD5(op) ((op >> 5) & 0x1f)
 #define NANOMIPS_EXTRACT_RS5(op) (op & 0x1f)
 
@@ -18337,16 +18499,6 @@ static inline int decode_gpr_gpr4_zero(int r)
 
     return map[r & 0xf];
 }
-
-
-/* extraction utilities */
-
-#define NANOMIPS_EXTRACT_RD(op) ((op >> 7) & 0x7)
-#define NANOMIPS_EXTRACT_RS(op) ((op >> 4) & 0x7)
-#define NANOMIPS_EXTRACT_RS2(op) uMIPS_RS(op)
-#define NANOMIPS_EXTRACT_RS1(op) ((op >> 1) & 0x7)
-#define NANOMIPS_EXTRACT_RD5(op) ((op >> 5) & 0x1f)
-#define NANOMIPS_EXTRACT_RS5(op) (op & 0x1f)
 
 
 static void gen_adjust_sp(DisasContext *ctx, int u)
@@ -18407,8 +18559,8 @@ static void gen_restore(DisasContext *ctx, uint8_t rt, uint8_t count,
 
 static void gen_pool16c_nanomips_insn(DisasContext *ctx)
 {
-    int rt = decode_gpr_gpr3(NANOMIPS_EXTRACT_RD(ctx->opcode));
-    int rs = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS(ctx->opcode));
+    int rt = decode_gpr_gpr3(NANOMIPS_EXTRACT_RT3(ctx->opcode));
+    int rs = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS3(ctx->opcode));
 
     switch (extract32(ctx->opcode, 2, 2)) {
     case NM_NOT16:
@@ -19606,6 +19758,10 @@ static void gen_compute_imm_branch(DisasContext *ctx, uint32_t opc,
         goto out;
     }
 
+    /* branch completion */
+    clear_branch_hflags(ctx);
+    ctx->base.is_jmp = DISAS_NORETURN;
+
     if (bcond_compute == 0) {
         /* Uncoditional compact branch */
         gen_goto_tb(ctx, 0, ctx->btarget);
@@ -19645,6 +19801,10 @@ static void gen_compute_nanomips_pbalrsc_branch(DisasContext *ctx, int rs,
     tcg_gen_shli_tl(t0, t0, 1);
     tcg_gen_movi_tl(t1, ctx->base.pc_next + 4);
     gen_op_addr_add(ctx, btarget, t1, t0);
+
+    /* branch completion */
+    clear_branch_hflags(ctx);
+    ctx->base.is_jmp = DISAS_NORETURN;
 
     /* unconditional branch to register */
     tcg_gen_mov_tl(cpu_PC, btarget);
@@ -19783,6 +19943,10 @@ static void gen_compute_compact_branch_nm(DisasContext *ctx, uint32_t opc,
             generate_exception_end(ctx, EXCP_RI);
             goto out;
         }
+
+        /* branch completion */
+        clear_branch_hflags(ctx);
+        ctx->base.is_jmp = DISAS_NORETURN;
 
         /* Generating branch here as compact branches don't have delay slot */
         gen_goto_tb(ctx, 1, ctx->btarget);
@@ -21398,7 +21562,8 @@ static int decode_nanomips_32_48_opc(CPUMIPSState *env, DisasContext *ctx)
                         break;
                     case NM_SCWP:
                         check_xnp(ctx);
-                        gen_scwp(ctx, rs, 0, rt, extract32(ctx->opcode, 3, 5));
+                        gen_scwp(ctx, rs, 0, rt, extract32(ctx->opcode, 3, 5),
+                                 false);
                         break;
                     }
                     break;
@@ -21502,7 +21667,8 @@ static int decode_nanomips_32_48_opc(CPUMIPSState *env, DisasContext *ctx)
                         check_xnp(ctx);
                         check_eva(ctx);
                         check_cp0_enabled(ctx);
-                        gen_scwp(ctx, rs, 0, rt, extract32(ctx->opcode, 3, 5));
+                        gen_scwp(ctx, rs, 0, rt, extract32(ctx->opcode, 3, 5),
+                                 true);
                         break;
                     default:
                         generate_exception_end(ctx, EXCP_RI);
@@ -21709,9 +21875,9 @@ static int decode_nanomips_32_48_opc(CPUMIPSState *env, DisasContext *ctx)
 static int decode_nanomips_opc(CPUMIPSState *env, DisasContext *ctx)
 {
     uint32_t op;
-    int rt = decode_gpr_gpr3(NANOMIPS_EXTRACT_RD(ctx->opcode));
-    int rs = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS(ctx->opcode));
-    int rd = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS1(ctx->opcode));
+    int rt = decode_gpr_gpr3(NANOMIPS_EXTRACT_RT3(ctx->opcode));
+    int rs = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS3(ctx->opcode));
+    int rd = decode_gpr_gpr3(NANOMIPS_EXTRACT_RD3(ctx->opcode));
     int offset;
     int imm;
 
@@ -21874,7 +22040,7 @@ static int decode_nanomips_opc(CPUMIPSState *env, DisasContext *ctx)
             break;
         case NM_SB16:
             rt = decode_gpr_gpr3_src_store(
-                     NANOMIPS_EXTRACT_RD(ctx->opcode));
+                     NANOMIPS_EXTRACT_RT3(ctx->opcode));
             gen_st(ctx, OPC_SB, rt, rs, offset);
             break;
         case NM_LBU16:
@@ -21893,7 +22059,7 @@ static int decode_nanomips_opc(CPUMIPSState *env, DisasContext *ctx)
             break;
         case NM_SH16:
             rt = decode_gpr_gpr3_src_store(
-                     NANOMIPS_EXTRACT_RD(ctx->opcode));
+                     NANOMIPS_EXTRACT_RT3(ctx->opcode));
             gen_st(ctx, OPC_SH, rt, rs, offset);
             break;
         case NM_LHU16:
@@ -21948,14 +22114,14 @@ static int decode_nanomips_opc(CPUMIPSState *env, DisasContext *ctx)
         break;
     case NM_SW16:
         rt = decode_gpr_gpr3_src_store(
-                 NANOMIPS_EXTRACT_RD(ctx->opcode));
-        rs = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS(ctx->opcode));
+                 NANOMIPS_EXTRACT_RT3(ctx->opcode));
+        rs = decode_gpr_gpr3(NANOMIPS_EXTRACT_RS3(ctx->opcode));
         offset = extract32(ctx->opcode, 0, 4) << 2;
         gen_st(ctx, OPC_SW, rt, rs, offset);
         break;
     case NM_SWGP16:
         rt = decode_gpr_gpr3_src_store(
-                 NANOMIPS_EXTRACT_RD(ctx->opcode));
+                 NANOMIPS_EXTRACT_RT3(ctx->opcode));
         offset = extract32(ctx->opcode, 0, 7) << 2;
         gen_st(ctx, OPC_SW, rt, 28, offset);
         break;
@@ -24201,6 +24367,8 @@ static void decode_opc_special(CPUMIPSState *env, DisasContext *ctx)
 }
 
 
+#if !defined(TARGET_MIPS64)
+
 /* MXU accumulate add/subtract 1-bit pattern 'aptn1' */
 #define MXU_APTN1_A    0
 #define MXU_APTN1_S    1
@@ -24218,6 +24386,11 @@ static void decode_opc_special(CPUMIPSState *env, DisasContext *ctx)
 #define MXU_EPTN2_SS    3
 
 /* MXU operand getting pattern 'optn2' */
+#define MXU_OPTN2_PTN0  0
+#define MXU_OPTN2_PTN1  1
+#define MXU_OPTN2_PTN2  2
+#define MXU_OPTN2_PTN3  3
+/* alternative naming scheme for 'optn2' */
 #define MXU_OPTN2_WW    0
 #define MXU_OPTN2_LW    1
 #define MXU_OPTN2_HW    2
@@ -24611,6 +24784,641 @@ static void gen_mxu_s32ldd_s32lddr(DisasContext *ctx)
 
 
 /*
+ *                 MXU instruction category: logic
+ *                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *
+ *               S32NOR    S32AND    S32OR    S32XOR
+ */
+
+/*
+ *  S32NOR XRa, XRb, XRc
+ *    Update XRa with the result of logical bitwise 'nor' operation
+ *    applied to the content of XRb and XRc.
+ *
+ *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ *  |  SPECIAL2 |0 0 0 0 0| opc |  XRc  |  XRb  |  XRa  |MXU__POOL16|
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ */
+static void gen_mxu_S32NOR(DisasContext *ctx)
+{
+    uint32_t pad, XRc, XRb, XRa;
+
+    pad = extract32(ctx->opcode, 21, 5);
+    XRc = extract32(ctx->opcode, 14, 4);
+    XRb = extract32(ctx->opcode, 10, 4);
+    XRa = extract32(ctx->opcode,  6, 4);
+
+    if (unlikely(pad != 0)) {
+        /* opcode padding incorrect -> do nothing */
+    } else if (unlikely(XRa == 0)) {
+        /* destination is zero register -> do nothing */
+    } else if (unlikely((XRb == 0) && (XRc == 0))) {
+        /* both operands zero registers -> just set destination to all 1s */
+        tcg_gen_movi_i32(mxu_gpr[XRa - 1], 0xFFFFFFFF);
+    } else if (unlikely(XRb == 0)) {
+        /* XRb zero register -> just set destination to the negation of XRc */
+        tcg_gen_not_i32(mxu_gpr[XRa - 1], mxu_gpr[XRc - 1]);
+    } else if (unlikely(XRc == 0)) {
+        /* XRa zero register -> just set destination to the negation of XRb */
+        tcg_gen_not_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1]);
+    } else if (unlikely(XRb == XRc)) {
+        /* both operands same -> just set destination to the negation of XRb */
+        tcg_gen_not_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1]);
+    } else {
+        /* the most general case */
+        tcg_gen_nor_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1], mxu_gpr[XRc - 1]);
+    }
+}
+
+/*
+ *  S32AND XRa, XRb, XRc
+ *    Update XRa with the result of logical bitwise 'and' operation
+ *    applied to the content of XRb and XRc.
+ *
+ *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ *  |  SPECIAL2 |0 0 0 0 0| opc |  XRc  |  XRb  |  XRa  |MXU__POOL16|
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ */
+static void gen_mxu_S32AND(DisasContext *ctx)
+{
+    uint32_t pad, XRc, XRb, XRa;
+
+    pad = extract32(ctx->opcode, 21, 5);
+    XRc = extract32(ctx->opcode, 14, 4);
+    XRb = extract32(ctx->opcode, 10, 4);
+    XRa = extract32(ctx->opcode,  6, 4);
+
+    if (unlikely(pad != 0)) {
+        /* opcode padding incorrect -> do nothing */
+    } else if (unlikely(XRa == 0)) {
+        /* destination is zero register -> do nothing */
+    } else if (unlikely((XRb == 0) || (XRc == 0))) {
+        /* one of operands zero register -> just set destination to all 0s */
+        tcg_gen_movi_i32(mxu_gpr[XRa - 1], 0);
+    } else if (unlikely(XRb == XRc)) {
+        /* both operands same -> just set destination to one of them */
+        tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1]);
+    } else {
+        /* the most general case */
+        tcg_gen_and_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1], mxu_gpr[XRc - 1]);
+    }
+}
+
+/*
+ *  S32OR XRa, XRb, XRc
+ *    Update XRa with the result of logical bitwise 'or' operation
+ *    applied to the content of XRb and XRc.
+ *
+ *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ *  |  SPECIAL2 |0 0 0 0 0| opc |  XRc  |  XRb  |  XRa  |MXU__POOL16|
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ */
+static void gen_mxu_S32OR(DisasContext *ctx)
+{
+    uint32_t pad, XRc, XRb, XRa;
+
+    pad = extract32(ctx->opcode, 21, 5);
+    XRc = extract32(ctx->opcode, 14, 4);
+    XRb = extract32(ctx->opcode, 10, 4);
+    XRa = extract32(ctx->opcode,  6, 4);
+
+    if (unlikely(pad != 0)) {
+        /* opcode padding incorrect -> do nothing */
+    } else if (unlikely(XRa == 0)) {
+        /* destination is zero register -> do nothing */
+    } else if (unlikely((XRb == 0) && (XRc == 0))) {
+        /* both operands zero registers -> just set destination to all 0s */
+        tcg_gen_movi_i32(mxu_gpr[XRa - 1], 0);
+    } else if (unlikely(XRb == 0)) {
+        /* XRb zero register -> just set destination to the content of XRc */
+        tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRc - 1]);
+    } else if (unlikely(XRc == 0)) {
+        /* XRc zero register -> just set destination to the content of XRb */
+        tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1]);
+    } else if (unlikely(XRb == XRc)) {
+        /* both operands same -> just set destination to one of them */
+        tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1]);
+    } else {
+        /* the most general case */
+        tcg_gen_or_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1], mxu_gpr[XRc - 1]);
+    }
+}
+
+/*
+ *  S32XOR XRa, XRb, XRc
+ *    Update XRa with the result of logical bitwise 'xor' operation
+ *    applied to the content of XRb and XRc.
+ *
+ *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ *  |  SPECIAL2 |0 0 0 0 0| opc |  XRc  |  XRb  |  XRa  |MXU__POOL16|
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ */
+static void gen_mxu_S32XOR(DisasContext *ctx)
+{
+    uint32_t pad, XRc, XRb, XRa;
+
+    pad = extract32(ctx->opcode, 21, 5);
+    XRc = extract32(ctx->opcode, 14, 4);
+    XRb = extract32(ctx->opcode, 10, 4);
+    XRa = extract32(ctx->opcode,  6, 4);
+
+    if (unlikely(pad != 0)) {
+        /* opcode padding incorrect -> do nothing */
+    } else if (unlikely(XRa == 0)) {
+        /* destination is zero register -> do nothing */
+    } else if (unlikely((XRb == 0) && (XRc == 0))) {
+        /* both operands zero registers -> just set destination to all 0s */
+        tcg_gen_movi_i32(mxu_gpr[XRa - 1], 0);
+    } else if (unlikely(XRb == 0)) {
+        /* XRb zero register -> just set destination to the content of XRc */
+        tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRc - 1]);
+    } else if (unlikely(XRc == 0)) {
+        /* XRc zero register -> just set destination to the content of XRb */
+        tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1]);
+    } else if (unlikely(XRb == XRc)) {
+        /* both operands same -> just set destination to all 0s */
+        tcg_gen_movi_i32(mxu_gpr[XRa - 1], 0);
+    } else {
+        /* the most general case */
+        tcg_gen_xor_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1], mxu_gpr[XRc - 1]);
+    }
+}
+
+
+/*
+ *                   MXU instruction category max/min
+ *                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *
+ *                     S32MAX     D16MAX     Q8MAX
+ *                     S32MIN     D16MIN     Q8MIN
+ */
+
+/*
+ *  S32MAX XRa, XRb, XRc
+ *    Update XRa with the maximum of signed 32-bit integers contained
+ *    in XRb and XRc.
+ *
+ *  S32MIN XRa, XRb, XRc
+ *    Update XRa with the minimum of signed 32-bit integers contained
+ *    in XRb and XRc.
+ *
+ *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ *  |  SPECIAL2 |0 0 0 0 0| opc |  XRc  |  XRb  |  XRa  |MXU__POOL00|
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ */
+static void gen_mxu_S32MAX_S32MIN(DisasContext *ctx)
+{
+    uint32_t pad, opc, XRc, XRb, XRa;
+
+    pad = extract32(ctx->opcode, 21, 5);
+    opc = extract32(ctx->opcode, 18, 3);
+    XRc = extract32(ctx->opcode, 14, 4);
+    XRb = extract32(ctx->opcode, 10, 4);
+    XRa = extract32(ctx->opcode,  6, 4);
+
+    if (unlikely(pad != 0)) {
+        /* opcode padding incorrect -> do nothing */
+    } else if (unlikely(XRa == 0)) {
+        /* destination is zero register -> do nothing */
+    } else if (unlikely((XRb == 0) && (XRc == 0))) {
+        /* both operands zero registers -> just set destination to zero */
+        tcg_gen_movi_i32(mxu_gpr[XRa - 1], 0);
+    } else if (unlikely((XRb == 0) || (XRc == 0))) {
+        /* exactly one operand is zero register - find which one is not...*/
+        uint32_t XRx = XRb ? XRb : XRc;
+        /* ...and do max/min operation with one operand 0 */
+        if (opc == OPC_MXU_S32MAX) {
+            tcg_gen_smax_i32(mxu_gpr[XRa - 1], mxu_gpr[XRx - 1], 0);
+        } else {
+            tcg_gen_smin_i32(mxu_gpr[XRa - 1], mxu_gpr[XRx - 1], 0);
+        }
+    } else if (unlikely(XRb == XRc)) {
+        /* both operands same -> just set destination to one of them */
+        tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1]);
+    } else {
+        /* the most general case */
+        if (opc == OPC_MXU_S32MAX) {
+            tcg_gen_smax_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1],
+                                               mxu_gpr[XRc - 1]);
+        } else {
+            tcg_gen_smin_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1],
+                                               mxu_gpr[XRc - 1]);
+        }
+    }
+}
+
+/*
+ *  D16MAX
+ *    Update XRa with the 16-bit-wise maximums of signed integers
+ *    contained in XRb and XRc.
+ *
+ *  D16MIN
+ *    Update XRa with the 16-bit-wise minimums of signed integers
+ *    contained in XRb and XRc.
+ *
+ *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ *  |  SPECIAL2 |0 0 0 0 0| opc |  XRc  |  XRb  |  XRa  |MXU__POOL00|
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ */
+static void gen_mxu_D16MAX_D16MIN(DisasContext *ctx)
+{
+    uint32_t pad, opc, XRc, XRb, XRa;
+
+    pad = extract32(ctx->opcode, 21, 5);
+    opc = extract32(ctx->opcode, 18, 3);
+    XRc = extract32(ctx->opcode, 14, 4);
+    XRb = extract32(ctx->opcode, 10, 4);
+    XRa = extract32(ctx->opcode,  6, 4);
+
+    if (unlikely(pad != 0)) {
+        /* opcode padding incorrect -> do nothing */
+    } else if (unlikely(XRc == 0)) {
+        /* destination is zero register -> do nothing */
+    } else if (unlikely((XRb == 0) && (XRa == 0))) {
+        /* both operands zero registers -> just set destination to zero */
+        tcg_gen_movi_i32(mxu_gpr[XRc - 1], 0);
+    } else if (unlikely((XRb == 0) || (XRa == 0))) {
+        /* exactly one operand is zero register - find which one is not...*/
+        uint32_t XRx = XRb ? XRb : XRc;
+        /* ...and do half-word-wise max/min with one operand 0 */
+        TCGv_i32 t0 = tcg_temp_new();
+        TCGv_i32 t1 = tcg_const_i32(0);
+
+        /* the left half-word first */
+        tcg_gen_andi_i32(t0, mxu_gpr[XRx - 1], 0xFFFF0000);
+        if (opc == OPC_MXU_D16MAX) {
+            tcg_gen_smax_i32(mxu_gpr[XRa - 1], t0, t1);
+        } else {
+            tcg_gen_smin_i32(mxu_gpr[XRa - 1], t0, t1);
+        }
+
+        /* the right half-word */
+        tcg_gen_andi_i32(t0, mxu_gpr[XRx - 1], 0x0000FFFF);
+        /* move half-words to the leftmost position */
+        tcg_gen_shli_i32(t0, t0, 16);
+        /* t0 will be max/min of t0 and t1 */
+        if (opc == OPC_MXU_D16MAX) {
+            tcg_gen_smax_i32(t0, t0, t1);
+        } else {
+            tcg_gen_smin_i32(t0, t0, t1);
+        }
+        /* return resulting half-words to its original position */
+        tcg_gen_shri_i32(t0, t0, 16);
+        /* finaly update the destination */
+        tcg_gen_or_i32(mxu_gpr[XRa - 1], mxu_gpr[XRa - 1], t0);
+
+        tcg_temp_free(t1);
+        tcg_temp_free(t0);
+    } else if (unlikely(XRb == XRc)) {
+        /* both operands same -> just set destination to one of them */
+        tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1]);
+    } else {
+        /* the most general case */
+        TCGv_i32 t0 = tcg_temp_new();
+        TCGv_i32 t1 = tcg_temp_new();
+
+        /* the left half-word first */
+        tcg_gen_andi_i32(t0, mxu_gpr[XRb - 1], 0xFFFF0000);
+        tcg_gen_andi_i32(t1, mxu_gpr[XRc - 1], 0xFFFF0000);
+        if (opc == OPC_MXU_D16MAX) {
+            tcg_gen_smax_i32(mxu_gpr[XRa - 1], t0, t1);
+        } else {
+            tcg_gen_smin_i32(mxu_gpr[XRa - 1], t0, t1);
+        }
+
+        /* the right half-word */
+        tcg_gen_andi_i32(t0, mxu_gpr[XRb - 1], 0x0000FFFF);
+        tcg_gen_andi_i32(t1, mxu_gpr[XRc - 1], 0x0000FFFF);
+        /* move half-words to the leftmost position */
+        tcg_gen_shli_i32(t0, t0, 16);
+        tcg_gen_shli_i32(t1, t1, 16);
+        /* t0 will be max/min of t0 and t1 */
+        if (opc == OPC_MXU_D16MAX) {
+            tcg_gen_smax_i32(t0, t0, t1);
+        } else {
+            tcg_gen_smin_i32(t0, t0, t1);
+        }
+        /* return resulting half-words to its original position */
+        tcg_gen_shri_i32(t0, t0, 16);
+        /* finaly update the destination */
+        tcg_gen_or_i32(mxu_gpr[XRa - 1], mxu_gpr[XRa - 1], t0);
+
+        tcg_temp_free(t1);
+        tcg_temp_free(t0);
+    }
+}
+
+/*
+ *  Q8MAX
+ *    Update XRa with the 8-bit-wise maximums of signed integers
+ *    contained in XRb and XRc.
+ *
+ *  Q8MIN
+ *    Update XRa with the 8-bit-wise minimums of signed integers
+ *    contained in XRb and XRc.
+ *
+ *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ *  |  SPECIAL2 |0 0 0 0 0| opc |  XRc  |  XRb  |  XRa  |MXU__POOL00|
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ */
+static void gen_mxu_Q8MAX_Q8MIN(DisasContext *ctx)
+{
+    uint32_t pad, opc, XRc, XRb, XRa;
+
+    pad = extract32(ctx->opcode, 21, 5);
+    opc = extract32(ctx->opcode, 18, 3);
+    XRc = extract32(ctx->opcode, 14, 4);
+    XRb = extract32(ctx->opcode, 10, 4);
+    XRa = extract32(ctx->opcode,  6, 4);
+
+    if (unlikely(pad != 0)) {
+        /* opcode padding incorrect -> do nothing */
+    } else if (unlikely(XRa == 0)) {
+        /* destination is zero register -> do nothing */
+    } else if (unlikely((XRb == 0) && (XRc == 0))) {
+        /* both operands zero registers -> just set destination to zero */
+        tcg_gen_movi_i32(mxu_gpr[XRa - 1], 0);
+    } else if (unlikely((XRb == 0) || (XRc == 0))) {
+        /* exactly one operand is zero register - make it be the first...*/
+        uint32_t XRx = XRb ? XRb : XRc;
+        /* ...and do byte-wise max/min with one operand 0 */
+        TCGv_i32 t0 = tcg_temp_new();
+        TCGv_i32 t1 = tcg_const_i32(0);
+        int32_t i;
+
+        /* the leftmost byte (byte 3) first */
+        tcg_gen_andi_i32(t0, mxu_gpr[XRx - 1], 0xFF000000);
+        if (opc == OPC_MXU_Q8MAX) {
+            tcg_gen_smax_i32(mxu_gpr[XRa - 1], t0, t1);
+        } else {
+            tcg_gen_smin_i32(mxu_gpr[XRa - 1], t0, t1);
+        }
+
+        /* bytes 2, 1, 0 */
+        for (i = 2; i >= 0; i--) {
+            /* extract the byte */
+            tcg_gen_andi_i32(t0, mxu_gpr[XRx - 1], 0xFF << (8 * i));
+            /* move the byte to the leftmost position */
+            tcg_gen_shli_i32(t0, t0, 8 * (3 - i));
+            /* t0 will be max/min of t0 and t1 */
+            if (opc == OPC_MXU_Q8MAX) {
+                tcg_gen_smax_i32(t0, t0, t1);
+            } else {
+                tcg_gen_smin_i32(t0, t0, t1);
+            }
+            /* return resulting byte to its original position */
+            tcg_gen_shri_i32(t0, t0, 8 * (3 - i));
+            /* finaly update the destination */
+            tcg_gen_or_i32(mxu_gpr[XRa - 1], mxu_gpr[XRa - 1], t0);
+        }
+
+        tcg_temp_free(t1);
+        tcg_temp_free(t0);
+    } else if (unlikely(XRb == XRc)) {
+        /* both operands same -> just set destination to one of them */
+        tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1]);
+    } else {
+        /* the most general case */
+        TCGv_i32 t0 = tcg_temp_new();
+        TCGv_i32 t1 = tcg_temp_new();
+        int32_t i;
+
+        /* the leftmost bytes (bytes 3) first */
+        tcg_gen_andi_i32(t0, mxu_gpr[XRb - 1], 0xFF000000);
+        tcg_gen_andi_i32(t1, mxu_gpr[XRc - 1], 0xFF000000);
+        if (opc == OPC_MXU_Q8MAX) {
+            tcg_gen_smax_i32(mxu_gpr[XRa - 1], t0, t1);
+        } else {
+            tcg_gen_smin_i32(mxu_gpr[XRa - 1], t0, t1);
+        }
+
+        /* bytes 2, 1, 0 */
+        for (i = 2; i >= 0; i--) {
+            /* extract corresponding bytes */
+            tcg_gen_andi_i32(t0, mxu_gpr[XRb - 1], 0xFF << (8 * i));
+            tcg_gen_andi_i32(t1, mxu_gpr[XRc - 1], 0xFF << (8 * i));
+            /* move the bytes to the leftmost position */
+            tcg_gen_shli_i32(t0, t0, 8 * (3 - i));
+            tcg_gen_shli_i32(t1, t1, 8 * (3 - i));
+            /* t0 will be max/min of t0 and t1 */
+            if (opc == OPC_MXU_Q8MAX) {
+                tcg_gen_smax_i32(t0, t0, t1);
+            } else {
+                tcg_gen_smin_i32(t0, t0, t1);
+            }
+            /* return resulting byte to its original position */
+            tcg_gen_shri_i32(t0, t0, 8 * (3 - i));
+            /* finaly update the destination */
+            tcg_gen_or_i32(mxu_gpr[XRa - 1], mxu_gpr[XRa - 1], t0);
+        }
+
+        tcg_temp_free(t1);
+        tcg_temp_free(t0);
+    }
+}
+
+
+/*
+ *                 MXU instruction category: align
+ *                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *
+ *                       S32ALN     S32ALNI
+ */
+
+/*
+ *  S32ALNI XRc, XRb, XRa, optn3
+ *    Arrange bytes from XRb and XRc according to one of five sets of
+ *    rules determined by optn3, and place the result in XRa.
+ *
+ *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *  +-----------+-----+---+-----+-------+-------+-------+-----------+
+ *  |  SPECIAL2 |optn3|0 0|x x x|  XRc  |  XRb  |  XRa  |MXU__POOL16|
+ *  +-----------+-----+---+-----+-------+-------+-------+-----------+
+ *
+ */
+static void gen_mxu_S32ALNI(DisasContext *ctx)
+{
+    uint32_t optn3, pad, XRc, XRb, XRa;
+
+    optn3 = extract32(ctx->opcode,  23, 3);
+    pad   = extract32(ctx->opcode,  21, 2);
+    XRc   = extract32(ctx->opcode, 14, 4);
+    XRb   = extract32(ctx->opcode, 10, 4);
+    XRa   = extract32(ctx->opcode,  6, 4);
+
+    if (unlikely(pad != 0)) {
+        /* opcode padding incorrect -> do nothing */
+    } else if (unlikely(XRa == 0)) {
+        /* destination is zero register -> do nothing */
+    } else if (unlikely((XRb == 0) && (XRc == 0))) {
+        /* both operands zero registers -> just set destination to all 0s */
+        tcg_gen_movi_i32(mxu_gpr[XRa - 1], 0);
+    } else if (unlikely(XRb == 0)) {
+        /* XRb zero register -> just appropriatelly shift XRc into XRa */
+        switch (optn3) {
+        case MXU_OPTN3_PTN0:
+            tcg_gen_movi_i32(mxu_gpr[XRa - 1], 0);
+            break;
+        case MXU_OPTN3_PTN1:
+        case MXU_OPTN3_PTN2:
+        case MXU_OPTN3_PTN3:
+            tcg_gen_shri_i32(mxu_gpr[XRa - 1], mxu_gpr[XRc - 1],
+                             8 * (4 - optn3));
+            break;
+        case MXU_OPTN3_PTN4:
+            tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRc - 1]);
+            break;
+        }
+    } else if (unlikely(XRc == 0)) {
+        /* XRc zero register -> just appropriatelly shift XRb into XRa */
+        switch (optn3) {
+        case MXU_OPTN3_PTN0:
+            tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1]);
+            break;
+        case MXU_OPTN3_PTN1:
+        case MXU_OPTN3_PTN2:
+        case MXU_OPTN3_PTN3:
+            tcg_gen_shri_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1], 8 * optn3);
+            break;
+        case MXU_OPTN3_PTN4:
+            tcg_gen_movi_i32(mxu_gpr[XRa - 1], 0);
+            break;
+        }
+    } else if (unlikely(XRb == XRc)) {
+        /* both operands same -> just rotation or moving from any of them */
+        switch (optn3) {
+        case MXU_OPTN3_PTN0:
+        case MXU_OPTN3_PTN4:
+            tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1]);
+            break;
+        case MXU_OPTN3_PTN1:
+        case MXU_OPTN3_PTN2:
+        case MXU_OPTN3_PTN3:
+            tcg_gen_rotli_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1], 8 * optn3);
+            break;
+        }
+    } else {
+        /* the most general case */
+        switch (optn3) {
+        case MXU_OPTN3_PTN0:
+            {
+                /*                                         */
+                /*         XRb                XRc          */
+                /*  +---------------+                      */
+                /*  | A   B   C   D |    E   F   G   H     */
+                /*  +-------+-------+                      */
+                /*          |                              */
+                /*         XRa                             */
+                /*                                         */
+
+                tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRb - 1]);
+            }
+            break;
+        case MXU_OPTN3_PTN1:
+            {
+                /*                                         */
+                /*         XRb                 XRc         */
+                /*      +-------------------+              */
+                /*    A | B   C   D       E | F   G   H    */
+                /*      +---------+---------+              */
+                /*                |                        */
+                /*               XRa                       */
+                /*                                         */
+
+                TCGv_i32 t0 = tcg_temp_new();
+                TCGv_i32 t1 = tcg_temp_new();
+
+                tcg_gen_andi_i32(t0, mxu_gpr[XRb - 1], 0x00FFFFFF);
+                tcg_gen_shli_i32(t0, t0, 8);
+
+                tcg_gen_andi_i32(t1, mxu_gpr[XRc - 1], 0xFF000000);
+                tcg_gen_shri_i32(t1, t1, 24);
+
+                tcg_gen_or_i32(mxu_gpr[XRa - 1], t0, t1);
+
+                tcg_temp_free(t1);
+                tcg_temp_free(t0);
+            }
+            break;
+        case MXU_OPTN3_PTN2:
+            {
+                /*                                         */
+                /*         XRb                 XRc         */
+                /*          +-------------------+          */
+                /*    A   B | C   D       E   F | G   H    */
+                /*          +---------+---------+          */
+                /*                    |                    */
+                /*                   XRa                   */
+                /*                                         */
+
+                TCGv_i32 t0 = tcg_temp_new();
+                TCGv_i32 t1 = tcg_temp_new();
+
+                tcg_gen_andi_i32(t0, mxu_gpr[XRb - 1], 0x0000FFFF);
+                tcg_gen_shli_i32(t0, t0, 16);
+
+                tcg_gen_andi_i32(t1, mxu_gpr[XRc - 1], 0xFFFF0000);
+                tcg_gen_shri_i32(t1, t1, 16);
+
+                tcg_gen_or_i32(mxu_gpr[XRa - 1], t0, t1);
+
+                tcg_temp_free(t1);
+                tcg_temp_free(t0);
+            }
+            break;
+        case MXU_OPTN3_PTN3:
+            {
+                /*                                         */
+                /*         XRb                 XRc         */
+                /*              +-------------------+      */
+                /*    A   B   C | D       E   F   G | H    */
+                /*              +---------+---------+      */
+                /*                        |                */
+                /*                       XRa               */
+                /*                                         */
+
+                TCGv_i32 t0 = tcg_temp_new();
+                TCGv_i32 t1 = tcg_temp_new();
+
+                tcg_gen_andi_i32(t0, mxu_gpr[XRb - 1], 0x000000FF);
+                tcg_gen_shli_i32(t0, t0, 24);
+
+                tcg_gen_andi_i32(t1, mxu_gpr[XRc - 1], 0xFFFFFF00);
+                tcg_gen_shri_i32(t1, t1, 8);
+
+                tcg_gen_or_i32(mxu_gpr[XRa - 1], t0, t1);
+
+                tcg_temp_free(t1);
+                tcg_temp_free(t0);
+            }
+            break;
+        case MXU_OPTN3_PTN4:
+            {
+                /*                                         */
+                /*         XRb                 XRc         */
+                /*                     +---------------+   */
+                /*    A   B   C   D    | E   F   G   H |   */
+                /*                     +-------+-------+   */
+                /*                             |           */
+                /*                            XRa          */
+                /*                                         */
+
+                tcg_gen_mov_i32(mxu_gpr[XRa - 1], mxu_gpr[XRc - 1]);
+            }
+            break;
+        }
+    }
+}
+
+
+/*
  * Decoding engine for MXU
  * =======================
  */
@@ -24631,34 +25439,16 @@ static void decode_opc_mxu__pool00(CPUMIPSState *env, DisasContext *ctx)
 
     switch (opcode) {
     case OPC_MXU_S32MAX:
-        /* TODO: Implement emulation of S32MAX instruction. */
-        MIPS_INVAL("OPC_MXU_S32MAX");
-        generate_exception_end(ctx, EXCP_RI);
-        break;
     case OPC_MXU_S32MIN:
-        /* TODO: Implement emulation of S32MIN instruction. */
-        MIPS_INVAL("OPC_MXU_S32MIN");
-        generate_exception_end(ctx, EXCP_RI);
+        gen_mxu_S32MAX_S32MIN(ctx);
         break;
     case OPC_MXU_D16MAX:
-        /* TODO: Implement emulation of D16MAX instruction. */
-        MIPS_INVAL("OPC_MXU_D16MAX");
-        generate_exception_end(ctx, EXCP_RI);
-        break;
     case OPC_MXU_D16MIN:
-        /* TODO: Implement emulation of D16MIN instruction. */
-        MIPS_INVAL("OPC_MXU_D16MIN");
-        generate_exception_end(ctx, EXCP_RI);
+        gen_mxu_D16MAX_D16MIN(ctx);
         break;
     case OPC_MXU_Q8MAX:
-        /* TODO: Implement emulation of Q8MAX instruction. */
-        MIPS_INVAL("OPC_MXU_Q8MAX");
-        generate_exception_end(ctx, EXCP_RI);
-        break;
     case OPC_MXU_Q8MIN:
-        /* TODO: Implement emulation of Q8MIN instruction. */
-        MIPS_INVAL("OPC_MXU_Q8MIN");
-        generate_exception_end(ctx, EXCP_RI);
+        gen_mxu_Q8MAX_Q8MIN(ctx);
         break;
     case OPC_MXU_Q8SLT:
         /* TODO: Implement emulation of Q8SLT instruction. */
@@ -25261,17 +26051,17 @@ static void decode_opc_mxu__pool15(CPUMIPSState *env, DisasContext *ctx)
  *  |  SPECIAL2 |  s3 |0 0|x x x|  XRc  |  XRb  |  XRa  |MXU__POOL16|
  *  +-----------+-----+---+-----+-------+-------+-------+-----------+
  *
- *  S32NOR, S32AND, S32OR, S32XOR:
- *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
- *  +-----------+---------+-----+-------+-------+-------+-----------+
- *  |  SPECIAL2 |0 0 0 0 0|x x x|  XRc  |  XRb  |  XRa  |MXU__POOL16|
- *  +-----------+---------+-----+-------+-------+-------+-----------+
- *
  *  S32LUI:
  *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
  *  +-----------+-----+---+-----+-------+---------------+-----------+
  *  |  SPECIAL2 |optn3|0 0|x x x|  XRc  |       s8      |MXU__POOL16|
  *  +-----------+-----+---+-----+-------+---------------+-----------+
+ *
+ *  S32NOR, S32AND, S32OR, S32XOR:
+ *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ *  |  SPECIAL2 |0 0 0 0 0|x x x|  XRc  |  XRb  |  XRa  |MXU__POOL16|
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
  *
  */
 static void decode_opc_mxu__pool16(CPUMIPSState *env, DisasContext *ctx)
@@ -25290,34 +26080,24 @@ static void decode_opc_mxu__pool16(CPUMIPSState *env, DisasContext *ctx)
         generate_exception_end(ctx, EXCP_RI);
         break;
     case OPC_MXU_S32ALNI:
-        /* TODO: Implement emulation of S32ALNI instruction. */
-        MIPS_INVAL("OPC_MXU_S32ALNI");
-        generate_exception_end(ctx, EXCP_RI);
-        break;
-    case OPC_MXU_S32NOR:
-        /* TODO: Implement emulation of S32NOR instruction. */
-        MIPS_INVAL("OPC_MXU_S32NOR");
-        generate_exception_end(ctx, EXCP_RI);
-        break;
-    case OPC_MXU_S32AND:
-        /* TODO: Implement emulation of S32AND instruction. */
-        MIPS_INVAL("OPC_MXU_S32AND");
-        generate_exception_end(ctx, EXCP_RI);
-        break;
-    case OPC_MXU_S32OR:
-        /* TODO: Implement emulation of S32OR instruction. */
-        MIPS_INVAL("OPC_MXU_S32OR");
-        generate_exception_end(ctx, EXCP_RI);
-        break;
-    case OPC_MXU_S32XOR:
-        /* TODO: Implement emulation of S32XOR instruction. */
-        MIPS_INVAL("OPC_MXU_S32XOR");
-        generate_exception_end(ctx, EXCP_RI);
+        gen_mxu_S32ALNI(ctx);
         break;
     case OPC_MXU_S32LUI:
         /* TODO: Implement emulation of S32LUI instruction. */
         MIPS_INVAL("OPC_MXU_S32LUI");
         generate_exception_end(ctx, EXCP_RI);
+        break;
+    case OPC_MXU_S32NOR:
+        gen_mxu_S32NOR(ctx);
+        break;
+    case OPC_MXU_S32AND:
+        gen_mxu_S32AND(ctx);
+        break;
+    case OPC_MXU_S32OR:
+        gen_mxu_S32OR(ctx);
+        break;
+    case OPC_MXU_S32XOR:
+        gen_mxu_S32XOR(ctx);
         break;
     default:
         MIPS_INVAL("decode_opc_mxu");
@@ -25331,12 +26111,58 @@ static void decode_opc_mxu__pool16(CPUMIPSState *env, DisasContext *ctx)
  * Decode MXU pool17
  *
  *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
- *  +-----------+---------+-----+-------+-------+-------+-----------+
- *  |  SPECIAL2 |    rb   |x x x|  XRd  |  XRa  |0 0 0 0|MXU__POOL17|
- *  +-----------+---------+-----+-------+-------+-------+-----------+
+ *  +-----------+---------+---------+---+---------+-----+-----------+
+ *  |  SPECIAL2 |    rs   |    rt   |0 0|    rd   |x x x|MXU__POOL15|
+ *  +-----------+---------+---------+---+---------+-----+-----------+
  *
  */
 static void decode_opc_mxu__pool17(CPUMIPSState *env, DisasContext *ctx)
+{
+    uint32_t opcode = extract32(ctx->opcode, 6, 2);
+
+    switch (opcode) {
+    case OPC_MXU_LXW:
+        /* TODO: Implement emulation of LXW instruction. */
+        MIPS_INVAL("OPC_MXU_LXW");
+        generate_exception_end(ctx, EXCP_RI);
+        break;
+    case OPC_MXU_LXH:
+        /* TODO: Implement emulation of LXH instruction. */
+        MIPS_INVAL("OPC_MXU_LXH");
+        generate_exception_end(ctx, EXCP_RI);
+        break;
+    case OPC_MXU_LXHU:
+        /* TODO: Implement emulation of LXHU instruction. */
+        MIPS_INVAL("OPC_MXU_LXHU");
+        generate_exception_end(ctx, EXCP_RI);
+        break;
+    case OPC_MXU_LXB:
+        /* TODO: Implement emulation of LXB instruction. */
+        MIPS_INVAL("OPC_MXU_LXB");
+        generate_exception_end(ctx, EXCP_RI);
+        break;
+    case OPC_MXU_LXBU:
+        /* TODO: Implement emulation of LXBU instruction. */
+        MIPS_INVAL("OPC_MXU_LXBU");
+        generate_exception_end(ctx, EXCP_RI);
+        break;
+    default:
+        MIPS_INVAL("decode_opc_mxu");
+        generate_exception_end(ctx, EXCP_RI);
+        break;
+    }
+}
+/*
+ *
+ * Decode MXU pool18
+ *
+ *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ *  |  SPECIAL2 |    rb   |x x x|  XRd  |  XRa  |0 0 0 0|MXU__POOL18|
+ *  +-----------+---------+-----+-------+-------+-------+-----------+
+ *
+ */
+static void decode_opc_mxu__pool18(CPUMIPSState *env, DisasContext *ctx)
 {
     uint32_t opcode = extract32(ctx->opcode, 18, 3);
 
@@ -25380,15 +26206,15 @@ static void decode_opc_mxu__pool17(CPUMIPSState *env, DisasContext *ctx)
 
 /*
  *
- * Decode MXU pool18
+ * Decode MXU pool19
  *
  *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
  *  +-----------+---+---+-------+-------+-------+-------+-----------+
- *  |  SPECIAL2 |0 0|x x|  XRd  |  XRc  |  XRb  |  XRa  |MXU__POOL18|
+ *  |  SPECIAL2 |0 0|x x|  XRd  |  XRc  |  XRb  |  XRa  |MXU__POOL19|
  *  +-----------+---+---+-------+-------+-------+-------+-----------+
  *
  */
-static void decode_opc_mxu__pool18(CPUMIPSState *env, DisasContext *ctx)
+static void decode_opc_mxu__pool19(CPUMIPSState *env, DisasContext *ctx)
 {
     uint32_t opcode = extract32(ctx->opcode, 22, 2);
 
@@ -25406,15 +26232,15 @@ static void decode_opc_mxu__pool18(CPUMIPSState *env, DisasContext *ctx)
 
 /*
  *
- * Decode MXU pool19
+ * Decode MXU pool20
  *
  *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
  *  +-----------+---------+-----+-------+-------+-------+-----------+
- *  |  SPECIAL2 |0 0 0 0 0|x x x|  XRc  |  XRb  |  XRa  |MXU__POOL19|
+ *  |  SPECIAL2 |0 0 0 0 0|x x x|  XRc  |  XRb  |  XRa  |MXU__POOL20|
  *  +-----------+---------+-----+-------+-------+-------+-----------+
  *
  */
-static void decode_opc_mxu__pool19(CPUMIPSState *env, DisasContext *ctx)
+static void decode_opc_mxu__pool20(CPUMIPSState *env, DisasContext *ctx)
 {
     uint32_t opcode = extract32(ctx->opcode, 18, 3);
 
@@ -25458,15 +26284,15 @@ static void decode_opc_mxu__pool19(CPUMIPSState *env, DisasContext *ctx)
 
 /*
  *
- * Decode MXU pool20
+ * Decode MXU pool21
  *
  *   1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
  *  +-----------+---+---+-------+-------+-------+-------+-----------+
- *  |  SPECIAL2 |an2|x x|  XRd  |  XRc  |  XRb  |  XRa  |MXU__POOL20|
+ *  |  SPECIAL2 |an2|x x|  XRd  |  XRc  |  XRb  |  XRa  |MXU__POOL21|
  *  +-----------+---+---+-------+-------+-------+-------+-----------+
  *
  */
-static void decode_opc_mxu__pool20(CPUMIPSState *env, DisasContext *ctx)
+static void decode_opc_mxu__pool21(CPUMIPSState *env, DisasContext *ctx)
 {
     uint32_t opcode = extract32(ctx->opcode, 22, 2);
 
@@ -25669,10 +26495,8 @@ static void decode_opc_mxu(CPUMIPSState *env, DisasContext *ctx)
         case OPC_MXU__POOL16:
             decode_opc_mxu__pool16(env, ctx);
             break;
-        case OPC_MXU_LXB:
-            /* TODO: Implement emulation of LXB instruction. */
-            MIPS_INVAL("OPC_MXU_LXB");
-            generate_exception_end(ctx, EXCP_RI);
+        case OPC_MXU__POOL17:
+            decode_opc_mxu__pool17(env, ctx);
             break;
         case OPC_MXU_S16LDD:
             /* TODO: Implement emulation of S16LDD instruction. */
@@ -25724,22 +26548,22 @@ static void decode_opc_mxu(CPUMIPSState *env, DisasContext *ctx)
             MIPS_INVAL("OPC_MXU_Q16SLR");
             generate_exception_end(ctx, EXCP_RI);
             break;
-        case OPC_MXU__POOL17:
-            decode_opc_mxu__pool17(env, ctx);
+        case OPC_MXU__POOL18:
+            decode_opc_mxu__pool18(env, ctx);
             break;
         case OPC_MXU_Q16SAR:
             /* TODO: Implement emulation of Q16SAR instruction. */
             MIPS_INVAL("OPC_MXU_Q16SAR");
             generate_exception_end(ctx, EXCP_RI);
             break;
-        case OPC_MXU__POOL18:
-            decode_opc_mxu__pool18(env, ctx);
-            break;
         case OPC_MXU__POOL19:
             decode_opc_mxu__pool19(env, ctx);
             break;
         case OPC_MXU__POOL20:
             decode_opc_mxu__pool20(env, ctx);
+            break;
+        case OPC_MXU__POOL21:
+            decode_opc_mxu__pool21(env, ctx);
             break;
         case OPC_MXU_Q16SCOP:
             /* TODO: Implement emulation of Q16SCOP instruction. */
@@ -25770,6 +26594,8 @@ static void decode_opc_mxu(CPUMIPSState *env, DisasContext *ctx)
         tcg_temp_free(t_mxu_cr);
     }
 }
+
+#endif /* !defined(TARGET_MIPS64) */
 
 
 static void decode_opc_special2_legacy(CPUMIPSState *env, DisasContext *ctx)
@@ -26620,6 +27446,10 @@ static void decode_mmi(CPUMIPSState *env, DisasContext *ctx)
         break;
     case MMI_OPC_MULT1:
     case MMI_OPC_MULTU1:
+    case MMI_OPC_MADD:
+    case MMI_OPC_MADDU:
+    case MMI_OPC_MADD1:
+    case MMI_OPC_MADDU1:
         gen_mul_txx9(ctx, opc, rd, rs, rt);
         break;
     case MMI_OPC_DIV1:
@@ -26634,11 +27464,7 @@ static void decode_mmi(CPUMIPSState *env, DisasContext *ctx)
     case MMI_OPC_MFHI1:
         gen_HILO1_tx79(ctx, opc, rd);
         break;
-    case MMI_OPC_MADD:          /* TODO: MMI_OPC_MADD */
-    case MMI_OPC_MADDU:         /* TODO: MMI_OPC_MADDU */
     case MMI_OPC_PLZCW:         /* TODO: MMI_OPC_PLZCW */
-    case MMI_OPC_MADD1:         /* TODO: MMI_OPC_MADD1 */
-    case MMI_OPC_MADDU1:        /* TODO: MMI_OPC_MADDU1 */
     case MMI_OPC_PMFHL:         /* TODO: MMI_OPC_PMFHL */
     case MMI_OPC_PMTHL:         /* TODO: MMI_OPC_PMTHL */
     case MMI_OPC_PSLLH:         /* TODO: MMI_OPC_PSLLH */
@@ -28015,8 +28841,10 @@ static void decode_opc(CPUMIPSState *env, DisasContext *ctx)
     case OPC_SPECIAL2:
         if ((ctx->insn_flags & INSN_R5900) && (ctx->insn_flags & ASE_MMI)) {
             decode_mmi(env, ctx);
+#if !defined(TARGET_MIPS64)
         } else if (ctx->insn_flags & ASE_MXU) {
             decode_opc_mxu(env, ctx);
+#endif
         } else {
             decode_opc_special2_legacy(env, ctx);
         }
@@ -29026,6 +29854,17 @@ void mips_tcg_init(void)
                                        offsetof(CPUMIPSState, active_fpu.fcr31),
                                        "fcr31");
 
+#if defined(TARGET_MIPS64)
+    cpu_mmr[0] = NULL;
+    for (i = 1; i < 32; i++) {
+        cpu_mmr[i] = tcg_global_mem_new_i64(cpu_env,
+                                            offsetof(CPUMIPSState,
+                                                     active_tc.mmr[i]),
+                                            regnames[i]);
+    }
+#endif
+
+#if !defined(TARGET_MIPS64)
     for (i = 0; i < NUMBER_OF_MXU_REGISTERS - 1; i++) {
         mxu_gpr[i] = tcg_global_mem_new(cpu_env,
                                         offsetof(CPUMIPSState,
@@ -29036,6 +29875,7 @@ void mips_tcg_init(void)
     mxu_CR = tcg_global_mem_new(cpu_env,
                                 offsetof(CPUMIPSState, active_tc.mxu_cr),
                                 mxuregnames[NUMBER_OF_MXU_REGISTERS - 1]);
+#endif
 }
 
 #include "translate_init.inc.c"
@@ -29057,7 +29897,7 @@ bool cpu_supports_cps_smp(const char *cpu_type)
     return (mcc->cpu_def->CP0_Config3 & (1 << CP0C3_CMGCR)) != 0;
 }
 
-bool cpu_supports_isa(const char *cpu_type, unsigned int isa)
+bool cpu_supports_isa(const char *cpu_type, uint64_t isa)
 {
     const MIPSCPUClass *mcc = MIPS_CPU_CLASS(object_class_by_name(cpu_type));
     return (mcc->cpu_def->insn_flags & isa) != 0;

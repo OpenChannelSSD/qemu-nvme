@@ -93,6 +93,8 @@ const char *load_elf_strerror(int error);
 
 /** load_elf_ram_sym:
  * @filename: Path of ELF file
+ * @elf_note_fn: optional function to parse ELF Note type
+ *               passed via @translate_opaque
  * @translate_fn: optional function to translate load addresses
  * @translate_opaque: opaque data passed to @translate_fn
  * @pentry: Populated with program entry point. Ignored if NULL.
@@ -125,6 +127,7 @@ typedef void (*symbol_fn_t)(const char *st_name, int st_info,
                             uint64_t st_value, uint64_t st_size);
 
 int load_elf_ram_sym(const char *filename,
+                     uint64_t (*elf_note_fn)(void *, void *, bool),
                      uint64_t (*translate_fn)(void *, uint64_t),
                      void *translate_opaque, uint64_t *pentry,
                      uint64_t *lowaddr, uint64_t *highaddr, int big_endian,
@@ -136,6 +139,7 @@ int load_elf_ram_sym(const char *filename,
  * symbol callback function
  */
 int load_elf_ram(const char *filename,
+                 uint64_t (*elf_note_fn)(void *, void *, bool),
                  uint64_t (*translate_fn)(void *, uint64_t),
                  void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
                  uint64_t *highaddr, int big_endian, int elf_machine,
@@ -146,6 +150,7 @@ int load_elf_ram(const char *filename,
  * Same as load_elf_ram(), but always loads the elf as ROM
  */
 int load_elf_as(const char *filename,
+                uint64_t (*elf_note_fn)(void *, void *, bool),
                 uint64_t (*translate_fn)(void *, uint64_t),
                 void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
                 uint64_t *highaddr, int big_endian, int elf_machine,
@@ -155,7 +160,9 @@ int load_elf_as(const char *filename,
  * Same as load_elf_as(), but doesn't allow the caller to specify an
  * AddressSpace.
  */
-int load_elf(const char *filename, uint64_t (*translate_fn)(void *, uint64_t),
+int load_elf(const char *filename,
+             uint64_t (*elf_note_fn)(void *, void *, bool),
+             uint64_t (*translate_fn)(void *, uint64_t),
              void *translate_opaque, uint64_t *pentry, uint64_t *lowaddr,
              uint64_t *highaddr, int big_endian, int elf_machine,
              int clear_lsb, int data_swab);
@@ -175,10 +182,15 @@ void load_elf_hdr(const char *filename, void *hdr, bool *is64, Error **errp);
 int load_aout(const char *filename, hwaddr addr, int max_sz,
               int bswap_needed, hwaddr target_page_size);
 
+#define LOAD_UIMAGE_LOADADDR_INVALID (-1)
+
 /** load_uimage_as:
  * @filename: Path of uimage file
  * @ep: Populated with program entry point. Ignored if NULL.
- * @loadaddr: Populated with the load address. Ignored if NULL.
+ * @loadaddr: load address if none specified in the image or when loading a
+ *            ramdisk. Populated with the load address. Ignored if NULL or
+ *            LOAD_UIMAGE_LOADADDR_INVALID (images which do not specify a load
+ *            address will not be loadable).
  * @is_linux: Is set to true if the image loaded is Linux. Ignored if NULL.
  * @translate_fn: optional function to translate load addresses
  * @translate_opaque: opaque data passed to @translate_fn

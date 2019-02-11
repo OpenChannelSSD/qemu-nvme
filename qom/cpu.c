@@ -312,7 +312,6 @@ static void cpu_common_parse_features(const char *typename, char *features,
             prop->driver = typename;
             prop->property = g_strdup(featurestr);
             prop->value = g_strdup(val);
-            prop->errp = &error_fatal;
             qdev_prop_register_global(prop);
         } else {
             error_setg(errp, "Expected key=value format, found %s.",
@@ -365,6 +364,7 @@ static void cpu_common_initfn(Object *obj)
     CPUClass *cc = CPU_GET_CLASS(obj);
 
     cpu->cpu_index = UNASSIGNED_CPU_INDEX;
+    cpu->cluster_index = UNASSIGNED_CLUSTER_INDEX;
     cpu->gdb_num_regs = cpu->gdb_num_g_regs = cc->gdb_num_core_regs;
     /* *-user doesn't have configurable SMP topology */
     /* the default value is changed by qemu_init_vcpu() for softmmu */

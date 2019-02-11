@@ -206,7 +206,7 @@ struct BusState {
     HotplugHandler *hotplug_handler;
     int max_index;
     bool realized;
-    QTAILQ_HEAD(ChildrenHead, BusChild) children;
+    QTAILQ_HEAD(, BusChild) children;
     QLIST_ENTRY(BusState) sibling;
 };
 
@@ -249,23 +249,29 @@ struct PropertyInfo {
 
 /**
  * GlobalProperty:
- * @user_provided: Set to true if property comes from user-provided config
- * (command-line or config file).
  * @used: Set to true if property was used when initializing a device.
- * @errp: Error destination, used like first argument of error_setg()
- *        in case property setting fails later. If @errp is NULL, we
- *        print warnings instead of ignoring errors silently. For
- *        hotplugged devices, errp is always ignored and warnings are
- *        printed instead.
+ * @optional: If set to true, GlobalProperty will be skipped without errors
+ *            if the property doesn't exist.
+ *
+ * An error is fatal for non-hotplugged devices, when the global is applied.
  */
 typedef struct GlobalProperty {
     const char *driver;
     const char *property;
     const char *value;
-    bool user_provided;
     bool used;
-    Error **errp;
+    bool optional;
 } GlobalProperty;
+
+static inline void
+compat_props_add(GPtrArray *arr,
+                 GlobalProperty props[], size_t nelem)
+{
+    int i;
+    for (i = 0; i < nelem; i++) {
+        g_ptr_array_add(arr, (void *)&props[i]);
+    }
+}
 
 /*** Board API.  This should go away once we have a machine config file.  ***/
 
@@ -411,6 +417,8 @@ const struct VMStateDescription *qdev_get_vmsd(DeviceState *dev);
 const char *qdev_fw_name(DeviceState *dev);
 
 Object *qdev_get_machine(void);
+
+void object_apply_compat_props(Object *obj);
 
 /* FIXME: make this a link<> */
 void qdev_set_parent_bus(DeviceState *dev, BusState *bus);

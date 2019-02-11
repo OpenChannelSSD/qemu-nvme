@@ -107,6 +107,9 @@ update_cxxflags() {
             -Wstrict-prototypes|-Wmissing-prototypes|-Wnested-externs|\
             -Wold-style-declaration|-Wold-style-definition|-Wredundant-decls)
                 ;;
+            -std=gnu99)
+                QEMU_CXXFLAGS=${QEMU_CXXFLAGS:+$QEMU_CXXFLAGS }"-std=gnu++98"
+                ;;
             *)
                 QEMU_CXXFLAGS=${QEMU_CXXFLAGS:+$QEMU_CXXFLAGS }$arg
                 ;;
@@ -345,7 +348,7 @@ docs=""
 fdt=""
 netmap="no"
 sdl=""
-sdlabi=""
+sdl_image=""
 virtfs=""
 mpath=""
 vnc="yes"
@@ -357,7 +360,6 @@ vnc_png=""
 xkbcommon=""
 xen=""
 xen_ctrl_version=""
-xen_pv_domain_build="no"
 xen_pci_passthrough=""
 linux_aio=""
 cap_ng=""
@@ -574,7 +576,6 @@ query_pkg_config() {
     "${pkg_config_exe}" ${QEMU_PKG_CONFIG_FLAGS} "$@"
 }
 pkg_config=query_pkg_config
-sdl_config="${SDL_CONFIG-${cross_prefix}sdl-config}"
 sdl2_config="${SDL2_CONFIG-${cross_prefix}sdl2-config}"
 
 # If the user hasn't specified ARFLAGS, default to 'rv', just as make does.
@@ -585,7 +586,7 @@ ARFLAGS="${ARFLAGS-rv}"
 # left shift of signed integers is well defined and has the expected
 # 2s-complement style results. (Both clang and gcc agree that it
 # provides these semantics.)
-QEMU_CFLAGS="-fno-strict-aliasing -fno-common -fwrapv $QEMU_CFLAGS"
+QEMU_CFLAGS="-fno-strict-aliasing -fno-common -fwrapv -std=gnu99 $QEMU_CFLAGS"
 QEMU_CFLAGS="-Wall -Wundef -Wwrite-strings -Wmissing-prototypes $QEMU_CFLAGS"
 QEMU_CFLAGS="-Wstrict-prototypes -Wredundant-decls $QEMU_CFLAGS"
 QEMU_CFLAGS="-D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE $QEMU_CFLAGS"
@@ -710,6 +711,12 @@ elif check_define __s390__ ; then
   else
     cpu="s390"
   fi
+elif check_define __riscv ; then
+  if check_define _LP64 ; then
+    cpu="riscv64"
+  else
+    cpu="riscv32"
+  fi
 elif check_define __arm__ ; then
   cpu="arm"
 elif check_define __aarch64__ ; then
@@ -722,7 +729,7 @@ ARCH=
 # Normalise host CPU name and set ARCH.
 # Note that this case should only have supported host CPUs, not guests.
 case "$cpu" in
-  ppc|ppc64|s390|s390x|sparc64|x32)
+  ppc|ppc64|s390|s390x|sparc64|x32|riscv32|riscv64)
     cpu="$cpu"
     supported_cpu="yes"
     eval "cross_cc_${cpu}=\$host_cc"
@@ -785,13 +792,13 @@ MINGW32*)
 ;;
 GNU/kFreeBSD)
   bsd="yes"
-  audio_drv_list="oss"
+  audio_drv_list="oss try-sdl"
   audio_possible_drivers="oss sdl pa"
 ;;
 FreeBSD)
   bsd="yes"
   make="${MAKE-gmake}"
-  audio_drv_list="oss"
+  audio_drv_list="oss try-sdl"
   audio_possible_drivers="oss sdl pa"
   # needed for kinfo_getvmmap(3) in libutil.h
   LIBS="-lutil $LIBS"
@@ -804,14 +811,14 @@ FreeBSD)
 DragonFly)
   bsd="yes"
   make="${MAKE-gmake}"
-  audio_drv_list="oss"
+  audio_drv_list="oss try-sdl"
   audio_possible_drivers="oss sdl pa"
   HOST_VARIANT_DIR="dragonfly"
 ;;
 NetBSD)
   bsd="yes"
   make="${MAKE-gmake}"
-  audio_drv_list="oss"
+  audio_drv_list="oss try-sdl"
   audio_possible_drivers="oss sdl"
   oss_lib="-lossaudio"
   HOST_VARIANT_DIR="netbsd"
@@ -820,7 +827,7 @@ NetBSD)
 OpenBSD)
   bsd="yes"
   make="${MAKE-gmake}"
-  audio_drv_list="sdl"
+  audio_drv_list="try-sdl"
   audio_possible_drivers="sdl"
   HOST_VARIANT_DIR="openbsd"
   supported_os="yes"
@@ -836,7 +843,7 @@ Darwin)
     LDFLAGS="-arch x86_64 $LDFLAGS"
   fi
   cocoa="yes"
-  audio_drv_list="coreaudio"
+  audio_drv_list="coreaudio try-sdl"
   audio_possible_drivers="coreaudio sdl"
   LDFLAGS="-framework CoreFoundation -framework IOKit $LDFLAGS"
   libs_softmmu="-F/System/Library/Frameworks -framework Cocoa -framework IOKit $libs_softmmu"
@@ -852,7 +859,7 @@ SunOS)
   install="${INSTALL-ginstall}"
   smbd="${SMBD-/usr/sfw/sbin/smbd}"
   if test -f /usr/include/sys/soundcard.h ; then
-    audio_drv_list="oss"
+    audio_drv_list="oss try-sdl"
   fi
   audio_possible_drivers="oss sdl"
 # needed for CMSG_ macros in sys/socket.h
@@ -870,7 +877,7 @@ Haiku)
   LIBS="-lposix_error_mapper -lnetwork $LIBS"
 ;;
 Linux)
-  audio_drv_list="oss"
+  audio_drv_list="try-pa try-alsa try-sdl oss"
   audio_possible_drivers="oss alsa sdl pa"
   linux="yes"
   linux_user="yes"
@@ -906,9 +913,6 @@ fi
 if test "$mingw32" = "yes" ; then
   EXESUF=".exe"
   DSOSUF=".dll"
-  QEMU_CFLAGS="-DWIN32_LEAN_AND_MEAN -DWINVER=0x501 $QEMU_CFLAGS"
-  # enable C99/POSIX format strings (needs mingw32-runtime 3.15 or later)
-  QEMU_CFLAGS="-D__USE_MINGW_ANSI_STDIO=1 $QEMU_CFLAGS"
   # MinGW needs -mthreads for TLS and macro _MT.
   QEMU_CFLAGS="-mthreads $QEMU_CFLAGS"
   LIBS="-lwinmm -lws2_32 -liphlpapi $LIBS"
@@ -1038,7 +1042,9 @@ for opt do
   ;;
   --enable-sdl) sdl="yes"
   ;;
-  --with-sdlabi=*) sdlabi="$optarg"
+  --disable-sdl-image) sdl_image="no"
+  ;;
+  --enable-sdl-image) sdl_image="yes"
   ;;
   --disable-qom-cast-debug) qom_cast_debug="no"
   ;;
@@ -1115,10 +1121,6 @@ for opt do
   --disable-xen-pci-passthrough) xen_pci_passthrough="no"
   ;;
   --enable-xen-pci-passthrough) xen_pci_passthrough="yes"
-  ;;
-  --disable-xen-pv-domain-build) xen_pv_domain_build="no"
-  ;;
-  --enable-xen-pv-domain-build) xen_pv_domain_build="yes"
   ;;
   --disable-brlapi) brlapi="no"
   ;;
@@ -1682,8 +1684,6 @@ Advanced options (experts only):
   --tls-priority           default TLS protocol/cipher priority string
   --enable-gprof           QEMU profiling with gprof
   --enable-profiler        profiler support
-  --enable-xen-pv-domain-build
-                           xen pv domain builder
   --enable-debug-stack-usage
                            track the maximum stack usage of stacks created by qemu_alloc_stack
 
@@ -1707,7 +1707,7 @@ disabled with --disable-FEATURE, default is enabled if available:
   nettle          nettle cryptography support
   gcrypt          libgcrypt cryptography support
   sdl             SDL UI
-  --with-sdlabi     select preferred SDL ABI 1.2 or 2.0
+  sdl_image       SDL Image support for icons
   gtk             gtk UI
   vte             vte support for the gtk UI
   curses          curses UI
@@ -1801,6 +1801,9 @@ if ! $python -c 'import sys; sys.exit(sys.version_info < (2,7))'; then
       "Use --python=/path/to/python to specify a supported Python."
 fi
 
+# Preserve python version since some functionality is dependent on it
+python_version=$($python -V 2>&1 | sed -e 's/Python\ //')
+
 # Suppress writing compiled files
 python="$python -B"
 
@@ -1831,8 +1834,8 @@ fi
 # Consult white-list to determine whether to enable werror
 # by default.  Only enable by default for git builds
 if test -z "$werror" ; then
-    if test -d "$source_path/.git" -a \
-        \( "$linux" = "yes" -o "$mingw32" = "yes" \) ; then
+    if test -d "$source_path/.git" && \
+        { test "$linux" = "yes" || test "$mingw32" = "yes"; }; then
         werror="yes"
     else
         werror="no"
@@ -2356,7 +2359,6 @@ if test "$xen" != "no" ; then
     fi
     QEMU_CFLAGS="$QEMU_CFLAGS $($pkg_config --cflags $xen_pc)"
     libs_softmmu="$($pkg_config --libs $xen_pc) $libs_softmmu"
-    LDFLAGS="$($pkg_config --libs $xen_pc) $LDFLAGS"
   else
 
     xen_libs="-lxenstore -lxenctrl -lxenguest"
@@ -2471,7 +2473,6 @@ int main(void) {
   xenforeignmemory_handle *xfmem;
   xenevtchn_handle *xe;
   xengnttab_handle *xg;
-  xen_domain_handle_t handle;
   xengnttab_grant_copy_segment_t* seg = NULL;
 
   xs_daemon_open();
@@ -2481,7 +2482,6 @@ int main(void) {
   xc_domain_add_to_physmap(0, 0, XENMAPSPACE_gmfn, 0, 0);
   xc_hvm_inject_msi(xc, 0, 0xf0000000, 0x00000000);
   xc_hvm_create_ioreq_server(xc, 0, HVM_IOREQSRV_BUFIOREQ_ATOMIC, NULL);
-  xc_domain_create(xc, 0, handle, 0, NULL, NULL);
 
   xfmem = xenforeignmemory_open(0, 0);
   xenforeignmemory_map(xfmem, 0, 0, 0, 0, 0);
@@ -2523,7 +2523,6 @@ int main(void) {
   xenforeignmemory_handle *xfmem;
   xenevtchn_handle *xe;
   xengnttab_handle *xg;
-  xen_domain_handle_t handle;
 
   xs_daemon_open();
 
@@ -2532,7 +2531,6 @@ int main(void) {
   xc_domain_add_to_physmap(0, 0, XENMAPSPACE_gmfn, 0, 0);
   xc_hvm_inject_msi(xc, 0, 0xf0000000, 0x00000000);
   xc_hvm_create_ioreq_server(xc, 0, HVM_IOREQSRV_BUFIOREQ_ATOMIC, NULL);
-  xc_domain_create(xc, 0, handle, 0, NULL, NULL);
 
   xfmem = xenforeignmemory_open(0, 0);
   xenforeignmemory_map(xfmem, 0, 0, 0, 0, 0);
@@ -2549,21 +2547,6 @@ EOF
         compile_prog "" "$xen_libs $xen_stable_libs"
       then
       xen_ctrl_version=40701
-      xen=yes
-    elif
-        cat > $TMPC <<EOF &&
-#include <xenctrl.h>
-#include <stdint.h>
-int main(void) {
-  xc_interface *xc = NULL;
-  xen_domain_handle_t handle;
-  xc_domain_create(xc, 0, handle, 0, NULL, NULL);
-  return 0;
-}
-EOF
-        compile_prog "" "$xen_libs"
-      then
-      xen_ctrl_version=40700
       xen=yes
 
     # Xen 4.6
@@ -2673,12 +2656,6 @@ if test "$xen_pci_passthrough" != "no"; then
     fi
     xen_pci_passthrough=no
   fi
-fi
-
-if test "$xen_pv_domain_build" = "yes" &&
-   test "$xen" != "yes"; then
-    error_exit "User requested Xen PV domain builder support" \
-	       "which requires Xen support."
 fi
 
 ##########################################
@@ -2925,37 +2902,11 @@ fi
 
 sdl_probe ()
 {
-  sdl_too_old=no
-  if test "$sdlabi" = ""; then
-      if $pkg_config --exists "sdl2"; then
-          sdlabi=2.0
-      elif $pkg_config --exists "sdl"; then
-          sdlabi=1.2
-      else
-          sdlabi=2.0
-      fi
-  fi
-
-  if test $sdlabi = "2.0"; then
-      sdl_config=$sdl2_config
-      sdlname=sdl2
-      sdlconfigname=sdl2_config
-  elif test $sdlabi = "1.2"; then
-      sdlname=sdl
-      sdlconfigname=sdl_config
-  else
-      error_exit "Unknown sdlabi $sdlabi, must be 1.2 or 2.0"
-  fi
-
-  if test "$(basename $sdl_config)" != $sdlconfigname && ! has ${sdl_config}; then
-    sdl_config=$sdlconfigname
-  fi
-
-  if $pkg_config $sdlname --exists; then
-    sdlconfig="$pkg_config $sdlname"
+  if $pkg_config sdl2 --exists; then
+    sdlconfig="$pkg_config sdl2"
     sdlversion=$($sdlconfig --modversion 2>/dev/null)
   elif has ${sdl_config}; then
-    sdlconfig="$sdl_config"
+    sdlconfig="$sdl2_config"
     sdlversion=$($sdlconfig --version)
   else
     if test "$sdl" = "yes" ; then
@@ -2977,8 +2928,8 @@ EOF
   sdl_cflags=$($sdlconfig --cflags 2>/dev/null)
   sdl_cflags="$sdl_cflags -Wno-undef"  # workaround 2.0.8 bug
   if test "$static" = "yes" ; then
-    if $pkg_config $sdlname --exists; then
-      sdl_libs=$($pkg_config $sdlname --static --libs 2>/dev/null)
+    if $pkg_config sdl2 --exists; then
+      sdl_libs=$($pkg_config sdl2 --static --libs 2>/dev/null)
     else
       sdl_libs=$($sdlconfig --static-libs 2>/dev/null)
     fi
@@ -2986,14 +2937,10 @@ EOF
     sdl_libs=$($sdlconfig --libs 2>/dev/null)
   fi
   if compile_prog "$sdl_cflags" "$sdl_libs" ; then
-    if test $(echo $sdlversion | sed 's/[^0-9]//g') -lt 121 ; then
-      sdl_too_old=yes
-    else
-      sdl=yes
-    fi
+    sdl=yes
 
     # static link with sdl ? (note: sdl.pc's --static --libs is broken)
-    if test "$sdl" = "yes" -a "$static" = "yes" ; then
+    if test "$sdl" = "yes" && test "$static" = "yes" ; then
       if test $? = 0 && echo $sdl_libs | grep -- -laa > /dev/null; then
          sdl_libs="$sdl_libs $(aalib-config --static-libs 2>/dev/null)"
          sdl_cflags="$sdl_cflags $(aalib-config --cflags 2>/dev/null)"
@@ -3006,14 +2953,47 @@ EOF
     fi # static link
   else # sdl not found
     if test "$sdl" = "yes" ; then
-      feature_not_found "sdl" "Install SDL devel"
+      feature_not_found "sdl" "Install SDL2 devel"
     fi
     sdl=no
   fi # sdl compile test
 }
 
+sdl_image_probe ()
+{
+    if test "$sdl_image" != "no" ; then
+        if $pkg_config SDL2_image --exists; then
+            if test "$static" = "yes"; then
+                sdl_image_libs=$($pkg_config SDL2_image --libs --static 2>/dev/null)
+            else
+                sdl_image_libs=$($pkg_config SDL2_image --libs 2>/dev/null)
+            fi
+            sdl_image_cflags=$($pkg_config SDL2_image --cflags 2>/dev/null)
+            sdl_image=yes
+
+            sdl_cflags="$sdl_cflags $sdl_image_cflags"
+            sdl_libs="$sdl_libs $sdl_image_libs"
+        else
+            if test "$sdl_image" = "yes" ; then
+                feature_not_found "sdl_image" "Install SDL Image devel"
+            else
+                sdl_image=no
+            fi
+        fi
+    fi
+}
+
 if test "$sdl" != "no" ; then
   sdl_probe
+fi
+
+if test "$sdl" = "yes" ; then
+  sdl_image_probe
+else
+  if test "$sdl_image" = "yes"; then
+    echo "warning: SDL Image requested, but SDL is not available, disabling"
+  fi
+  sdl_image=no
 fi
 
 if test "$sdl" = "yes" ; then
@@ -3102,7 +3082,7 @@ fi
 
 ##########################################
 # VNC SASL detection
-if test "$vnc" = "yes" -a "$vnc_sasl" != "no" ; then
+if test "$vnc" = "yes" && test "$vnc_sasl" != "no" ; then
   cat > $TMPC <<EOF
 #include <sasl/sasl.h>
 #include <stdio.h>
@@ -3125,7 +3105,7 @@ fi
 
 ##########################################
 # VNC JPEG detection
-if test "$vnc" = "yes" -a "$vnc_jpeg" != "no" ; then
+if test "$vnc" = "yes" && test "$vnc_jpeg" != "no" ; then
 cat > $TMPC <<EOF
 #include <stdio.h>
 #include <jpeglib.h>
@@ -3147,7 +3127,7 @@ fi
 
 ##########################################
 # VNC PNG detection
-if test "$vnc" = "yes" -a "$vnc_png" != "no" ; then
+if test "$vnc" = "yes" && test "$vnc_png" != "no" ; then
 cat > $TMPC <<EOF
 //#include <stdio.h>
 #include <png.h>
@@ -3307,44 +3287,53 @@ fi
 ##########################################
 # Sound support libraries probe
 
-audio_drv_probe()
-{
-    drv=$1
-    hdr=$2
-    lib=$3
-    exp=$4
-    cfl=$5
-        cat > $TMPC << EOF
-#include <$hdr>
-int main(void) { $exp }
-EOF
-    if compile_prog "$cfl" "$lib" ; then
-        :
-    else
-        error_exit "$drv check failed" \
-            "Make sure to have the $drv libs and headers installed."
-    fi
-}
-
 audio_drv_list=$(echo "$audio_drv_list" | sed -e 's/,/ /g')
 for drv in $audio_drv_list; do
     case $drv in
-    alsa)
-    audio_drv_probe $drv alsa/asoundlib.h -lasound \
-        "return snd_pcm_close((snd_pcm_t *)0);"
-    alsa_libs="-lasound"
+    alsa | try-alsa)
+    if $pkg_config alsa --exists; then
+        alsa_libs=$($pkg_config alsa --libs)
+        if test "$drv" = "try-alsa"; then
+            audio_drv_list=$(echo "$audio_drv_list" | sed -e 's/try-alsa/alsa/')
+        fi
+    else
+        if test "$drv" = "try-alsa"; then
+            audio_drv_list=$(echo "$audio_drv_list" | sed -e 's/try-alsa//')
+        else
+            error_exit "$drv check failed" \
+                "Make sure to have the $drv libs and headers installed."
+        fi
+    fi
     ;;
 
-    pa)
-    audio_drv_probe $drv pulse/pulseaudio.h "-lpulse" \
-        "pa_context_set_source_output_volume(NULL, 0, NULL, NULL, NULL); return 0;"
-    pulse_libs="-lpulse"
-    audio_pt_int="yes"
+    pa | try-pa)
+    if $pkg_config libpulse --exists; then
+        pulse_libs=$($pkg_config libpulse --libs)
+        audio_pt_int="yes"
+        if test "$drv" = "try-pa"; then
+            audio_drv_list=$(echo "$audio_drv_list" | sed -e 's/try-pa/pa/')
+        fi
+    else
+        if test "$drv" = "try-pa"; then
+            audio_drv_list=$(echo "$audio_drv_list" | sed -e 's/try-pa//')
+        else
+            error_exit "$drv check failed" \
+                "Make sure to have the $drv libs and headers installed."
+        fi
+    fi
     ;;
 
     sdl)
     if test "$sdl" = "no"; then
         error_exit "sdl not found or disabled, can not use sdl audio driver"
+    fi
+    ;;
+
+    try-sdl)
+    if test "$sdl" = "no"; then
+        audio_drv_list=$(echo "$audio_drv_list" | sed -e 's/try-sdl//')
+    else
+        audio_drv_list=$(echo "$audio_drv_list" | sed -e 's/try-sdl/sdl/')
     fi
     ;;
 
@@ -3502,7 +3491,7 @@ fi
 # This workaround is required due to a bug in pkg-config file for glib as it
 # doesn't define GLIB_STATIC_COMPILATION for pkg-config --static
 
-if test "$static" = yes -a "$mingw32" = yes; then
+if test "$static" = yes && test "$mingw32" = yes; then
     QEMU_CFLAGS="-DGLIB_STATIC_COMPILATION $QEMU_CFLAGS"
 fi
 
@@ -3595,7 +3584,7 @@ fi
 ##########################################
 # pixman support probe
 
-if test "$want_tools" = "no" -a "$softmmu" = "no"; then
+if test "$want_tools" = "no" && test "$softmmu" = "no"; then
   pixman_cflags=
   pixman_libs=
 elif $pkg_config --atleast-version=0.21.8 pixman-1 > /dev/null 2>&1; then
@@ -3710,13 +3699,13 @@ else
   done
 fi
 
-if test "$mingw32" != yes -a "$pthread" = no; then
+if test "$mingw32" != yes && test "$pthread" = no; then
   error_exit "pthread check failed" \
       "Make sure to have the pthread libs and headers installed."
 fi
 
-# check for pthread_setname_np
-pthread_setname_np=no
+# check for pthread_setname_np with thread id
+pthread_setname_np_w_tid=no
 cat > $TMPC << EOF
 #include <pthread.h>
 
@@ -3730,7 +3719,24 @@ int main(void)
 }
 EOF
 if compile_prog "" "$pthread_lib" ; then
-  pthread_setname_np=yes
+  pthread_setname_np_w_tid=yes
+fi
+
+# check for pthread_setname_np without thread id
+pthread_setname_np_wo_tid=no
+cat > $TMPC << EOF
+#include <pthread.h>
+
+static void *f(void *p) { pthread_setname_np("QEMU"); }
+int main(void)
+{
+    pthread_t thread;
+    pthread_create(&thread, 0, f, 0);
+    return 0;
+}
+EOF
+if compile_prog "" "$pthread_lib" ; then
+  pthread_setname_np_wo_tid=yes
 fi
 
 ##########################################
@@ -3820,7 +3826,7 @@ fi
 ##########################################
 # TPM passthrough is only on x86 Linux
 
-if test "$targetos" = Linux && test "$cpu" = i386 -o "$cpu" = x86_64; then
+if test "$targetos" = Linux && { test "$cpu" = i386 || test "$cpu" = x86_64; }; then
   tpm_passthrough=$tpm
 else
   tpm_passthrough=no
@@ -3916,7 +3922,7 @@ if test "$fdt" != "no" ; then
   cat > $TMPC << EOF
 #include <libfdt.h>
 #include <libfdt_env.h>
-int main(void) { fdt_first_subnode(0, 0); return 0; }
+int main(void) { fdt_check_full(NULL, 0); return 0; }
 EOF
   if compile_prog "" "$fdt_libs" ; then
     # system DTC is good - use it
@@ -3984,6 +3990,16 @@ EOF
   if compile_prog "" "" ; then
     opengl_dmabuf=yes
   fi
+fi
+
+if test "$opengl" = "yes" && test "$have_x11" = "yes"; then
+  for target in $target_list; do
+    case $target in
+      lm32-softmmu) # milkymist-tmu2 requires X11 and OpenGL
+        need_x11=yes
+      ;;
+    esac
+  done
 fi
 
 ##########################################
@@ -4206,6 +4222,17 @@ EOF
 
 if compile_prog "" "" ; then
   signalfd=yes
+fi
+
+# check if optreset global is declared by <getopt.h>
+optreset="no"
+cat > $TMPC << EOF
+#include <getopt.h>
+int main(void) { return optreset; }
+EOF
+
+if compile_prog "" "" ; then
+  optreset=yes
 fi
 
 # check if eventfd is supported
@@ -4585,9 +4612,17 @@ elif compile_prog "" "$pthread_lib -lrt" ; then
   libs_qga="$libs_qga -lrt"
 fi
 
-if test "$darwin" != "yes" -a "$mingw32" != "yes" -a "$solaris" != yes -a \
-        "$haiku" != "yes" ; then
+# Check whether we need to link libutil for openpty()
+cat > $TMPC << EOF
+extern int openpty(int *am, int *as, char *name, void *termp, void *winp);
+int main(void) { return openpty(0, 0, 0, 0, 0); }
+EOF
+
+if ! compile_prog "" "" ; then
+  if compile_prog "" "-lutil" ; then
     libs_softmmu="-lutil $libs_softmmu"
+    libs_tools="-lutil $libs_tools"
+  fi
 fi
 
 ##########################################
@@ -4599,7 +4634,7 @@ int main(void) { spice_server_new(); return 0; }
 EOF
   spice_cflags=$($pkg_config --cflags spice-protocol spice-server 2>/dev/null)
   spice_libs=$($pkg_config --libs spice-protocol spice-server 2>/dev/null)
-  if $pkg_config --atleast-version=0.12.0 spice-server && \
+  if $pkg_config --atleast-version=0.12.5 spice-server && \
      $pkg_config --atleast-version=0.12.3 spice-protocol && \
      compile_prog "$spice_cflags" "$spice_libs" ; then
     spice="yes"
@@ -4610,7 +4645,7 @@ EOF
   else
     if test "$spice" = "yes" ; then
       feature_not_found "spice" \
-          "Install spice-server(>=0.12.0) and spice-protocol(>=0.12.3) devel"
+          "Install spice-server(>=0.12.5) and spice-protocol(>=0.12.3) devel"
     fi
     spice="no"
   fi
@@ -4661,7 +4696,8 @@ fi
 ##########################################
 # check if we have VSS SDK headers for win
 
-if test "$mingw32" = "yes" -a "$guest_agent" != "no" -a "$vss_win32_sdk" != "no" ; then
+if test "$mingw32" = "yes" && test "$guest_agent" != "no" && \
+        test "$vss_win32_sdk" != "no" ; then
   case "$vss_win32_sdk" in
     "")   vss_win32_include="-isystem $source_path" ;;
     *\ *) # The SDK is installed in "Program Files" by default, but we cannot
@@ -4700,7 +4736,8 @@ fi
 # VSS provider from the source. It is usually unnecessary because the
 # pre-compiled .tlb file is included.
 
-if test "$mingw32" = "yes" -a "$guest_agent" != "no" -a "$guest_agent_with_vss" = "yes" ; then
+if test "$mingw32" = "yes" && test "$guest_agent" != "no" && \
+        test "$guest_agent_with_vss" = "yes" ; then
   if test -z "$win_sdk"; then
     programfiles="$PROGRAMFILES"
     test -n "$PROGRAMW6432" && programfiles="$PROGRAMW6432"
@@ -4716,7 +4753,7 @@ fi
 
 ##########################################
 # check if mingw environment provides a recent ntddscsi.h
-if test "$mingw32" = "yes" -a "$guest_agent" != "no"; then
+if test "$mingw32" = "yes" && test "$guest_agent" != "no"; then
   cat > $TMPC << EOF
 #include <windows.h>
 #include <ntddscsi.h>
@@ -4763,7 +4800,7 @@ case "$capstone" in
   "" | yes)
     if $pkg_config capstone; then
       capstone=system
-    elif test -e "${source_path}/.git" -a $git_update = 'yes' ; then
+    elif test -e "${source_path}/.git" && test $git_update = 'yes' ; then
       capstone=git
     elif test -e "${source_path}/capstone/Makefile" ; then
       capstone=internal
@@ -5135,7 +5172,7 @@ fi
 # There is no point enabling this if cpuid.h is not usable,
 # since we won't be able to select the new routines.
 
-if test "$cpuid_h" = "yes" -a "$avx2_opt" != "no"; then
+if test "$cpuid_h" = "yes" && test "$avx2_opt" != "no"; then
   cat > $TMPC << EOF
 #pragma GCC push_options
 #pragma GCC target("avx2")
@@ -5193,7 +5230,7 @@ EOF
 fi
 
 cmpxchg128=no
-if test "$int128" = yes -a "$atomic128" = no; then
+if test "$int128" = yes && test "$atomic128" = no; then
   cat > $TMPC << EOF
 int main(void)
 {
@@ -5752,6 +5789,8 @@ qemu_confdir=$sysconfdir$confsuffix
 qemu_moddir=$libdir$confsuffix
 qemu_datadir=$datadir$confsuffix
 qemu_localedir="$datadir/locale"
+qemu_icondir="$datadir/icons"
+qemu_desktopdir="$datadir/applications"
 
 # We can only support ivshmem if we have eventfd
 if [ "$eventfd" = "yes" ]; then
@@ -5767,8 +5806,8 @@ if test "$want_tools" = "yes" ; then
   if [ "$ivshmem" = "yes" ]; then
     tools="ivshmem-client\$(EXESUF) ivshmem-server\$(EXESUF) $tools"
   fi
-  if [ "$posix" = "yes" ] && [ "$curl" = "yes" ]; then
-    tools="elf2dmp $tools"
+  if [ "$curl" = "yes" ]; then
+      tools="elf2dmp\$(EXESUF) $tools"
   fi
 fi
 if test "$softmmu" = yes ; then
@@ -5878,9 +5917,9 @@ fi
 
 # Mac OS X ships with a broken assembler
 roms=
-if test \( "$cpu" = "i386" -o "$cpu" = "x86_64" \) -a \
-        "$targetos" != "Darwin" -a "$targetos" != "SunOS" -a \
-        "$softmmu" = yes ; then
+if { test "$cpu" = "i386" || test "$cpu" = "x86_64"; } && \
+        test "$targetos" != "Darwin" && test "$targetos" != "SunOS" && \
+        test "$softmmu" = yes ; then
     # Different host OS linkers have different ideas about the name of the ELF
     # emulation. Linux and OpenBSD/amd64 use 'elf_i386'; FreeBSD uses the _fbsd
     # variant; OpenBSD/i386 uses the _obsd variant; and Windows uses i386pe.
@@ -5892,12 +5931,16 @@ if test \( "$cpu" = "i386" -o "$cpu" = "x86_64" \) -a \
         fi
     done
 fi
-if test "$cpu" = "ppc64" -a "$targetos" != "Darwin" ; then
+if test "$cpu" = "ppc64" && test "$targetos" != "Darwin" ; then
   roms="$roms spapr-rtas"
 fi
 
+# Only build s390-ccw bios if we're on s390x and the compiler has -march=z900
 if test "$cpu" = "s390x" ; then
-  roms="$roms s390-ccw"
+  write_c_skeleton
+  if compile_prog "-march=z900" ""; then
+    roms="$roms s390-ccw"
+  fi
 fi
 
 # Probe for the need for relocating the user-only binary.
@@ -6017,7 +6060,7 @@ echo "LDFLAGS           $LDFLAGS"
 echo "QEMU_LDFLAGS      $QEMU_LDFLAGS"
 echo "make              $make"
 echo "install           $install"
-echo "python            $python"
+echo "python            $python ($python_version)"
 if test "$slirp" = "yes" ; then
     echo "smbd              $smbd"
 fi
@@ -6034,6 +6077,7 @@ if test "$darwin" = "yes" ; then
     echo "Cocoa support     $cocoa"
 fi
 echo "SDL support       $sdl $(echo_version $sdl $sdlversion)"
+echo "SDL image support $sdl_image"
 echo "GTK support       $gtk $(echo_version $gtk $gtk_version)"
 echo "GTK GL support    $gtk_gl"
 echo "VTE support       $vte $(echo_version $vte $vteversion)"
@@ -6063,7 +6107,6 @@ fi
 echo "xen support       $xen"
 if test "$xen" = "yes" ; then
   echo "xen ctrl version  $xen_ctrl_version"
-  echo "pv dom build      $xen_pv_domain_build"
 fi
 echo "brlapi support    $brlapi"
 echo "bluez  support    $bluez"
@@ -6157,16 +6200,6 @@ echo "docker            $docker"
 echo "libpmem support   $libpmem"
 echo "libudev           $libudev"
 
-if test "$sdl_too_old" = "yes"; then
-echo "-> Your SDL version is too old - please upgrade to have SDL support"
-fi
-
-if test "$sdlabi" = "1.2"; then
-    echo
-    echo "WARNING: Use of SDL 1.2 is deprecated and will be removed in"
-    echo "WARNING: future releases. Please switch to using SDL 2.0"
-fi
-
 if test "$supported_cpu" = "no"; then
     echo
     echo "WARNING: SUPPORT FOR THIS HOST CPU WILL GO AWAY IN FUTURE RELEASES!"
@@ -6218,6 +6251,8 @@ if test "$mingw32" = "no" ; then
 fi
 echo "qemu_helperdir=$libexecdir" >> $config_host_mak
 echo "qemu_localedir=$qemu_localedir" >> $config_host_mak
+echo "qemu_icondir=$qemu_icondir" >> $config_host_mak
+echo "qemu_desktopdir=$qemu_desktopdir" >> $config_host_mak
 echo "libs_softmmu=$libs_softmmu" >> $config_host_mak
 echo "GIT=$git" >> $config_host_mak
 echo "GIT_SUBMODULES=$git_submodules" >> $config_host_mak
@@ -6362,16 +6397,18 @@ if test "$modules" = "yes"; then
   echo "CONFIG_STAMP=_$( (echo $qemu_version; echo $pkgversion; cat $0) | $shacmd - | cut -f1 -d\ )" >> $config_host_mak
   echo "CONFIG_MODULES=y" >> $config_host_mak
 fi
-if test "$have_x11" = "yes" -a "$need_x11" = "yes"; then
+if test "$have_x11" = "yes" && test "$need_x11" = "yes"; then
   echo "CONFIG_X11=y" >> $config_host_mak
   echo "X11_CFLAGS=$x11_cflags" >> $config_host_mak
   echo "X11_LIBS=$x11_libs" >> $config_host_mak
 fi
 if test "$sdl" = "yes" ; then
   echo "CONFIG_SDL=m" >> $config_host_mak
-  echo "CONFIG_SDLABI=$sdlabi" >> $config_host_mak
   echo "SDL_CFLAGS=$sdl_cflags" >> $config_host_mak
   echo "SDL_LIBS=$sdl_libs" >> $config_host_mak
+  if test "$sdl_image" = "yes" ; then
+      echo "CONFIG_SDL_IMAGE=y" >> $config_host_mak
+  fi
 fi
 if test "$cocoa" = "yes" ; then
   echo "CONFIG_COCOA=y" >> $config_host_mak
@@ -6533,9 +6570,6 @@ fi
 if test "$xen" = "yes" ; then
   echo "CONFIG_XEN_BACKEND=y" >> $config_host_mak
   echo "CONFIG_XEN_CTRL_INTERFACE_VERSION=$xen_ctrl_version" >> $config_host_mak
-  if test "$xen_pv_domain_build" = "yes" ; then
-    echo "CONFIG_XEN_PV_DOMAIN_BUILD=y" >> $config_host_mak
-  fi
 fi
 if test "$linux_aio" = "yes" ; then
   echo "CONFIG_LINUX_AIO=y" >> $config_host_mak
@@ -6558,7 +6592,7 @@ fi
 if test "$vhost_scsi" = "yes" ; then
   echo "CONFIG_VHOST_SCSI=y" >> $config_host_mak
 fi
-if test "$vhost_net" = "yes" -a "$vhost_user" = "yes"; then
+if test "$vhost_net" = "yes" && test "$vhost_user" = "yes"; then
   echo "CONFIG_VHOST_NET_USED=y" >> $config_host_mak
 fi
 if test "$vhost_crypto" = "yes" ; then
@@ -6587,6 +6621,9 @@ if test "$membarrier" = "yes" ; then
 fi
 if test "$signalfd" = "yes" ; then
   echo "CONFIG_SIGNALFD=y" >> $config_host_mak
+fi
+if test "$optreset" = "yes" ; then
+  echo "HAVE_OPTRESET=y" >> $config_host_mak
 fi
 if test "$tcg" = "yes"; then
   echo "CONFIG_TCG=y" >> $config_host_mak
@@ -6913,11 +6950,14 @@ fi
 # Hold two types of flag:
 #   CONFIG_THREAD_SETNAME_BYTHREAD  - we've got a way of setting the name on
 #                                     a thread we have a handle to
-#   CONFIG_PTHREAD_SETNAME_NP       - A way of doing it on a particular
+#   CONFIG_PTHREAD_SETNAME_NP_W_TID - A way of doing it on a particular
 #                                     platform
-if test "$pthread_setname_np" = "yes" ; then
+if test "$pthread_setname_np_w_tid" = "yes" ; then
   echo "CONFIG_THREAD_SETNAME_BYTHREAD=y" >> $config_host_mak
-  echo "CONFIG_PTHREAD_SETNAME_NP=y" >> $config_host_mak
+  echo "CONFIG_PTHREAD_SETNAME_NP_W_TID=y" >> $config_host_mak
+elif test "$pthread_setname_np_wo_tid" = "yes" ; then
+  echo "CONFIG_THREAD_SETNAME_BYTHREAD=y" >> $config_host_mak
+  echo "CONFIG_PTHREAD_SETNAME_NP_WO_TID=y" >> $config_host_mak
 fi
 
 if test "$vxhs" = "yes" ; then
@@ -6963,10 +7003,12 @@ elif test "$ARCH" = "sparc64" ; then
   QEMU_INCLUDES="-iquote \$(SRC_PATH)/tcg/sparc $QEMU_INCLUDES"
 elif test "$ARCH" = "s390x" ; then
   QEMU_INCLUDES="-iquote \$(SRC_PATH)/tcg/s390 $QEMU_INCLUDES"
-elif test "$ARCH" = "x86_64" -o "$ARCH" = "x32" ; then
+elif test "$ARCH" = "x86_64" || test "$ARCH" = "x32" ; then
   QEMU_INCLUDES="-iquote \$(SRC_PATH)/tcg/i386 $QEMU_INCLUDES"
 elif test "$ARCH" = "ppc64" ; then
   QEMU_INCLUDES="-iquote \$(SRC_PATH)/tcg/ppc $QEMU_INCLUDES"
+elif test "$ARCH" = "riscv32" || test "$ARCH" = "riscv64" ; then
+  QEMU_INCLUDES="-I\$(SRC_PATH)/tcg/riscv $QEMU_INCLUDES"
 else
   QEMU_INCLUDES="-iquote \$(SRC_PATH)/tcg/\$(ARCH) $QEMU_INCLUDES"
 fi
@@ -6981,6 +7023,7 @@ echo "INSTALL_DATA=$install -c -m 0644" >> $config_host_mak
 echo "INSTALL_PROG=$install -c -m 0755" >> $config_host_mak
 echo "INSTALL_LIB=$install -c -m 0644" >> $config_host_mak
 echo "PYTHON=$python" >> $config_host_mak
+echo "PYTHON_VERSION=$python_version" >> $config_host_mak
 echo "CC=$cc" >> $config_host_mak
 if $iasl -h > /dev/null 2>&1; then
   echo "IASL=$iasl" >> $config_host_mak
@@ -7126,14 +7169,14 @@ TARGET_ABI_DIR=""
 case "$target_name" in
   i386)
     mttcg="yes"
-    gdb_xml_files="i386-32bit.xml i386-32bit-core.xml i386-32bit-sse.xml"
+	gdb_xml_files="i386-32bit.xml"
     target_compiler=$cross_cc_i386
     target_compiler_cflags=$cross_cc_ccflags_i386
   ;;
   x86_64)
     TARGET_BASE_ARCH=i386
     mttcg="yes"
-    gdb_xml_files="i386-64bit.xml i386-64bit-core.xml i386-64bit-sse.xml"
+	gdb_xml_files="i386-64bit.xml"
     target_compiler=$cross_cc_x86_64
   ;;
   alpha)
@@ -7381,7 +7424,7 @@ if test ! -z "$gdb_xml_files" ; then
   echo "TARGET_XML_FILES=$list" >> $config_target_mak
 fi
 
-if test "$target_user_only" = "yes" -a "$bflt" = "yes"; then
+if test "$target_user_only" = "yes" && test "$bflt" = "yes"; then
   echo "TARGET_HAS_BFLT=y" >> $config_target_mak
 fi
 if test "$target_bsd_user" = "yes" ; then
@@ -7463,7 +7506,7 @@ for i in $ARCH $TARGET_BASE_ARCH ; do
   ppc*)
     disas_config "PPC"
   ;;
-  riscv)
+  riscv*)
     disas_config "RISCV"
   ;;
   s390*)
@@ -7492,7 +7535,7 @@ alpha)
 esac
 
 if test "$gprof" = "yes" ; then
-  echo "TARGET_GPROF=yes" >> $config_target_mak
+  echo "TARGET_GPROF=y" >> $config_target_mak
   if test "$target_linux_user" = "yes" ; then
     cflags="-p $cflags"
     ldflags="-p $ldflags"
@@ -7503,7 +7546,7 @@ if test "$gprof" = "yes" ; then
   fi
 fi
 
-if test "$target_linux_user" = "yes" -o "$target_bsd_user" = "yes" ; then
+if test "$target_linux_user" = "yes" || test "$target_bsd_user" = "yes" ; then
   ldflags="$ldflags $textseg_ldflags"
 fi
 
@@ -7515,7 +7558,8 @@ fi
 #  - we build the system emulation for s390x (qemu-system-s390x)
 #  - KVM is enabled
 #  - the linker supports --s390-pgste
-if test "$TARGET_ARCH" = "s390x" -a "$target_softmmu" = "yes"  -a "$ARCH" = "s390x" -a "$kvm" = "yes"; then
+if test "$TARGET_ARCH" = "s390x" && test "$target_softmmu" = "yes" && \
+        test "$ARCH" = "s390x" && test "$kvm" = "yes"; then
     if ld_has --s390-pgste ; then
         ldflags="-Wl,--s390-pgste $ldflags"
     fi

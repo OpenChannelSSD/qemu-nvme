@@ -5,9 +5,7 @@
  * terms and conditions of the copyright.
  */
 
-#include "qemu/osdep.h"
 #include "slirp.h"
-#include "qemu/timer.h"
 
 static void
 ifs_insque(struct mbuf *ifm, struct mbuf *ifmhead)
@@ -131,12 +129,10 @@ diddit:
 		}
 	}
 
-#ifndef FULL_BOLT
 	/*
 	 * This prevents us from malloc()ing too many mbufs
 	 */
 	if_start(ifm->slirp);
-#endif
 }
 
 /*
@@ -150,7 +146,7 @@ diddit:
  */
 void if_start(Slirp *slirp)
 {
-    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    uint64_t now = slirp->cb->clock_get_ns(slirp->opaque);
     bool from_batchq = false;
     struct mbuf *ifm, *ifm_next, *ifqt;
 

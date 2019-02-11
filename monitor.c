@@ -266,12 +266,12 @@ typedef struct QMPRequest QMPRequest;
 /* Protects mon_list, monitor_qapi_event_state, monitor_destroyed.  */
 static QemuMutex monitor_lock;
 static GHashTable *monitor_qapi_event_state;
-static QTAILQ_HEAD(mon_list, Monitor) mon_list;
+static QTAILQ_HEAD(, Monitor) mon_list;
 static bool monitor_destroyed;
 
 /* Protects mon_fdsets */
 static QemuMutex mon_fdsets_lock;
-static QLIST_HEAD(mon_fdsets, MonFdset) mon_fdsets;
+static QLIST_HEAD(, MonFdset) mon_fdsets;
 
 static int mon_refcount;
 
@@ -590,8 +590,7 @@ monitor_qapi_event_queue_no_reenter(QAPIEvent event, QDict *qdict)
     qemu_mutex_unlock(&monitor_lock);
 }
 
-static void
-monitor_qapi_event_queue(QAPIEvent event, QDict *qdict)
+void qapi_event_emit(QAPIEvent event, QDict *qdict)
 {
     /*
      * monitor_qapi_event_queue_no_reenter() is not reentrant: it
@@ -704,7 +703,6 @@ static void monitor_qapi_event_init(void)
 {
     monitor_qapi_event_state = g_hash_table_new(qapi_event_throttle_hash,
                                                 qapi_event_throttle_equal);
-    qmp_event_set_func_emit(monitor_qapi_event_queue);
 }
 
 static void handle_hmp_command(Monitor *mon, const char *cmdline);
@@ -4619,8 +4617,6 @@ void monitor_init(Chardev *chr, int flags)
 
 void monitor_cleanup(void)
 {
-    Monitor *mon, *next;
-
     /*
      * We need to explicitly stop the I/O thread (but not destroy it),
      * clean up the monitor resources, then destroy the I/O thread since
@@ -4634,7 +4630,8 @@ void monitor_cleanup(void)
     /* Flush output buffers and destroy monitors */
     qemu_mutex_lock(&monitor_lock);
     monitor_destroyed = true;
-    QTAILQ_FOREACH_SAFE(mon, &mon_list, entry, next) {
+    while (!QTAILQ_EMPTY(&mon_list)) {
+        Monitor *mon = QTAILQ_FIRST(&mon_list);
         QTAILQ_REMOVE(&mon_list, mon, entry);
         /* Permit QAPI event emission from character frontend release */
         qemu_mutex_unlock(&monitor_lock);

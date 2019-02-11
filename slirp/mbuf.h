@@ -72,7 +72,6 @@
  * How much free room there is
  */
 #define M_FREEROOM(m) (M_ROOM(m) - (m)->m_len)
-#define M_TRAILINGSPACE M_FREEROOM
 
 struct mbuf {
 	/* XXX should union some of these! */
@@ -86,7 +85,7 @@ struct mbuf {
 	int	m_size;			/* Size of mbuf, from m_dat or m_ext */
 	struct	socket *m_so;
 
-	caddr_t	m_data;			/* Current location of data */
+	char *m_data;			/* Current location of data */
 	int	m_len;			/* Amount of data in this mbuf, from m_data */
 
 	Slirp *slirp;

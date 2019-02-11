@@ -72,7 +72,7 @@ typedef struct MirrorBlockJob {
     unsigned long *in_flight_bitmap;
     int in_flight;
     int64_t bytes_in_flight;
-    QTAILQ_HEAD(MirrorOpList, MirrorOp) ops_in_flight;
+    QTAILQ_HEAD(, MirrorOp) ops_in_flight;
     int ret;
     bool unmap;
     int target_cluster_size;
@@ -1185,25 +1185,23 @@ do_sync_target_write(MirrorBlockJob *job, MirrorMethod method,
                      uint64_t offset, uint64_t bytes,
                      QEMUIOVector *qiov, int flags)
 {
-    BdrvDirtyBitmapIter *iter;
     QEMUIOVector target_qiov;
-    uint64_t dirty_offset;
-    int dirty_bytes;
+    uint64_t dirty_offset = offset;
+    uint64_t dirty_bytes;
 
     if (qiov) {
         qemu_iovec_init(&target_qiov, qiov->niov);
     }
-
-    iter = bdrv_dirty_iter_new(job->dirty_bitmap);
-    bdrv_set_dirty_iter(iter, offset);
 
     while (true) {
         bool valid_area;
         int ret;
 
         bdrv_dirty_bitmap_lock(job->dirty_bitmap);
-        valid_area = bdrv_dirty_iter_next_area(iter, offset + bytes,
-                                               &dirty_offset, &dirty_bytes);
+        dirty_bytes = MIN(offset + bytes - dirty_offset, INT_MAX);
+        valid_area = bdrv_dirty_bitmap_next_dirty_area(job->dirty_bitmap,
+                                                       &dirty_offset,
+                                                       &dirty_bytes);
         if (!valid_area) {
             bdrv_dirty_bitmap_unlock(job->dirty_bitmap);
             break;
@@ -1259,9 +1257,10 @@ do_sync_target_write(MirrorBlockJob *job, MirrorMethod method,
                 break;
             }
         }
+
+        dirty_offset += dirty_bytes;
     }
 
-    bdrv_dirty_iter_free(iter);
     if (qiov) {
         qemu_iovec_destroy(&target_qiov);
     }
@@ -1613,6 +1612,14 @@ static void mirror_start_job(const char *job_id, BlockDriverState *bs,
         goto fail;
     }
 
+    ret = block_job_add_bdrv(&s->common, "source", bs, 0,
+                             BLK_PERM_WRITE_UNCHANGED | BLK_PERM_WRITE |
+                             BLK_PERM_CONSISTENT_READ,
+                             errp);
+    if (ret < 0) {
+        goto fail;
+    }
+
     /* Required permissions are already taken with blk_new() */
     block_job_add_bdrv(&s->common, "target", target, 0, BLK_PERM_ALL,
                        &error_abort);
@@ -1650,6 +1657,9 @@ fail:
         g_free(s->replaces);
         blk_unref(s->target);
         bs_opaque->job = NULL;
+        if (s->dirty_bitmap) {
+            bdrv_release_dirty_bitmap(bs, s->dirty_bitmap);
+        }
         job_early_fail(&s->common.job);
     }
 

@@ -77,8 +77,8 @@ struct NBDExport {
     BlockBackend *blk;
     char *name;
     char *description;
-    off_t dev_offset;
-    off_t size;
+    uint64_t dev_offset;
+    uint64_t size;
     uint16_t nbdflags;
     QTAILQ_HEAD(, NBDClient) clients;
     QTAILQ_ENTRY(NBDExport) next;
@@ -438,8 +438,7 @@ static int nbd_negotiate_handle_export_name(NBDClient *client,
         error_setg(errp, "Bad length received");
         return -EINVAL;
     }
-    if (nbd_read(client->ioc, name, client->optlen, errp) < 0) {
-        error_prepend(errp, "read failed: ");
+    if (nbd_read(client->ioc, name, client->optlen, "export name", errp) < 0) {
         return -EIO;
     }
     name[client->optlen] = '\0';
@@ -1046,11 +1045,9 @@ static int nbd_negotiate_options(NBDClient *client, uint16_t myflags,
         ...           Rest of request
     */
 
-    if (nbd_read(client->ioc, &flags, sizeof(flags), errp) < 0) {
-        error_prepend(errp, "read failed: ");
+    if (nbd_read32(client->ioc, &flags, "flags", errp) < 0) {
         return -EIO;
     }
-    flags = be32_to_cpu(flags);
     trace_nbd_negotiate_options_flags(flags);
     if (flags & NBD_FLAG_C_FIXED_NEWSTYLE) {
         fixedNewstyle = true;
@@ -1070,30 +1067,23 @@ static int nbd_negotiate_options(NBDClient *client, uint16_t myflags,
         uint32_t option, length;
         uint64_t magic;
 
-        if (nbd_read(client->ioc, &magic, sizeof(magic), errp) < 0) {
-            error_prepend(errp, "read failed: ");
+        if (nbd_read64(client->ioc, &magic, "opts magic", errp) < 0) {
             return -EINVAL;
         }
-        magic = be64_to_cpu(magic);
         trace_nbd_negotiate_options_check_magic(magic);
         if (magic != NBD_OPTS_MAGIC) {
             error_setg(errp, "Bad magic received");
             return -EINVAL;
         }
 
-        if (nbd_read(client->ioc, &option,
-                     sizeof(option), errp) < 0) {
-            error_prepend(errp, "read failed: ");
+        if (nbd_read32(client->ioc, &option, "option", errp) < 0) {
             return -EINVAL;
         }
-        option = be32_to_cpu(option);
         client->opt = option;
 
-        if (nbd_read(client->ioc, &length, sizeof(length), errp) < 0) {
-            error_prepend(errp, "read failed: ");
+        if (nbd_read32(client->ioc, &length, "option length", errp) < 0) {
             return -EINVAL;
         }
-        length = be32_to_cpu(length);
         assert(!client->optlen);
         client->optlen = length;
 
@@ -1306,7 +1296,7 @@ static int nbd_receive_request(QIOChannel *ioc, NBDRequest *request,
     uint32_t magic;
     int ret;
 
-    ret = nbd_read(ioc, buf, sizeof(buf), errp);
+    ret = nbd_read(ioc, buf, sizeof(buf), "request", errp);
     if (ret < 0) {
         return ret;
     }
@@ -1455,10 +1445,11 @@ static void nbd_eject_notifier(Notifier *n, void *data)
     nbd_export_close(exp);
 }
 
-NBDExport *nbd_export_new(BlockDriverState *bs, off_t dev_offset, off_t size,
-                          uint16_t nbdflags, void (*close)(NBDExport *),
-                          bool writethrough, BlockBackend *on_eject_blk,
-                          Error **errp)
+NBDExport *nbd_export_new(BlockDriverState *bs, uint64_t dev_offset,
+                          uint64_t size, const char *name, const char *desc,
+                          const char *bitmap, uint16_t nbdflags,
+                          void (*close)(NBDExport *), bool writethrough,
+                          BlockBackend *on_eject_blk, Error **errp)
 {
     AioContext *ctx;
     BlockBackend *blk;
@@ -1471,6 +1462,7 @@ NBDExport *nbd_export_new(BlockDriverState *bs, off_t dev_offset, off_t size,
      * that BDRV_O_INACTIVE is cleared and the image is ready for write
      * access since the export could be available before migration handover.
      */
+    assert(name);
     ctx = bdrv_get_aio_context(bs);
     aio_context_acquire(ctx);
     bdrv_invalidate_cache(bs, NULL);
@@ -1493,15 +1485,50 @@ NBDExport *nbd_export_new(BlockDriverState *bs, off_t dev_offset, off_t size,
     exp->refcount = 1;
     QTAILQ_INIT(&exp->clients);
     exp->blk = blk;
+    assert(dev_offset <= INT64_MAX);
     exp->dev_offset = dev_offset;
+    exp->name = g_strdup(name);
+    exp->description = g_strdup(desc);
     exp->nbdflags = nbdflags;
-    exp->size = size < 0 ? blk_getlength(blk) : size;
-    if (exp->size < 0) {
-        error_setg_errno(errp, -exp->size,
-                         "Failed to determine the NBD export's length");
-        goto fail;
+    assert(size <= INT64_MAX - dev_offset);
+    exp->size = QEMU_ALIGN_DOWN(size, BDRV_SECTOR_SIZE);
+
+    if (bitmap) {
+        BdrvDirtyBitmap *bm = NULL;
+        BlockDriverState *bs = blk_bs(blk);
+
+        while (true) {
+            bm = bdrv_find_dirty_bitmap(bs, bitmap);
+            if (bm != NULL || bs->backing == NULL) {
+                break;
+            }
+
+            bs = bs->backing->bs;
+        }
+
+        if (bm == NULL) {
+            error_setg(errp, "Bitmap '%s' is not found", bitmap);
+            goto fail;
+        }
+
+        if ((nbdflags & NBD_FLAG_READ_ONLY) && bdrv_is_writable(bs) &&
+            bdrv_dirty_bitmap_enabled(bm)) {
+            error_setg(errp,
+                       "Enabled bitmap '%s' incompatible with readonly export",
+                       bitmap);
+            goto fail;
+        }
+
+        if (bdrv_dirty_bitmap_user_locked(bm)) {
+            error_setg(errp, "Bitmap '%s' is in use", bitmap);
+            goto fail;
+        }
+
+        bdrv_dirty_bitmap_set_qmp_locked(bm, true);
+        exp->export_bitmap = bm;
+        exp->export_bitmap_context = g_strdup_printf("qemu:dirty-bitmap:%s",
+                                                     bitmap);
     }
-    exp->size -= exp->size % BDRV_SECTOR_SIZE;
 
     exp->close = close;
     exp->ctx = blk_get_aio_context(blk);
@@ -1513,10 +1540,14 @@ NBDExport *nbd_export_new(BlockDriverState *bs, off_t dev_offset, off_t size,
         exp->eject_notifier.notify = nbd_eject_notifier;
         blk_add_remove_bs_notifier(on_eject_blk, &exp->eject_notifier);
     }
+    QTAILQ_INSERT_TAIL(&exports, exp, next);
+    nbd_export_get(exp);
     return exp;
 
 fail:
     blk_unref(blk);
+    g_free(exp->name);
+    g_free(exp->description);
     g_free(exp);
     return NULL;
 }
@@ -1533,43 +1564,29 @@ NBDExport *nbd_export_find(const char *name)
     return NULL;
 }
 
-void nbd_export_set_name(NBDExport *exp, const char *name)
-{
-    if (exp->name == name) {
-        return;
-    }
-
-    nbd_export_get(exp);
-    if (exp->name != NULL) {
-        g_free(exp->name);
-        exp->name = NULL;
-        QTAILQ_REMOVE(&exports, exp, next);
-        nbd_export_put(exp);
-    }
-    if (name != NULL) {
-        nbd_export_get(exp);
-        exp->name = g_strdup(name);
-        QTAILQ_INSERT_TAIL(&exports, exp, next);
-    }
-    nbd_export_put(exp);
-}
-
-void nbd_export_set_description(NBDExport *exp, const char *description)
-{
-    g_free(exp->description);
-    exp->description = g_strdup(description);
-}
-
 void nbd_export_close(NBDExport *exp)
 {
     NBDClient *client, *next;
 
     nbd_export_get(exp);
+    /*
+     * TODO: Should we expand QMP NbdServerRemoveNode enum to allow a
+     * close mode that stops advertising the export to new clients but
+     * still permits existing clients to run to completion? Because of
+     * that possibility, nbd_export_close() can be called more than
+     * once on an export.
+     */
     QTAILQ_FOREACH_SAFE(client, &exp->clients, next, next) {
         client_close(client, true);
     }
-    nbd_export_set_name(exp, NULL);
-    nbd_export_set_description(exp, NULL);
+    if (exp->name) {
+        nbd_export_put(exp);
+        g_free(exp->name);
+        exp->name = NULL;
+        QTAILQ_REMOVE(&exports, exp, next);
+    }
+    g_free(exp->description);
+    exp->description = NULL;
     nbd_export_put(exp);
 }
 
@@ -1983,7 +2000,7 @@ static unsigned int bitmap_to_extents(BdrvDirtyBitmap *bitmap, uint64_t offset,
         bool next_dirty = !dirty;
 
         if (dirty) {
-            end = bdrv_dirty_bitmap_next_zero(bitmap, begin);
+            end = bdrv_dirty_bitmap_next_zero(bitmap, begin, UINT64_MAX);
         } else {
             bdrv_set_dirty_iter(it, begin);
             end = bdrv_dirty_iter_next(it);
@@ -2084,8 +2101,9 @@ static int nbd_co_receive_request(NBDRequestData *req, NBDRequest *request,
         }
     }
     if (request->type == NBD_CMD_WRITE) {
-        if (nbd_read(client->ioc, req->data, request->len, errp) < 0) {
-            error_prepend(errp, "reading from socket failed: ");
+        if (nbd_read(client->ioc, req->data, request->len, "CMD_WRITE data",
+                     errp) < 0)
+        {
             return -EIO;
         }
         req->complete = true;
@@ -2103,10 +2121,10 @@ static int nbd_co_receive_request(NBDRequestData *req, NBDRequest *request,
         return -EROFS;
     }
     if (request->from > client->exp->size ||
-        request->from + request->len > client->exp->size) {
+        request->len > client->exp->size - request->from) {
         error_setg(errp, "operation past EOF; From: %" PRIu64 ", Len: %" PRIu32
                    ", Size: %" PRIu64, request->from, request->len,
-                   (uint64_t)client->exp->size);
+                   client->exp->size);
         return (request->type == NBD_CMD_WRITE ||
                 request->type == NBD_CMD_WRITE_ZEROES) ? -ENOSPC : -EINVAL;
     }
@@ -2429,45 +2447,4 @@ void nbd_client_new(QIOChannelSocket *sioc,
 
     co = qemu_coroutine_create(nbd_co_client_start, client);
     qemu_coroutine_enter(co);
-}
-
-void nbd_export_bitmap(NBDExport *exp, const char *bitmap,
-                       const char *bitmap_export_name, Error **errp)
-{
-    BdrvDirtyBitmap *bm = NULL;
-    BlockDriverState *bs = blk_bs(exp->blk);
-
-    if (exp->export_bitmap) {
-        error_setg(errp, "Export bitmap is already set");
-        return;
-    }
-
-    while (true) {
-        bm = bdrv_find_dirty_bitmap(bs, bitmap);
-        if (bm != NULL || bs->backing == NULL) {
-            break;
-        }
-
-        bs = bs->backing->bs;
-    }
-
-    if (bm == NULL) {
-        error_setg(errp, "Bitmap '%s' is not found", bitmap);
-        return;
-    }
-
-    if (bdrv_dirty_bitmap_enabled(bm)) {
-        error_setg(errp, "Bitmap '%s' is enabled", bitmap);
-        return;
-    }
-
-    if (bdrv_dirty_bitmap_user_locked(bm)) {
-        error_setg(errp, "Bitmap '%s' is in use", bitmap);
-        return;
-    }
-
-    bdrv_dirty_bitmap_set_qmp_locked(bm, true);
-    exp->export_bitmap = bm;
-    exp->export_bitmap_context =
-            g_strdup_printf("qemu:dirty-bitmap:%s", bitmap_export_name);
 }

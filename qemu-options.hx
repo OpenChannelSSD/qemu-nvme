@@ -538,8 +538,8 @@ ETEXI
 DEF("name", HAS_ARG, QEMU_OPTION_name,
     "-name string1[,process=string2][,debug-threads=on|off]\n"
     "                set the name of the guest\n"
-    "                string1 sets the window title and string2 the process name (on Linux)\n"
-    "                When debug-threads is enabled, individual threads are given a separate name (on Linux)\n"
+    "                string1 sets the window title and string2 the process name\n"
+    "                When debug-threads is enabled, individual threads are given a separate name\n"
     "                NOTE: The thread names are for debugging and not a stable API.\n",
     QEMU_ARCH_ALL)
 STEXI
@@ -1292,17 +1292,6 @@ output such as guest graphics, guest console, and the QEMU monitor in a
 window. With this option, QEMU can display the VGA output when in text
 mode using a curses/ncurses interface. Nothing is displayed in graphical
 mode.
-ETEXI
-
-DEF("no-frame", 0, QEMU_OPTION_no_frame,
-    "-no-frame       open SDL window without a frame and window decorations\n",
-    QEMU_ARCH_ALL)
-STEXI
-@item -no-frame
-@findex -no-frame
-Do not use decorations for SDL windows and start them using the whole
-available screen space. This makes the using QEMU in a dedicated desktop
-workspace more convenient.
 ETEXI
 
 DEF("alt-grab", 0, QEMU_OPTION_alt_grab,
@@ -3381,26 +3370,11 @@ Enable KVM full virtualization support. This option is only available
 if KVM support is enabled when compiling.
 ETEXI
 
-DEF("enable-hax", 0, QEMU_OPTION_enable_hax, \
-    "-enable-hax     enable HAX virtualization support\n", QEMU_ARCH_I386)
-STEXI
-@item -enable-hax
-@findex -enable-hax
-Enable HAX (Hardware-based Acceleration eXecution) support. This option
-is only available if HAX support is enabled when compiling. HAX is only
-applicable to MAC and Windows platform, and thus does not conflict with
-KVM. This option is deprecated, use @option{-accel hax} instead.
-ETEXI
-
 DEF("xen-domid", HAS_ARG, QEMU_OPTION_xen_domid,
     "-xen-domid id   specify xen guest domain id\n", QEMU_ARCH_ALL)
-DEF("xen-create", 0, QEMU_OPTION_xen_create,
-    "-xen-create     create domain using xen hypercalls, bypassing xend\n"
-    "                warning: should not be used when xend is in use\n",
-    QEMU_ARCH_ALL)
 DEF("xen-attach", 0, QEMU_OPTION_xen_attach,
     "-xen-attach     attach to existing xen domain\n"
-    "                xend will use this when starting QEMU\n",
+    "                libxl will use this when starting QEMU\n",
     QEMU_ARCH_ALL)
 DEF("xen-domid-restrict", 0, QEMU_OPTION_xen_domid_restrict,
     "-xen-domid-restrict     restrict set of available xen operations\n"
@@ -3411,14 +3385,10 @@ STEXI
 @item -xen-domid @var{id}
 @findex -xen-domid
 Specify xen guest domain @var{id} (XEN only).
-@item -xen-create
-@findex -xen-create
-Create domain using xen hypercalls, bypassing xend.
-Warning: should not be used when xend is in use (XEN only).
 @item -xen-attach
 @findex -xen-attach
 Attach to existing xen domain.
-xend will use this when starting QEMU (XEN only).
+libxl will use this when starting QEMU (XEN only).
 @findex -xen-domid-restrict
 Restrict set of available xen operations to specified domain id (XEN only).
 ETEXI
@@ -3633,16 +3603,6 @@ character to Control-t.
 @item -echr 0x14
 @itemx -echr 20
 @end table
-ETEXI
-
-DEF("virtioconsole", HAS_ARG, QEMU_OPTION_virtiocon, \
-    "-virtioconsole c\n" \
-    "                set virtio console\n", QEMU_ARCH_ALL)
-STEXI
-@item -virtioconsole @var{c}
-@findex -virtioconsole
-Set virtio console.
-This option is deprecated, please use @option{-device virtconsole} instead.
 ETEXI
 
 DEF("show-cursor", 0, QEMU_OPTION_show_cursor, \

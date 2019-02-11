@@ -211,13 +211,13 @@ int pci_bar(PCIDevice *d, int reg)
 
 static inline int pci_irq_state(PCIDevice *d, int irq_num)
 {
-	return (d->irq_state >> irq_num) & 0x1;
+        return (d->irq_state >> irq_num) & 0x1;
 }
 
 static inline void pci_set_irq_state(PCIDevice *d, int irq_num, int level)
 {
-	d->irq_state &= ~(0x1 << irq_num);
-	d->irq_state |= level << irq_num;
+        d->irq_state &= ~(0x1 << irq_num);
+        d->irq_state |= level << irq_num;
 }
 
 static void pci_change_irq_level(PCIDevice *pci_dev, int irq_num, int change)
@@ -333,6 +333,13 @@ static void pci_host_bus_register(DeviceState *host)
     QLIST_INSERT_HEAD(&pci_host_bridges, host_bridge, next);
 }
 
+static void pci_host_bus_unregister(DeviceState *host)
+{
+    PCIHostState *host_bridge = PCI_HOST_BRIDGE(host);
+
+    QLIST_REMOVE(host_bridge, next);
+}
+
 PCIBus *pci_device_root_bus(const PCIDevice *d)
 {
     PCIBus *bus = pci_get_bus(d);
@@ -379,6 +386,11 @@ static void pci_root_bus_init(PCIBus *bus, DeviceState *parent,
     pci_host_bus_register(parent);
 }
 
+static void pci_bus_uninit(PCIBus *bus)
+{
+    pci_host_bus_unregister(BUS(bus)->parent);
+}
+
 bool pci_bus_is_express(PCIBus *bus)
 {
     return object_dynamic_cast(OBJECT(bus), TYPE_PCIE_BUS);
@@ -413,6 +425,12 @@ PCIBus *pci_root_bus_new(DeviceState *parent, const char *name,
     return bus;
 }
 
+void pci_root_bus_cleanup(PCIBus *bus)
+{
+    pci_bus_uninit(bus);
+    object_unparent(OBJECT(bus));
+}
+
 void pci_bus_irqs(PCIBus *bus, pci_set_irq_fn set_irq, pci_map_irq_fn map_irq,
                   void *irq_opaque, int nirq)
 {
@@ -421,6 +439,15 @@ void pci_bus_irqs(PCIBus *bus, pci_set_irq_fn set_irq, pci_map_irq_fn map_irq,
     bus->irq_opaque = irq_opaque;
     bus->nirq = nirq;
     bus->irq_count = g_malloc0(nirq * sizeof(bus->irq_count[0]));
+}
+
+void pci_bus_irqs_cleanup(PCIBus *bus)
+{
+    bus->set_irq = NULL;
+    bus->map_irq = NULL;
+    bus->irq_opaque = NULL;
+    bus->nirq = 0;
+    g_free(bus->irq_count);
 }
 
 PCIBus *pci_register_root_bus(DeviceState *parent, const char *name,
@@ -437,6 +464,12 @@ PCIBus *pci_register_root_bus(DeviceState *parent, const char *name,
                            address_space_io, devfn_min, typename);
     pci_bus_irqs(bus, set_irq, map_irq, irq_opaque, nirq);
     return bus;
+}
+
+void pci_unregister_root_bus(PCIBus *bus)
+{
+    pci_bus_irqs_cleanup(bus);
+    pci_root_bus_cleanup(bus);
 }
 
 int pci_bus_num(PCIBus *s)
@@ -571,8 +604,8 @@ const VMStateDescription vmstate_pci_device = {
                                    0, vmstate_info_pci_config,
                                    PCIE_CONFIG_SPACE_SIZE),
         VMSTATE_BUFFER_UNSAFE_INFO(irq_state, PCIDevice, 2,
-				   vmstate_info_pci_irq_state,
-				   PCI_NUM_PINS * sizeof(int32_t)),
+                                   vmstate_info_pci_irq_state,
+                                   PCI_NUM_PINS * sizeof(int32_t)),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -624,21 +657,21 @@ static int pci_parse_devaddr(const char *addr, int *domp, int *busp,
     p = addr;
     val = strtoul(p, &e, 16);
     if (e == p)
-	return -1;
+        return -1;
     if (*e == ':') {
-	bus = val;
-	p = e + 1;
-	val = strtoul(p, &e, 16);
-	if (e == p)
-	    return -1;
-	if (*e == ':') {
-	    dom = bus;
-	    bus = val;
-	    p = e + 1;
-	    val = strtoul(p, &e, 16);
-	    if (e == p)
-		return -1;
-	}
+        bus = val;
+        p = e + 1;
+        val = strtoul(p, &e, 16);
+        if (e == p)
+            return -1;
+        if (*e == ':') {
+            dom = bus;
+            bus = val;
+            p = e + 1;
+            val = strtoul(p, &e, 16);
+            if (e == p)
+                return -1;
+        }
     }
 
     slot = val;
@@ -657,10 +690,10 @@ static int pci_parse_devaddr(const char *addr, int *domp, int *busp,
 
     /* if funcp == NULL func is 0 */
     if (dom > 0xffff || bus > 0xff || slot > 0x1f || func > 7)
-	return -1;
+        return -1;
 
     if (*e)
-	return -1;
+        return -1;
 
     *domp = dom;
     *busp = bus;
@@ -1217,7 +1250,7 @@ pcibus_t pci_get_bar_addr(PCIDevice *pci_dev, int region_num)
 }
 
 static pcibus_t pci_bar_address(PCIDevice *d,
-				int reg, uint8_t type, pcibus_t size)
+                                int reg, uint8_t type, pcibus_t size)
 {
     pcibus_t new_addr, last_addr;
     int bar = pci_bar(d, reg);
@@ -1353,6 +1386,10 @@ uint32_t pci_default_read_config(PCIDevice *d,
 {
     uint32_t val = 0;
 
+    if (pci_is_express_downstream_port(d) &&
+        ranges_overlap(address, len, d->exp.exp_cap + PCI_EXP_LNKSTA, 2)) {
+        pcie_sync_bridge_lnk(d);
+    }
     memcpy(&val, d->config + address, len);
     return le32_to_cpu(val);
 }

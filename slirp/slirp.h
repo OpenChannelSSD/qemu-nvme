@@ -1,14 +1,19 @@
 #ifndef SLIRP_H
 #define SLIRP_H
 
-#include "slirp_config.h"
-
 #ifdef _WIN32
 
-typedef char *caddr_t;
+/* as defined in sdkddkver.h */
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600 /* Vista */
+#endif
+/* reduces the number of implicitly included headers */
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 
-# include <windows.h>
 # include <winsock2.h>
+# include <windows.h>
 # include <ws2tcpip.h>
 # include <sys/timeb.h>
 # include <iphlpapi.h>
@@ -19,42 +24,15 @@ typedef char *caddr_t;
 # endif
 #endif
 
-#ifdef HAVE_SYS_BITYPES_H
-# include <sys/bitypes.h>
-#endif
-
 #ifndef _WIN32
 #include <sys/uio.h>
-#endif
-
-#ifndef _WIN32
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#endif
-
-#ifndef NO_UNIX_SOCKETS
-#include <sys/un.h>
-#endif
-#ifdef HAVE_SYS_SIGNAL_H
-# include <sys/signal.h>
-#endif
-#ifndef _WIN32
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #endif
 
-#if defined(HAVE_SYS_IOCTL_H)
-# include <sys/ioctl.h>
-#endif
-
-#ifdef HAVE_SYS_SELECT_H
-# include <sys/select.h>
-#endif
-
-#ifdef HAVE_SYS_WAIT_H
-# include <sys/wait.h>
-#endif
-
-#ifdef HAVE_SYS_FILIO_H
+#ifdef __APPLE__
 # include <sys/filio.h>
 #endif
 
@@ -64,16 +42,9 @@ typedef char *caddr_t;
 #define remque slirp_remque
 #define quehead slirp_quehead
 
-#ifdef HAVE_SYS_STROPTS_H
-#include <sys/stropts.h>
-#endif
-
-
 #include "debug.h"
-
-#include "qemu/queue.h"
-#include "qemu/sockets.h"
-#include "net/eth.h"
+#include "util.h"
+#include "qtailq.h"
 
 #include "libslirp.h"
 #include "ip.h"
@@ -118,7 +89,7 @@ struct slirp_arphdr {
     uint32_t      ar_sip;           /* sender IP address       */
     unsigned char ar_tha[ETH_ALEN]; /* target hardware address */
     uint32_t      ar_tip;           /* target IP address       */
-} QEMU_PACKED;
+} SLIRP_PACKED;
 
 #define ARP_TABLE_SIZE 16
 
@@ -135,7 +106,7 @@ bool arp_table_search(Slirp *slirp, uint32_t ip_addr,
 struct ndpentry {
     unsigned char   eth_addr[ETH_ALEN];     /* sender hardware address */
     struct in6_addr ip_addr;                /* sender IP address       */
-} QEMU_PACKED;
+} SLIRP_PACKED;
 
 #define NDP_TABLE_SIZE 16
 
@@ -151,8 +122,8 @@ bool ndp_table_search(Slirp *slirp, struct in6_addr ip_addr,
 
 struct Slirp {
     QTAILQ_ENTRY(Slirp) entry;
-    u_int time_fasttimo;
-    u_int last_slowtimo;
+    unsigned time_fasttimo;
+    unsigned last_slowtimo;
     bool do_slowtimo;
 
     bool in_enabled, in6_enabled;
@@ -172,7 +143,7 @@ struct Slirp {
     char client_hostname[33];
 
     int restricted;
-    struct ex_list *exec_list;
+    struct gfwd_list *guestfwd_list;
 
     /* mbuf states */
     struct quehead m_freelist;
@@ -218,18 +189,16 @@ struct Slirp {
     NdpTable ndp_table;
 
     GRand *grand;
-    QEMUTimer *ra_timer;
+    void *ra_timer;
 
+    const SlirpCb *cb;
     void *opaque;
 };
 
-extern Slirp *slirp_instance;
-
-#ifndef NULL
-#define NULL (void *)0
-#endif
-
 void if_start(Slirp *);
+
+int get_dns_addr(struct in_addr *pdns_addr);
+int get_dns6_addr(struct in6_addr *pdns6_addr, uint32_t *scope_id);
 
 /* ncsi.c */
 void ncsi_input(Slirp *slirp, const uint8_t *pkt, int pkt_len);
@@ -238,7 +207,9 @@ void ncsi_input(Slirp *slirp, const uint8_t *pkt, int pkt_len);
 #include <netdb.h>
 #endif
 
-#define SO_OPTIONS DO_KEEPALIVE
+
+extern bool slirp_do_keepalive;
+
 #define TCP_MAXIDLE (TCPTV_KEEPCNT * TCPTV_KEEPINTVL)
 
 /* dnssearch.c */
@@ -272,7 +243,7 @@ int ip6_output(struct socket *, struct mbuf *, int fast);
 
 /* tcp_input.c */
 void tcp_input(register struct mbuf *, int, struct socket *, unsigned short af);
-int tcp_mss(register struct tcpcb *, u_int);
+int tcp_mss(register struct tcpcb *, unsigned);
 
 /* tcp_output.c */
 int tcp_output(register struct tcpcb *);
@@ -294,5 +265,10 @@ uint8_t tcp_tos(struct socket *);
 int tcp_emu(struct socket *, struct mbuf *);
 int tcp_ctl(struct socket *);
 struct tcpcb *tcp_drop(struct tcpcb *tp, int err);
+
+struct socket *
+slirp_find_ctl_socket(Slirp *slirp, struct in_addr guest_addr, int guest_port);
+
+void slirp_send_packet_all(Slirp *slirp, const void *buf, size_t len);
 
 #endif

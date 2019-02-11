@@ -13,10 +13,10 @@
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <http://www.gnu.org/licenses/>.
  *
  * This file contain code under public domain from the hvdos project:
  * https://github.com/mist64/hvdos
@@ -499,7 +499,6 @@ void hvf_reset_vcpu(CPUState *cpu) {
     }
 
     hv_vm_sync_tsc(0);
-    cpu->halted = 0;
     hv_vcpu_invalidate_tlb(cpu->hvf_fd);
     hv_vcpu_flush(cpu->hvf_fd);
 }
@@ -582,8 +581,6 @@ int hvf_init_vcpu(CPUState *cpu)
 
     wvmcs(cpu->hvf_fd, VMCS_TPR_THRESHOLD, 0);
 
-    hvf_reset_vcpu(cpu);
-
     x86cpu = X86_CPU(cpu);
     x86cpu->env.xsave_buf = qemu_memalign(4096, 4096);
 
@@ -658,8 +655,6 @@ int hvf_vcpu_exec(CPUState *cpu)
     CPUX86State *env = &x86_cpu->env;
     int ret = 0;
     uint64_t rip = 0;
-
-    cpu->halted = 0;
 
     if (hvf_process_events(cpu)) {
         return EXCP_HLT;

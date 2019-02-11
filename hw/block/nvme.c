@@ -141,7 +141,6 @@
 #include "qemu/cutils.h"
 #include "trace.h"
 #include "nvme.h"
-#include "trace.h"
 
 #define NVME_MAX_QS PCI_MSIX_FLAGS_QSIZE
 #define NVME_MAX_QUEUE_ENTRIES  0xffff
@@ -4043,23 +4042,24 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     n->temperature = NVME_TEMPERATURE;
 }
 
-static void nvme_init_pci(NvmeCtrl *n)
+static void nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev)
 {
-    uint8_t *pci_conf = n->parent_obj.config;
+    uint8_t *pci_conf = pci_dev->config;
 
     pci_conf[PCI_INTERRUPT_PIN] = 1;
     pci_config_set_prog_interface(pci_conf, 0x2);
     pci_config_set_vendor_id(pci_conf, n->vid);
     pci_config_set_device_id(pci_conf, n->did);
     pci_config_set_class(pci_conf, PCI_CLASS_STORAGE_EXPRESS);
-    pcie_endpoint_cap_init(&n->parent_obj, 0x80);
+    pcie_endpoint_cap_init(pci_dev, 0x80);
+
 
     memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
         n->reg_size);
-    pci_register_bar(&n->parent_obj, 0,
+    pci_register_bar(pci_dev, 0,
         PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64,
         &n->iomem);
-    msix_init_exclusive_bar(&n->parent_obj, n->num_queues, 4, NULL);
+    msix_init_exclusive_bar(pci_dev, n->num_queues, 4, NULL);
 
     if (n->cmb_size_mb) {
 
@@ -4080,9 +4080,9 @@ static void nvme_init_pci(NvmeCtrl *n)
         n->cmbuf = g_malloc0(NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
         memory_region_init_io(&n->ctrl_mem, OBJECT(n), &nvme_cmb_ops, n,
                               "nvme-cmb", NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
-        pci_register_bar(&n->parent_obj, NVME_CMBLOC_BIR(n->bar.cmbloc),
-            PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64,
-            &n->ctrl_mem);
+        pci_register_bar(pci_dev, NVME_CMBLOC_BIR(n->bar.cmbloc),
+            PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64 |
+            PCI_BASE_ADDRESS_MEM_PREFETCH, &n->ctrl_mem);
     }
 }
 
@@ -4129,7 +4129,7 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
     n->features.int_vector_config = g_malloc0_n(n->num_queues,
         sizeof(*n->features.int_vector_config));
 
-    nvme_init_pci(n);
+    nvme_init_pci(n, pci_dev);
     nvme_init_ctrl(n);
 
     for (int i = 0; i < n->num_namespaces; i++) {
@@ -4258,7 +4258,7 @@ static void nvme_instance_init(Object *obj)
 }
 
 static const TypeInfo nvme_info = {
-    .name          = "nvme",
+    .name          = TYPE_NVME,
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(NvmeCtrl),
     .class_init    = nvme_class_init,

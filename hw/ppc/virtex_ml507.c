@@ -105,7 +105,7 @@ static PowerPCCPU *ppc440_init_xilinx(ram_addr_t *ram_size,
     ppc_dcr_init(env, NULL, NULL);
 
     /* interrupt controller */
-    irqs = g_malloc0(sizeof(qemu_irq) * PPCUIC_OUTPUT_NB);
+    irqs = g_new0(qemu_irq, PPCUIC_OUTPUT_NB);
     irqs[PPCUIC_OUTPUT_INT] = ((qemu_irq *)env->irq_inputs)[PPC40x_INPUT_INT];
     irqs[PPCUIC_OUTPUT_CINT] = ((qemu_irq *)env->irq_inputs)[PPC40x_INPUT_CINT];
     ppcuic_init(env, irqs, 0x0C0, 0, 1);
@@ -258,7 +258,7 @@ static void virtex_init(MachineState *machine)
         hwaddr boot_offset;
 
         /* Boots a kernel elf binary.  */
-        kernel_size = load_elf(kernel_filename, NULL, NULL,
+        kernel_size = load_elf(kernel_filename, NULL, NULL, NULL,
                                &entry, &low, &high, 1, PPC_ELF_MACHINE,
                                0, 0);
         boot_info.bootstrap_pc = entry & 0x00ffffff;

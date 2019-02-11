@@ -113,6 +113,10 @@
 #define GCC_FMT_ATTR(n, m)
 #endif
 
+#ifndef __has_warning
+#define __has_warning(x) 0 /* compatibility with non-clang compilers */
+#endif
+
 #ifndef __has_feature
 #define __has_feature(x) 0 /* compatibility with non-clang compilers */
 #endif
@@ -149,6 +153,21 @@
 # define QEMU_ERROR(X) __attribute__((error(X)))
 #else
 # define QEMU_ERROR(X)
+#endif
+
+/*
+ * The nonstring variable attribute specifies that an object or member
+ * declaration with type array of char or pointer to char is intended
+ * to store character arrays that do not necessarily contain a terminating
+ * NUL character. This is useful in detecting uses of such arrays or pointers
+ * with functions that expect NUL-terminated strings, and to avoid warnings
+ * when such an array or pointer is used as an argument to a bounded string
+ * manipulation function such as strncpy.
+ */
+#if __has_attribute(nonstring)
+# define QEMU_NONSTRING __attribute__((nonstring))
+#else
+# define QEMU_NONSTRING
 #endif
 
 /* Implement C11 _Generic via GCC builtins.  Example:

@@ -12,18 +12,17 @@
  * Niels de Vos.  David S. Ahern continued working on it.  Kevin Wolf,
  * Jan Kiszka and Vincent Palatin contributed bugfixes.
  *
- *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or(at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
+ * You should have received a copy of the GNU Lesser General Public License
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
@@ -1823,7 +1822,7 @@ static int ehci_state_fetchqtd(EHCIQueue *q)
             break;
         case EHCI_ASYNC_INFLIGHT:
             /* Check if the guest has added new tds to the queue */
-            again = ehci_fill_queue(QTAILQ_LAST(&q->packets, pkts_head));
+            again = ehci_fill_queue(QTAILQ_LAST(&q->packets));
             /* Unfinished async handled packet, go horizontal */
             ehci_set_state(q->ehci, q->async, EST_HORIZONTALQH);
             break;

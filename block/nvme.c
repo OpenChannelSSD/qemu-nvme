@@ -390,6 +390,7 @@ static void nvme_cmd_sync_cb(void *opaque, int ret)
 {
     int *pret = opaque;
     *pret = ret;
+    aio_wait_kick();
 }
 
 static int nvme_cmd_sync(BlockDriverState *bs, NVMeQueuePair *q,
@@ -837,7 +838,7 @@ try_map:
         }
 
         for (j = 0; j < qiov->iov[i].iov_len / s->page_size; j++) {
-            pagelist[entries++] = iova + j * s->page_size;
+            pagelist[entries++] = cpu_to_le64(iova + j * s->page_size);
         }
         trace_nvme_cmd_map_qiov_iov(s, i, qiov->iov[i].iov_base,
                                     qiov->iov[i].iov_len / s->page_size);
@@ -850,20 +851,16 @@ try_map:
     case 0:
         abort();
     case 1:
-        cmd->dptr.prp.prp1 = cpu_to_le64(pagelist[0]);
+        cmd->dptr.prp.prp1 = pagelist[0];
         cmd->dptr.prp.prp2 = 0;
         break;
     case 2:
-        cmd->dptr.prp.prp1 = cpu_to_le64(pagelist[0]);
-        cmd->dptr.prp.prp2 = cpu_to_le64(pagelist[1]);;
+        cmd->dptr.prp.prp1 = pagelist[0];
+        cmd->dptr.prp.prp2 = pagelist[1];
         break;
     default:
-        cmd->dptr.prp.prp1 = cpu_to_le64(pagelist[0]);
-        cmd->dptr.prp.prp2 = cpu_to_le64(req->prp_list_iova);
-        for (i = 0; i < entries - 1; ++i) {
-            pagelist[i] = cpu_to_le64(pagelist[i + 1]);
-        }
-        pagelist[entries - 1] = 0;
+        cmd->dptr.prp.prp1 = pagelist[0];
+        cmd->dptr.prp.prp2 = cpu_to_le64(req->prp_list_iova + sizeof(uint64_t));
         break;
     }
     trace_nvme_cmd_map_qiov(s, cmd, req, qiov, entries);

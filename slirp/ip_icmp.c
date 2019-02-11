@@ -30,9 +30,12 @@
  * ip_icmp.c,v 1.7 1995/05/30 08:09:42 rgrimes Exp
  */
 
-#include "qemu/osdep.h"
 #include "slirp.h"
 #include "ip_icmp.h"
+
+#ifndef WITH_ICMP_ERROR_MSG
+#define WITH_ICMP_ERROR_MSG 0
+#endif
 
 /* The message sent when emulating PING */
 /* Be nice and tell them it's just a pseudo-ping packet */
@@ -79,7 +82,7 @@ static int icmp_send(struct socket *so, struct mbuf *m, int hlen)
     struct ip *ip = mtod(m, struct ip *);
     struct sockaddr_in addr;
 
-    so->s = qemu_socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+    so->s = slirp_socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
     if (so->s == -1) {
         return -1;
     }
@@ -99,8 +102,8 @@ static int icmp_send(struct socket *so, struct mbuf *m, int hlen)
 
     if (sendto(so->s, m->m_data + hlen, m->m_len - hlen, 0,
                (struct sockaddr *)&addr, sizeof(addr)) == -1) {
-        DEBUG_MISC((dfd, "icmp_input icmp sendto tx errno = %d-%s\n",
-                    errno, strerror(errno)));
+        DEBUG_MISC("icmp_input icmp sendto tx errno = %d-%s",
+                   errno, strerror(errno));
         icmp_send_error(m, ICMP_UNREACH, ICMP_UNREACH_NET, 0, strerror(errno));
         icmp_detach(so);
     }
@@ -110,7 +113,8 @@ static int icmp_send(struct socket *so, struct mbuf *m, int hlen)
 
 void icmp_detach(struct socket *so)
 {
-    closesocket(so->s);
+    so->slirp->cb->unregister_poll_fd(so->s, so->slirp->opaque);
+    slirp_closesocket(so->s);
     sofree(so);
 }
 
@@ -165,8 +169,8 @@ icmp_input(struct mbuf *m, int hlen)
         return;
       }
       if (udp_attach(so, AF_INET) == -1) {
-	DEBUG_MISC((dfd,"icmp_input udp_attach errno = %d-%s\n",
-		    errno,strerror(errno)));
+	DEBUG_MISC("icmp_input udp_attach errno = %d-%s",
+               errno,strerror(errno));
 	sofree(so);
 	m_free(m);
 	goto end_error;
@@ -188,8 +192,8 @@ icmp_input(struct mbuf *m, int hlen)
 
       if(sendto(so->s, icmp_ping_msg, strlen(icmp_ping_msg), 0,
 		(struct sockaddr *)&addr, sockaddr_size(&addr)) == -1) {
-	DEBUG_MISC((dfd,"icmp_input udp sendto tx errno = %d-%s\n",
-		    errno,strerror(errno)));
+	DEBUG_MISC("icmp_input udp sendto tx errno = %d-%s",
+               errno,strerror(errno));
 	icmp_send_error(m, ICMP_UNREACH, ICMP_UNREACH_NET, 0, strerror(errno));
 	udp_detach(so);
       }
@@ -236,7 +240,7 @@ end_error:
 
 #define ICMP_MAXDATALEN (IP_MSS-28)
 void
-icmp_send_error(struct mbuf *msrc, u_char type, u_char code, int minsize,
+icmp_send_error(struct mbuf *msrc, uint8_t type, uint8_t code, int minsize,
            const char *message)
 {
   unsigned hlen, shlen, s_ip_len;
@@ -253,13 +257,12 @@ icmp_send_error(struct mbuf *msrc, u_char type, u_char code, int minsize,
   /* check msrc */
   if(!msrc) goto end_error;
   ip = mtod(msrc, struct ip *);
-#ifdef DEBUG
-  { char bufa[20], bufb[20];
+  if (slirp_debug & DBG_MISC) {
+    char bufa[20], bufb[20];
     strcpy(bufa, inet_ntoa(ip->ip_src));
     strcpy(bufb, inet_ntoa(ip->ip_dst));
-    DEBUG_MISC((dfd, " %.16s to %.16s\n", bufa, bufb));
+    DEBUG_MISC(" %.16s to %.16s", bufa, bufb);
   }
-#endif
   if(ip->ip_off & IP_OFFMASK) goto end_error;    /* Only reply to fragment 0 */
 
   /* Do not reply to source-only IPs */
@@ -319,8 +322,7 @@ icmp_send_error(struct mbuf *msrc, u_char type, u_char code, int minsize,
   HTONS(icp->icmp_ip.ip_id);
   HTONS(icp->icmp_ip.ip_off);
 
-#ifdef DEBUG
-  if(message) {           /* DEBUG : append message to ICMP packet */
+  if (message && WITH_ICMP_ERROR_MSG) { /* append message to ICMP packet */
     int message_len;
     char *cpnt;
     message_len=strlen(message);
@@ -329,7 +331,6 @@ icmp_send_error(struct mbuf *msrc, u_char type, u_char code, int minsize,
     memcpy(cpnt, message, message_len);
     m->m_len+=message_len;
   }
-#endif
 
   icp->icmp_cksum = 0;
   icp->icmp_cksum = cksum(m, m->m_len);
@@ -387,7 +388,7 @@ icmp_reflect(struct mbuf *m)
      * Strip out original options by copying rest of first
      * mbuf's data back, and adjust the IP length.
      */
-    memmove((caddr_t)(ip + 1), (caddr_t)ip + hlen,
+    memmove((char *)(ip + 1), (char *)ip + hlen,
 	    (unsigned )(m->m_len - hlen));
     hlen -= optlen;
     ip->ip_hl = hlen >> 2;
@@ -411,7 +412,7 @@ void icmp_receive(struct socket *so)
     struct mbuf *m = so->so_m;
     struct ip *ip = mtod(m, struct ip *);
     int hlen = ip->ip_hl << 2;
-    u_char error_code;
+    uint8_t error_code;
     struct icmp *icp;
     int id, len;
 
@@ -420,7 +421,7 @@ void icmp_receive(struct socket *so)
     icp = mtod(m, struct icmp *);
 
     id = icp->icmp_id;
-    len = qemu_recv(so->s, icp, M_ROOM(m), 0);
+    len = slirp_recv(so->s, icp, M_ROOM(m), 0);
     /*
      * The behavior of reading SOCK_DGRAM+IPPROTO_ICMP sockets is inconsistent
      * between host OSes.  On Linux, only the ICMP header and payload is
@@ -457,8 +458,8 @@ void icmp_receive(struct socket *so)
         } else {
             error_code = ICMP_UNREACH_HOST;
         }
-        DEBUG_MISC((dfd, " udp icmp rx errno = %d-%s\n", errno,
-                    strerror(errno)));
+        DEBUG_MISC(" udp icmp rx errno = %d-%s", errno,
+                   strerror(errno));
         icmp_send_error(so->so_m, ICMP_UNREACH, error_code, 0, strerror(errno));
     } else {
         icmp_reflect(so->so_m);

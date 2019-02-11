@@ -55,15 +55,9 @@
 /* global register indexes */
 static char cpu_reg_names[10*3 + 22*4 /* GPR */
     + 10*4 + 22*5 /* SPE GPRh */
-    + 10*4 + 22*5 /* FPR */
-    + 2*(10*6 + 22*7) /* AVRh, AVRl */
-    + 10*5 + 22*6 /* VSR */
     + 8*5 /* CRF */];
 static TCGv cpu_gpr[32];
 static TCGv cpu_gprh[32];
-static TCGv_i64 cpu_fpr[32];
-static TCGv_i64 cpu_avrh[32], cpu_avrl[32];
-static TCGv_i64 cpu_vsr[32];
 static TCGv_i32 cpu_crf[8];
 static TCGv cpu_nip;
 static TCGv cpu_msr;
@@ -108,39 +102,6 @@ void ppc_translate_init(void)
                                          offsetof(CPUPPCState, gprh[i]), p);
         p += (i < 10) ? 4 : 5;
         cpu_reg_names_size -= (i < 10) ? 4 : 5;
-
-        snprintf(p, cpu_reg_names_size, "fp%d", i);
-        cpu_fpr[i] = tcg_global_mem_new_i64(cpu_env,
-                                            offsetof(CPUPPCState, fpr[i]), p);
-        p += (i < 10) ? 4 : 5;
-        cpu_reg_names_size -= (i < 10) ? 4 : 5;
-
-        snprintf(p, cpu_reg_names_size, "avr%dH", i);
-#ifdef HOST_WORDS_BIGENDIAN
-        cpu_avrh[i] = tcg_global_mem_new_i64(cpu_env,
-                                             offsetof(CPUPPCState, avr[i].u64[0]), p);
-#else
-        cpu_avrh[i] = tcg_global_mem_new_i64(cpu_env,
-                                             offsetof(CPUPPCState, avr[i].u64[1]), p);
-#endif
-        p += (i < 10) ? 6 : 7;
-        cpu_reg_names_size -= (i < 10) ? 6 : 7;
-
-        snprintf(p, cpu_reg_names_size, "avr%dL", i);
-#ifdef HOST_WORDS_BIGENDIAN
-        cpu_avrl[i] = tcg_global_mem_new_i64(cpu_env,
-                                             offsetof(CPUPPCState, avr[i].u64[1]), p);
-#else
-        cpu_avrl[i] = tcg_global_mem_new_i64(cpu_env,
-                                             offsetof(CPUPPCState, avr[i].u64[0]), p);
-#endif
-        p += (i < 10) ? 6 : 7;
-        cpu_reg_names_size -= (i < 10) ? 6 : 7;
-        snprintf(p, cpu_reg_names_size, "vsr%d", i);
-        cpu_vsr[i] = tcg_global_mem_new_i64(cpu_env,
-                                            offsetof(CPUPPCState, vsr[i]), p);
-        p += (i < 10) ? 5 : 6;
-        cpu_reg_names_size -= (i < 10) ? 5 : 6;
     }
 
     cpu_nip = tcg_global_mem_new(cpu_env,
@@ -849,7 +810,7 @@ static inline void gen_op_arith_compute_ov(DisasContext *ctx, TCGv arg0,
 
 static inline void gen_op_arith_compute_ca32(DisasContext *ctx,
                                              TCGv res, TCGv arg0, TCGv arg1,
-                                             int sub)
+                                             TCGv ca32, int sub)
 {
     TCGv t0;
 
@@ -864,13 +825,14 @@ static inline void gen_op_arith_compute_ca32(DisasContext *ctx,
         tcg_gen_xor_tl(t0, arg0, arg1);
     }
     tcg_gen_xor_tl(t0, t0, res);
-    tcg_gen_extract_tl(cpu_ca32, t0, 32, 1);
+    tcg_gen_extract_tl(ca32, t0, 32, 1);
     tcg_temp_free(t0);
 }
 
 /* Common add function */
 static inline void gen_op_arith_add(DisasContext *ctx, TCGv ret, TCGv arg1,
-                                    TCGv arg2, bool add_ca, bool compute_ca,
+                                    TCGv arg2, TCGv ca, TCGv ca32,
+                                    bool add_ca, bool compute_ca,
                                     bool compute_ov, bool compute_rc0)
 {
     TCGv t0 = ret;
@@ -888,29 +850,29 @@ static inline void gen_op_arith_add(DisasContext *ctx, TCGv ret, TCGv arg1,
             tcg_gen_xor_tl(t1, arg1, arg2);        /* add without carry */
             tcg_gen_add_tl(t0, arg1, arg2);
             if (add_ca) {
-                tcg_gen_add_tl(t0, t0, cpu_ca);
+                tcg_gen_add_tl(t0, t0, ca);
             }
-            tcg_gen_xor_tl(cpu_ca, t0, t1);        /* bits changed w/ carry */
+            tcg_gen_xor_tl(ca, t0, t1);        /* bits changed w/ carry */
             tcg_temp_free(t1);
-            tcg_gen_extract_tl(cpu_ca, cpu_ca, 32, 1);
+            tcg_gen_extract_tl(ca, ca, 32, 1);
             if (is_isa300(ctx)) {
-                tcg_gen_mov_tl(cpu_ca32, cpu_ca);
+                tcg_gen_mov_tl(ca32, ca);
             }
         } else {
             TCGv zero = tcg_const_tl(0);
             if (add_ca) {
-                tcg_gen_add2_tl(t0, cpu_ca, arg1, zero, cpu_ca, zero);
-                tcg_gen_add2_tl(t0, cpu_ca, t0, cpu_ca, arg2, zero);
+                tcg_gen_add2_tl(t0, ca, arg1, zero, ca, zero);
+                tcg_gen_add2_tl(t0, ca, t0, ca, arg2, zero);
             } else {
-                tcg_gen_add2_tl(t0, cpu_ca, arg1, zero, arg2, zero);
+                tcg_gen_add2_tl(t0, ca, arg1, zero, arg2, zero);
             }
-            gen_op_arith_compute_ca32(ctx, t0, arg1, arg2, 0);
+            gen_op_arith_compute_ca32(ctx, t0, arg1, arg2, ca32, 0);
             tcg_temp_free(zero);
         }
     } else {
         tcg_gen_add_tl(t0, arg1, arg2);
         if (add_ca) {
-            tcg_gen_add_tl(t0, t0, cpu_ca);
+            tcg_gen_add_tl(t0, t0, ca);
         }
     }
 
@@ -927,40 +889,44 @@ static inline void gen_op_arith_add(DisasContext *ctx, TCGv ret, TCGv arg1,
     }
 }
 /* Add functions with two operands */
-#define GEN_INT_ARITH_ADD(name, opc3, add_ca, compute_ca, compute_ov)         \
+#define GEN_INT_ARITH_ADD(name, opc3, ca, add_ca, compute_ca, compute_ov)     \
 static void glue(gen_, name)(DisasContext *ctx)                               \
 {                                                                             \
     gen_op_arith_add(ctx, cpu_gpr[rD(ctx->opcode)],                           \
                      cpu_gpr[rA(ctx->opcode)], cpu_gpr[rB(ctx->opcode)],      \
+                     ca, glue(ca, 32),                                        \
                      add_ca, compute_ca, compute_ov, Rc(ctx->opcode));        \
 }
 /* Add functions with one operand and one immediate */
-#define GEN_INT_ARITH_ADD_CONST(name, opc3, const_val,                        \
+#define GEN_INT_ARITH_ADD_CONST(name, opc3, const_val, ca,                    \
                                 add_ca, compute_ca, compute_ov)               \
 static void glue(gen_, name)(DisasContext *ctx)                               \
 {                                                                             \
     TCGv t0 = tcg_const_tl(const_val);                                        \
     gen_op_arith_add(ctx, cpu_gpr[rD(ctx->opcode)],                           \
                      cpu_gpr[rA(ctx->opcode)], t0,                            \
+                     ca, glue(ca, 32),                                        \
                      add_ca, compute_ca, compute_ov, Rc(ctx->opcode));        \
     tcg_temp_free(t0);                                                        \
 }
 
 /* add  add.  addo  addo. */
-GEN_INT_ARITH_ADD(add, 0x08, 0, 0, 0)
-GEN_INT_ARITH_ADD(addo, 0x18, 0, 0, 1)
+GEN_INT_ARITH_ADD(add, 0x08, cpu_ca, 0, 0, 0)
+GEN_INT_ARITH_ADD(addo, 0x18, cpu_ca, 0, 0, 1)
 /* addc  addc.  addco  addco. */
-GEN_INT_ARITH_ADD(addc, 0x00, 0, 1, 0)
-GEN_INT_ARITH_ADD(addco, 0x10, 0, 1, 1)
+GEN_INT_ARITH_ADD(addc, 0x00, cpu_ca, 0, 1, 0)
+GEN_INT_ARITH_ADD(addco, 0x10, cpu_ca, 0, 1, 1)
 /* adde  adde.  addeo  addeo. */
-GEN_INT_ARITH_ADD(adde, 0x04, 1, 1, 0)
-GEN_INT_ARITH_ADD(addeo, 0x14, 1, 1, 1)
+GEN_INT_ARITH_ADD(adde, 0x04, cpu_ca, 1, 1, 0)
+GEN_INT_ARITH_ADD(addeo, 0x14, cpu_ca, 1, 1, 1)
 /* addme  addme.  addmeo  addmeo.  */
-GEN_INT_ARITH_ADD_CONST(addme, 0x07, -1LL, 1, 1, 0)
-GEN_INT_ARITH_ADD_CONST(addmeo, 0x17, -1LL, 1, 1, 1)
+GEN_INT_ARITH_ADD_CONST(addme, 0x07, -1LL, cpu_ca, 1, 1, 0)
+GEN_INT_ARITH_ADD_CONST(addmeo, 0x17, -1LL, cpu_ca, 1, 1, 1)
+/* addex */
+GEN_INT_ARITH_ADD(addex, 0x05, cpu_ov, 1, 1, 0);
 /* addze  addze.  addzeo  addzeo.*/
-GEN_INT_ARITH_ADD_CONST(addze, 0x06, 0, 1, 1, 0)
-GEN_INT_ARITH_ADD_CONST(addzeo, 0x16, 0, 1, 1, 1)
+GEN_INT_ARITH_ADD_CONST(addze, 0x06, 0, cpu_ca, 1, 1, 0)
+GEN_INT_ARITH_ADD_CONST(addzeo, 0x16, 0, cpu_ca, 1, 1, 1)
 /* addi */
 static void gen_addi(DisasContext *ctx)
 {
@@ -979,7 +945,7 @@ static inline void gen_op_addic(DisasContext *ctx, bool compute_rc0)
 {
     TCGv c = tcg_const_tl(SIMM(ctx->opcode));
     gen_op_arith_add(ctx, cpu_gpr[rD(ctx->opcode)], cpu_gpr[rA(ctx->opcode)],
-                     c, 0, 1, 0, compute_rc0);
+                     c, cpu_ca, cpu_ca32, 0, 1, 0, compute_rc0);
     tcg_temp_free(c);
 }
 
@@ -1432,13 +1398,13 @@ static inline void gen_op_arith_subf(DisasContext *ctx, TCGv ret, TCGv arg1,
             zero = tcg_const_tl(0);
             tcg_gen_add2_tl(t0, cpu_ca, arg2, zero, cpu_ca, zero);
             tcg_gen_add2_tl(t0, cpu_ca, t0, cpu_ca, inv1, zero);
-            gen_op_arith_compute_ca32(ctx, t0, inv1, arg2, 0);
+            gen_op_arith_compute_ca32(ctx, t0, inv1, arg2, cpu_ca32, 0);
             tcg_temp_free(zero);
             tcg_temp_free(inv1);
         } else {
             tcg_gen_setcond_tl(TCG_COND_GEU, cpu_ca, arg2, arg1);
             tcg_gen_sub_tl(t0, arg2, arg1);
-            gen_op_arith_compute_ca32(ctx, t0, arg1, arg2, 1);
+            gen_op_arith_compute_ca32(ctx, t0, arg1, arg2, cpu_ca32, 1);
         }
     } else if (add_ca) {
         /* Since we're ignoring carry-out, we can simplify the
@@ -6694,6 +6660,38 @@ static inline void gen_##name(DisasContext *ctx)               \
 GEN_TM_PRIV_NOOP(treclaim);
 GEN_TM_PRIV_NOOP(trechkpt);
 
+static inline void get_fpr(TCGv_i64 dst, int regno)
+{
+    tcg_gen_ld_i64(dst, cpu_env, offsetof(CPUPPCState, vsr[regno].u64[0]));
+}
+
+static inline void set_fpr(int regno, TCGv_i64 src)
+{
+    tcg_gen_st_i64(src, cpu_env, offsetof(CPUPPCState, vsr[regno].u64[0]));
+}
+
+static inline void get_avr64(TCGv_i64 dst, int regno, bool high)
+{
+#ifdef HOST_WORDS_BIGENDIAN
+    tcg_gen_ld_i64(dst, cpu_env, offsetof(CPUPPCState,
+                                          vsr[32 + regno].u64[(high ? 0 : 1)]));
+#else
+    tcg_gen_ld_i64(dst, cpu_env, offsetof(CPUPPCState,
+                                          vsr[32 + regno].u64[(high ? 1 : 0)]));
+#endif
+}
+
+static inline void set_avr64(int regno, TCGv_i64 src, bool high)
+{
+#ifdef HOST_WORDS_BIGENDIAN
+    tcg_gen_st_i64(src, cpu_env, offsetof(CPUPPCState,
+                                          vsr[32 + regno].u64[(high ? 0 : 1)]));
+#else
+    tcg_gen_st_i64(src, cpu_env, offsetof(CPUPPCState,
+                                          vsr[32 + regno].u64[(high ? 1 : 0)]));
+#endif
+}
+
 #include "translate/fp-impl.inc.c"
 
 #include "translate/vmx-impl.inc.c"
@@ -7087,6 +7085,7 @@ GEN_INT_ARITH_ADD(adde, 0x04, 1, 1, 0)
 GEN_INT_ARITH_ADD(addeo, 0x14, 1, 1, 1)
 GEN_INT_ARITH_ADD_CONST(addme, 0x07, -1LL, 1, 1, 0)
 GEN_INT_ARITH_ADD_CONST(addmeo, 0x17, -1LL, 1, 1, 1)
+GEN_HANDLER_E(addex, 0x1F, 0x0A, 0x05, 0x00000000, PPC_NONE, PPC2_ISA300),
 GEN_INT_ARITH_ADD_CONST(addze, 0x06, 0, 1, 1, 0)
 GEN_INT_ARITH_ADD_CONST(addzeo, 0x16, 0, 1, 1, 1)
 
@@ -7441,7 +7440,7 @@ void ppc_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
             if ((i & (RFPL - 1)) == 0) {
                 cpu_fprintf(f, "FPR%02d", i);
             }
-            cpu_fprintf(f, " %016" PRIx64, *((uint64_t *)&env->fpr[i]));
+            cpu_fprintf(f, " %016" PRIx64, *cpu_fpr_ptr(env, i));
             if ((i & (RFPL - 1)) == (RFPL - 1)) {
                 cpu_fprintf(f, "\n");
             }

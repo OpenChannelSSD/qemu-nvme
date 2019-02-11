@@ -74,13 +74,30 @@ typedef __float128 _Float128;
 extern int daemon(int, int);
 #endif
 
+#ifdef _WIN32
+/* as defined in sdkddkver.h */
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600 /* Vista */
+#endif
+/* reduces the number of implicitly included headers */
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#endif
+
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/types.h>
 #include <stdlib.h>
+
+/* enable C99/POSIX format strings (needs mingw32-runtime 3.15 or later) */
+#ifdef __MINGW32__
+#define __USE_MINGW_ANSI_STDIO 1
+#endif
 #include <stdio.h>
+
 #include <string.h>
 #include <strings.h>
 #include <inttypes.h>
@@ -92,6 +109,7 @@ extern int daemon(int, int);
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <assert.h>
@@ -586,5 +604,20 @@ extern int qemu_icache_linesize;
 extern int qemu_icache_linesize_log;
 extern int qemu_dcache_linesize;
 extern int qemu_dcache_linesize_log;
+
+/*
+ * After using getopt or getopt_long, if you need to parse another set
+ * of options, then you must reset optind.  Unfortunately the way to
+ * do this varies between implementations of getopt.
+ */
+static inline void qemu_reset_optind(void)
+{
+#ifdef HAVE_OPTRESET
+    optind = 1;
+    optreset = 1;
+#else
+    optind = 0;
+#endif
+}
 
 #endif

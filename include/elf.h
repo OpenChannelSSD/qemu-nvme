@@ -782,11 +782,11 @@ typedef struct {
 /* ARM-specific values for sh_flags */
 #define SHF_ARM_ENTRYSECT  0x10000000   /* Section contains an entry point */
 #define SHF_ARM_COMDEF     0x80000000   /* Section may be multiply defined
-					   in the input to a link step */
+                                           in the input to a link step */
 
 /* ARM-specific program header flags */
 #define PF_ARM_SB          0x10000000   /* Segment contains the location
-					   addressed by the static base */
+                                           addressed by the static base */
 
 /* ARM relocs.  */
 #define R_ARM_NONE		0	/* No reloc */
@@ -1047,7 +1047,7 @@ typedef struct {
 #define R_X86_64_JUMP_SLOT	7	/* Create PLT entry */
 #define R_X86_64_RELATIVE	8	/* Adjust by program base */
 #define R_X86_64_GOTPCREL	9	/* 32 bit signed pc relative
-					   offset to GOT */
+                                           offset to GOT */
 #define R_X86_64_32		10	/* Direct 32 bit zero extended */
 #define R_X86_64_32S		11	/* Direct 32 bit sign extended */
 #define R_X86_64_16		12	/* Direct 16 bit zero extended */
@@ -1070,7 +1070,7 @@ typedef struct {
 #define EF_PARISC_LSB		0x00040000 /* Program expects little endian. */
 #define EF_PARISC_WIDE		0x00080000 /* Program expects wide mode.  */
 #define EF_PARISC_NO_KABP	0x00100000 /* No kernel assisted branch
-					      prediction.  */
+                                              prediction.  */
 #define EF_PARISC_LAZYSWAP	0x00400000 /* Allow lazy swapping.  */
 #define EF_PARISC_ARCH		0x0000ffff /* Architecture version.  */
 
@@ -1083,7 +1083,7 @@ typedef struct {
 /* Additional section indeces.  */
 
 #define SHN_PARISC_ANSI_COMMON	0xff00	   /* Section for tenatively declared
-					      symbols in ANSI C.  */
+                                              symbols in ANSI C.  */
 #define SHN_PARISC_HUGE_COMMON	0xff01	   /* Common blocks in huge model.  */
 
 /* Legal values for sh_type field of Elf32_Shdr.  */
@@ -1338,6 +1338,61 @@ typedef struct {
 #define R_IA64_DTPREL64LSB	0xb7	/* @dtprel(sym + add), data8 LSB */
 #define R_IA64_LTOFF_DTPREL22	0xba	/* @ltoff(@dtprel(s+a)), imm22 */
 
+/* RISC-V relocations.  */
+#define R_RISCV_NONE          0
+#define R_RISCV_32            1
+#define R_RISCV_64            2
+#define R_RISCV_RELATIVE      3
+#define R_RISCV_COPY          4
+#define R_RISCV_JUMP_SLOT     5
+#define R_RISCV_TLS_DTPMOD32  6
+#define R_RISCV_TLS_DTPMOD64  7
+#define R_RISCV_TLS_DTPREL32  8
+#define R_RISCV_TLS_DTPREL64  9
+#define R_RISCV_TLS_TPREL32   10
+#define R_RISCV_TLS_TPREL64   11
+#define R_RISCV_BRANCH        16
+#define R_RISCV_JAL           17
+#define R_RISCV_CALL          18
+#define R_RISCV_CALL_PLT      19
+#define R_RISCV_GOT_HI20      20
+#define R_RISCV_TLS_GOT_HI20  21
+#define R_RISCV_TLS_GD_HI20   22
+#define R_RISCV_PCREL_HI20    23
+#define R_RISCV_PCREL_LO12_I  24
+#define R_RISCV_PCREL_LO12_S  25
+#define R_RISCV_HI20          26
+#define R_RISCV_LO12_I        27
+#define R_RISCV_LO12_S        28
+#define R_RISCV_TPREL_HI20    29
+#define R_RISCV_TPREL_LO12_I  30
+#define R_RISCV_TPREL_LO12_S  31
+#define R_RISCV_TPREL_ADD     32
+#define R_RISCV_ADD8          33
+#define R_RISCV_ADD16         34
+#define R_RISCV_ADD32         35
+#define R_RISCV_ADD64         36
+#define R_RISCV_SUB8          37
+#define R_RISCV_SUB16         38
+#define R_RISCV_SUB32         39
+#define R_RISCV_SUB64         40
+#define R_RISCV_GNU_VTINHERIT 41
+#define R_RISCV_GNU_VTENTRY   42
+#define R_RISCV_ALIGN         43
+#define R_RISCV_RVC_BRANCH    44
+#define R_RISCV_RVC_JUMP      45
+#define R_RISCV_RVC_LUI       46
+#define R_RISCV_GPREL_I       47
+#define R_RISCV_GPREL_S       48
+#define R_RISCV_TPREL_I       49
+#define R_RISCV_TPREL_S       50
+#define R_RISCV_RELAX         51
+#define R_RISCV_SUB6          52
+#define R_RISCV_SET6          53
+#define R_RISCV_SET8          54
+#define R_RISCV_SET16         55
+#define R_RISCV_SET32         56
+
 typedef struct elf32_rel {
   Elf32_Addr	r_offset;
   Elf32_Word	r_info;
@@ -1585,6 +1640,16 @@ typedef struct elf64_shdr {
 #define NT_ARM_HW_WATCH 0x403           /* ARM hardware watchpoint registers */
 #define NT_ARM_SYSTEM_CALL      0x404   /* ARM system call number */
 
+/*
+ * Physical entry point into the kernel.
+ *
+ * 32bit entry point into the kernel. When requested to launch the
+ * guest kernel, use this entry point to launch the guest in 32-bit
+ * protected mode with paging disabled.
+ *
+ * [ Corresponding definition in Linux kernel: include/xen/interface/elfnote.h ]
+ */
+#define XEN_ELFNOTE_PHYS32_ENTRY    18  /* 0x12 */
 
 /* Note header in a PT_NOTE section */
 typedef struct elf32_note {

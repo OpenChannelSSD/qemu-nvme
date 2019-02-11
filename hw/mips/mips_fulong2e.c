@@ -111,8 +111,9 @@ static int64_t load_kernel (CPUMIPSState *env)
     uint32_t *prom_buf;
     long prom_size;
 
-    kernel_size = load_elf(loaderparams.kernel_filename, cpu_mips_kseg0_to_phys,
-                           NULL, (uint64_t *)&kernel_entry,
+    kernel_size = load_elf(loaderparams.kernel_filename, NULL,
+                           cpu_mips_kseg0_to_phys, NULL,
+                           (uint64_t *)&kernel_entry,
                            (uint64_t *)&kernel_low, (uint64_t *)&kernel_high,
                            0, EM_MIPS, 1, 0);
     if (kernel_size < 0) {
@@ -249,7 +250,7 @@ static void vt82c686b_southbridge_init(PCIBus *pci_bus, int slot, qemu_irq intc,
     isa_create_simple(isa_bus, TYPE_VT82C686B_SUPERIO);
 
     ide_drive_get(hd, ARRAY_SIZE(hd));
-    vt82c686b_ide_init(pci_bus, hd, PCI_DEVFN(slot, 1));
+    via_ide_init(pci_bus, hd, PCI_DEVFN(slot, 1));
 
     pci_create_simple(pci_bus, PCI_DEVFN(slot, 2), "vt82c686b-usb-uhci");
     pci_create_simple(pci_bus, PCI_DEVFN(slot, 3), "vt82c686b-usb-uhci");

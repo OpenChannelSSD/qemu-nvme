@@ -43,7 +43,7 @@ file_backend_memory_alloc(HostMemoryBackend *backend, Error **errp)
 {
     HostMemoryBackendFile *fb = MEMORY_BACKEND_FILE(backend);
 #ifdef CONFIG_POSIX
-    gchar *path;
+    gchar *name;
 #endif
 
     if (!backend->size) {
@@ -58,14 +58,14 @@ file_backend_memory_alloc(HostMemoryBackend *backend, Error **errp)
     error_setg(errp, "-mem-path not supported on this host");
 #else
     backend->force_prealloc = mem_prealloc;
-    path = object_get_canonical_path(OBJECT(backend));
+    name = host_memory_backend_get_name(backend);
     memory_region_init_ram_from_file(&backend->mr, OBJECT(backend),
-                                     path,
+                                     name,
                                      backend->size, fb->align,
                                      (backend->share ? RAM_SHARED : 0) |
                                      (fb->is_pmem ? RAM_PMEM : 0),
                                      fb->mem_path, errp);
-    g_free(path);
+    g_free(name);
 #endif
 }
 
@@ -82,7 +82,8 @@ static void set_mem_path(Object *o, const char *str, Error **errp)
     HostMemoryBackendFile *fb = MEMORY_BACKEND_FILE(o);
 
     if (host_memory_backend_mr_inited(backend)) {
-        error_setg(errp, "cannot change property value");
+        error_setg(errp, "cannot change property 'mem-path' of %s",
+                   object_get_typename(o));
         return;
     }
     g_free(fb->mem_path);
@@ -120,7 +121,8 @@ static void file_memory_backend_set_align(Object *o, Visitor *v,
     uint64_t val;
 
     if (host_memory_backend_mr_inited(backend)) {
-        error_setg(&local_err, "cannot change property value");
+        error_setg(&local_err, "cannot change property '%s' of %s",
+                   name, object_get_typename(o));
         goto out;
     }
 

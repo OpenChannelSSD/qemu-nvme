@@ -28,6 +28,16 @@ QEMU_BUILD_BUG_ON(HOST_MEM_POLICY_BIND != MPOL_BIND);
 QEMU_BUILD_BUG_ON(HOST_MEM_POLICY_INTERLEAVE != MPOL_INTERLEAVE);
 #endif
 
+char *
+host_memory_backend_get_name(HostMemoryBackend *backend)
+{
+    if (!backend->use_canonical_path) {
+        return object_get_canonical_path_component(OBJECT(backend));
+    }
+
+    return object_get_canonical_path(OBJECT(backend));
+}
+
 static void
 host_memory_backend_get_size(Object *obj, Visitor *v, const char *name,
                              void *opaque, Error **errp)
@@ -47,7 +57,8 @@ host_memory_backend_set_size(Object *obj, Visitor *v, const char *name,
     uint64_t value;
 
     if (host_memory_backend_mr_inited(backend)) {
-        error_setg(&local_err, "cannot change property value");
+        error_setg(&local_err, "cannot change property %s of %s ",
+                   name, object_get_typename(obj));
         goto out;
     }
 
@@ -56,8 +67,9 @@ host_memory_backend_set_size(Object *obj, Visitor *v, const char *name,
         goto out;
     }
     if (!value) {
-        error_setg(&local_err, "Property '%s.%s' doesn't take value '%"
-                   PRIu64 "'", object_get_typename(obj), name, value);
+        error_setg(&local_err,
+                   "property '%s' of %s doesn't take value '%" PRIu64 "'",
+                   name, object_get_typename(obj), value);
         goto out;
     }
     backend->size = value;
@@ -247,6 +259,11 @@ static void host_memory_backend_init(Object *obj)
     backend->prealloc = mem_prealloc;
 }
 
+static void host_memory_backend_post_init(Object *obj)
+{
+    object_apply_compat_props(obj);
+}
+
 bool host_memory_backend_mr_inited(HostMemoryBackend *backend)
 {
     /*
@@ -395,6 +412,23 @@ static void host_memory_backend_set_share(Object *o, bool value, Error **errp)
     backend->share = value;
 }
 
+static bool
+host_memory_backend_get_use_canonical_path(Object *obj, Error **errp)
+{
+    HostMemoryBackend *backend = MEMORY_BACKEND(obj);
+
+    return backend->use_canonical_path;
+}
+
+static void
+host_memory_backend_set_use_canonical_path(Object *obj, bool value,
+                                           Error **errp)
+{
+    HostMemoryBackend *backend = MEMORY_BACKEND(obj);
+
+    backend->use_canonical_path = value;
+}
+
 static void
 host_memory_backend_class_init(ObjectClass *oc, void *data)
 {
@@ -441,6 +475,9 @@ host_memory_backend_class_init(ObjectClass *oc, void *data)
         &error_abort);
     object_class_property_set_description(oc, "share",
         "Mark the memory as private to QEMU or shared", &error_abort);
+    object_class_property_add_bool(oc, "x-use-canonical-path-for-ramblock-id",
+        host_memory_backend_get_use_canonical_path,
+        host_memory_backend_set_use_canonical_path, &error_abort);
 }
 
 static const TypeInfo host_memory_backend_info = {
@@ -451,6 +488,7 @@ static const TypeInfo host_memory_backend_info = {
     .class_init = host_memory_backend_class_init,
     .instance_size = sizeof(HostMemoryBackend),
     .instance_init = host_memory_backend_init,
+    .instance_post_init = host_memory_backend_post_init,
     .interfaces = (InterfaceInfo[]) {
         { TYPE_USER_CREATABLE },
         { }

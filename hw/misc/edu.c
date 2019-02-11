@@ -377,6 +377,7 @@ static void pci_edu_uninit(PCIDevice *pdev)
     qemu_mutex_destroy(&edu->thr_mutex);
 
     timer_del(&edu->dma_timer);
+    msi_uninit(pdev);
 }
 
 static void edu_obj_uint64(Object *obj, Visitor *v, const char *name,
@@ -398,6 +399,7 @@ static void edu_instance_init(Object *obj)
 
 static void edu_class_init(ObjectClass *class, void *data)
 {
+    DeviceClass *dc = DEVICE_CLASS(class);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(class);
 
     k->realize = pci_edu_realize;
@@ -406,6 +408,7 @@ static void edu_class_init(ObjectClass *class, void *data)
     k->device_id = 0x11e8;
     k->revision = 0x10;
     k->class_id = PCI_CLASS_OTHERS;
+    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 }
 
 static void pci_edu_register_types(void)

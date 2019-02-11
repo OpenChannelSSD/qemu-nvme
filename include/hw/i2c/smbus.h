@@ -35,6 +35,8 @@
 #define SMBUS_DEVICE_GET_CLASS(obj) \
      OBJECT_GET_CLASS(SMBusDeviceClass, (obj), TYPE_SMBUS_DEVICE)
 
+typedef struct SMBusDevice SMBusDevice;
+
 typedef struct SMBusDeviceClass
 {
     I2CSlaveClass parent_class;
@@ -92,5 +94,8 @@ int smbus_write_block(I2CBus *bus, uint8_t addr, uint8_t command, uint8_t *data,
 void smbus_eeprom_init_one(I2CBus *smbus, uint8_t address, uint8_t *eeprom_buf);
 void smbus_eeprom_init(I2CBus *smbus, int nb_eeprom,
                        const uint8_t *eeprom_spd, int size);
+
+enum sdram_type { SDR = 0x4, DDR = 0x7, DDR2 = 0x8 };
+uint8_t *spd_data_generate(enum sdram_type type, ram_addr_t size, Error **errp);
 
 #endif

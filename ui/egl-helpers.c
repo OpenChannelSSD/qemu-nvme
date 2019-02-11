@@ -120,14 +120,15 @@ void egl_texture_blit(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip)
 }
 
 void egl_texture_blend(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip,
-                       int x, int y)
+                       int x, int y, double scale_x, double scale_y)
 {
     glBindFramebuffer(GL_FRAMEBUFFER_EXT, dst->framebuffer);
+    int w = scale_x * src->width;
+    int h = scale_y * src->height;
     if (flip) {
-        glViewport(x, y, src->width, src->height);
+        glViewport(x, y, w, h);
     } else {
-        glViewport(x, dst->height - src->height - y,
-                   src->width, src->height);
+        glViewport(x, dst->height - h - y, w, h);
     }
     glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, src->texture);
@@ -273,14 +274,14 @@ void egl_dmabuf_release_texture(QemuDmaBuf *dmabuf)
 
 /* ---------------------------------------------------------------------- */
 
-EGLSurface qemu_egl_init_surface_x11(EGLContext ectx, Window win)
+EGLSurface qemu_egl_init_surface_x11(EGLContext ectx, EGLNativeWindowType win)
 {
     EGLSurface esurface;
     EGLBoolean b;
 
     esurface = eglCreateWindowSurface(qemu_egl_display,
                                       qemu_egl_config,
-                                      (EGLNativeWindowType)win, NULL);
+                                      win, NULL);
     if (esurface == EGL_NO_SURFACE) {
         error_report("egl: eglCreateWindowSurface failed");
         return NULL;
