@@ -618,7 +618,9 @@ typedef struct NvmeIdCtrl {
     uint8_t     ieee[3];
     uint8_t     cmic;
     uint8_t     mdts;
-    uint8_t     rsvd255[178];
+    uint16_t    cntlid;
+    uint32_t    ver;
+    uint8_t     rsvd255[172];
     uint16_t    oacs;
     uint8_t     acl;
     uint8_t     aerl;

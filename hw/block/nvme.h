@@ -128,6 +128,7 @@ typedef struct NvmeNamespace {
     uint64_t        ns_blks;
     uint64_t        nsze;
     struct {
+        uint64_t begin;
         uint64_t predef;
         uint64_t data;
         uint64_t meta;
@@ -174,13 +175,12 @@ typedef struct NvmeCtrl {
     uint8_t     max_sqes;
     uint8_t     max_cqes;
     uint8_t     ms;
+    uint8_t     ms_max;
     uint8_t     vwc;
     uint8_t     mc;
     uint8_t     dpc;
     uint8_t     dps;
-    uint8_t     nlbaf;
     uint8_t     extended;
-    uint8_t     lba_index;
     uint8_t     mpsmin;
     uint8_t     mpsmax;
     uint8_t     intc;
@@ -199,6 +199,7 @@ typedef struct NvmeCtrl {
     uint64_t    irq_status;
     uint32_t    sgls;
     uint8_t     dlfeat;
+    uint8_t     dialect;
 
     char            *serial;
     NvmeErrorLog    *elpes;
