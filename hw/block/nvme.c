@@ -239,7 +239,7 @@ static int lnvm_lba_str(char *buf, LnvmCtrl *ln, uint64_t lba)
 
 static inline void lnvm_trace_rw(LnvmCtrl *ln, NvmeRequest *req)
 {
-    char *buf = g_malloc(req->nlb * (sizeof(LNVM_LBA_FORMAT_TEMPLATE) + 3) + 1);
+    char *buf = g_malloc_n(req->nlb, sizeof(LNVM_LBA_FORMAT_TEMPLATE) + 3 + 1);
     char *bufp = buf;
     for (uint16_t i = 0; i < req->nlb; i++) {
         bufp += sprintf(bufp, "\n  ");
@@ -428,7 +428,7 @@ static uint64_t *nvme_setup_discontig(NvmeCtrl *n, uint64_t prp_addr,
     uint16_t prps_per_page = n->page_size >> 3;
     uint64_t prp[prps_per_page];
     uint16_t total_prps = DIV_ROUND_UP(queue_depth * entry_size, n->page_size);
-    uint64_t *prp_list = g_malloc0(total_prps * sizeof(*prp_list));
+    uint64_t *prp_list = g_malloc0_n(total_prps, sizeof(*prp_list));
 
     for (i = 0; i < total_prps; i++) {
         if (i % prps_per_page == 0 && i < total_prps - 1) {
@@ -2355,7 +2355,7 @@ static uint16_t nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
         }
     }
 
-    sq->io_req = g_malloc0(sq->size * sizeof(*sq->io_req));
+    sq->io_req = g_new(NvmeRequest, sq->size);
     QTAILQ_INIT(&sq->req_list);
     QTAILQ_INIT(&sq->out_req_list);
     for (i = 0; i < sq->size; i++) {
@@ -3898,7 +3898,7 @@ static void lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
         1ULL << (id_ctrl->lbaf.sec_len + id_ctrl->lbaf.chk_len +
         id_ctrl->lbaf.lun_len + id_ctrl->lbaf.grp_len);
 
-    ns->chunk_meta = g_malloc0(ln->params.total_chks * sizeof(LnvmCS));
+    ns->chunk_meta = g_new0(LnvmCS, ln->params.total_chks);
     if (!ns->chunk_meta) {
         error_setg(errp, "nvme: could not allocate memory");
         return;
@@ -3912,7 +3912,7 @@ static void lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
 
     ns->resetfail = NULL;
     if (ln->resetfail_fname) {
-        ns->resetfail = g_malloc0(ln->params.total_chks * sizeof(uint8_t));
+        ns->resetfail = g_malloc0_n(ln->params.total_chks, sizeof(*ns->resetfail));
         if (!ns->resetfail) {
             error_setg(errp, "nvme: could not allocate memory");
             return;
@@ -3926,7 +3926,7 @@ static void lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
 
     ns->writefail = NULL;
     if (ln->writefail_fname) {
-        ns->writefail = g_malloc0(ns->ns_blks * sizeof(uint8_t));
+        ns->writefail = g_malloc0_n(ns->ns_blks, sizeof(*ns->writefail));
         if (!ns->writefail) {
             error_setg(errp, "nvme: could not allocate memory");
             return;
@@ -3942,8 +3942,8 @@ static void lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
             * already
             */
         if (!ns->resetfail) {
-            ns->resetfail = g_malloc0(ln->params.total_chks *
-                sizeof(uint8_t));
+            ns->resetfail = g_malloc0_n(ln->params.total_chks,
+                sizeof(*ns->resetfail));
         }
     }
 
@@ -4121,12 +4121,12 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
 
     n->ns_size = bs_size / (uint64_t) n->num_namespaces;
 
-    n->sq = g_malloc0(sizeof(*n->sq)*n->num_queues);
-    n->cq = g_malloc0(sizeof(*n->cq)*n->num_queues);
-    n->namespaces = g_malloc0(sizeof(*n->namespaces) * n->num_namespaces);
-    n->elpes = g_malloc0((n->elpe + 1) * sizeof(*n->elpes));
-    n->aer_reqs = g_malloc0((n->aerl + 1) * sizeof(*n->aer_reqs));
-    n->features.int_vector_config = g_malloc0(n->num_queues *
+    n->sq = g_new0(NvmeSQueue *, n->num_queues);
+    n->cq = g_new0(NvmeCQueue *, n->num_queues);
+    n->namespaces = g_new0(NvmeNamespace, n->num_namespaces);
+    n->elpes = g_new0(NvmeErrorLog, n->elpe + 1);
+    n->aer_reqs = g_new0(NvmeRequest *, n->aerl + 1);
+    n->features.int_vector_config = g_malloc0_n(n->num_queues,
         sizeof(*n->features.int_vector_config));
 
     nvme_init_pci(n);
