@@ -4,6 +4,9 @@
 #include "qemu/compiler.h"
 #include "block/nvme.h"
 
+#define LNVM_VID 0x1d1d
+#define LNVM_DID 0x1f1f
+
 enum LnvmAdminCommands {
     LNVM_ADM_CMD_IDENTIFY       = 0xe2,
 };
@@ -144,36 +147,6 @@ typedef struct LnvmIdCtrl {
     LnvmIdPerf perf;
     uint8_t    rsvd4[3840];
 } LnvmIdCtrl;
-
-/* Parameters passed on to QEMU to configure the characteristics of the drive */
-typedef struct LnvmParams {
-    /* configurable device characteristics */
-    uint32_t sec_size;
-    uint32_t mccap;
-
-    /* configurable parameters for LnvmIdGroup */
-    uint16_t num_grp;
-    uint16_t num_lun;
-    uint32_t num_chk;
-    uint32_t num_sec;
-    uint32_t ws_min;
-    uint32_t ws_opt;
-    uint32_t mw_cunits;
-
-    /* calculated values */
-    uint32_t sec_per_lun;
-    uint32_t sec_per_grp;
-    uint32_t total_secs;
-    uint32_t chk_per_lun;
-    uint32_t chk_per_grp;
-    uint32_t total_chks;
-
-    /* Calculated unit values for ordering */
-    uint32_t chk_units;
-    uint32_t lun_units;
-    uint32_t grp_units;
-    uint32_t total_units;
-} LnvmParams;
 
 enum LnvmParamsMccap {
     LNVM_PARAMS_MCCAP_MULTIPLE_RESETS = 0x1 << 1,
