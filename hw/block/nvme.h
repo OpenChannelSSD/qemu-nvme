@@ -50,21 +50,12 @@ typedef struct NvmeRequest {
     uint8_t  cmb;
     uint16_t status;
     uint64_t slba;
-
-    uint64_t lbal[LNVM_CMD_MAX_LBAS];
     uint16_t nlb;
 
+    /* sector offset relative to slba where reads become invalid */
+    uint64_t predef;
+
     QTAILQ_HEAD(, NvmeBlockBackendRequest) blk_req_tailq_head;
-
-    struct {
-        /*
-         * For vector commands, predef is a bitmap indicating if the Nth LBA
-         * may be read succesfully. For scalar, it holds the sector offset
-         * relative to the start LBA where reads become invalid.
-         */
-        uint64_t lba_or_map;
-    } predef;
-
     QTAILQ_ENTRY(NvmeRequest) entry;
 } NvmeRequest;
 
