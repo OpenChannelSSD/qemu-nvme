@@ -121,9 +121,8 @@ typedef struct NvmeNamespace {
         uint64_t begin;
         uint64_t data;
         uint64_t meta;
-    } blk_backend;
+    } blk;
 
-    LnvmCS          *chunk_meta;
     uint8_t         *resetfail;
     uint8_t         *writefail;
 } NvmeNamespace;

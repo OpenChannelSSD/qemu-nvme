@@ -300,7 +300,10 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_FORMAT_NVM     = 0x80,
     NVME_ADM_CMD_SECURITY_SEND  = 0x81,
     NVME_ADM_CMD_SECURITY_RECV  = 0x82,
-    NVME_ADM_CMD_SET_DB_MEMORY  = 0xC0,  /* Vendor specific. */
+
+     /* vendor specific */
+    NVME_ADM_CMD_SET_DB_MEMORY  = 0xC0,
+    NVME_ADM_CMD_SET_LOG_PAGE   = 0xC1,
 };
 
 enum NvmeIoCommands {
@@ -435,6 +438,10 @@ enum {
     NVME_DSMGMT_IDR = 1 << 0,
     NVME_DSMGMT_IDW = 1 << 1,
     NVME_DSMGMT_AD  = 1 << 2,
+
+    /* qemu-specific attributes */
+    NVME_DSMGMT_WEI = 1 << 3,
+    NVME_DSMGMT_REI = 1 << 4
 };
 
 typedef struct NvmeDsmRange {

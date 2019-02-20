@@ -156,7 +156,7 @@ enum LnvmParamsMccap {
 };
 
 enum LnvmLogPage {
-    LNVM_REPORT_CHUNK = 0xCA,
+    LNVM_CHUNK_INFO = 0xCA,
 };
 
 static inline void _lnvm_check_size(void)
@@ -168,6 +168,7 @@ static inline void _lnvm_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(LnvmRwCmd)  != 64);
     QEMU_BUILD_BUG_ON(sizeof(LnvmDmCmd)  != 64);
     QEMU_BUILD_BUG_ON(sizeof(LnvmIdCtrl) != 4096);
+    QEMU_BUILD_BUG_ON(sizeof(LnvmCS)     != 32);
 }
 
 #endif

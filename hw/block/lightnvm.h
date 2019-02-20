@@ -7,6 +7,8 @@
 #include "block/lightnvm.h"
 
 #define LNVM_CMD_MAX_LBAS 64
+#define LNVM_CHUNK_INFO_LOGPAGE_SIZE (2 << 16)
+#define LNVM_MAGIC (LNVM_DID << 16 | LNVM_VID)
 
 #define DEFINE_LNVM_PROPERTIES(_state, _props) \
     DEFINE_PROP_UINT32("lmccap", _state, _props.mccap, 0x0), \
@@ -44,8 +46,6 @@ typedef struct LnvmParams {
     char *resetfail_fname;
     char *writefail_fname;
 
-    uint8_t state_auto_gen;
-
     /* derived values */
     uint32_t chks_per_lun;
     uint32_t chks_per_grp;
@@ -56,9 +56,18 @@ typedef struct LnvmParams {
     uint32_t secs_total;
 } LnvmParams;
 
+typedef struct LnvmMetaBlock {
+    /* magic is set to (LNVM_DID << 16 | LNVM_VID) if the device as been
+       initialized */
+    uint32_t magic;
+} LnvmMetaBlock;
+
 typedef struct LnvmCtrl {
     LnvmIdCtrl id_ctrl;
     LnvmAddrF  lbaf;
+
+    /* chunk info log pages indexed by namespaces */
+    LnvmCS (*chunk_info)[LNVM_CHUNK_INFO_LOGPAGE_SIZE / sizeof(LnvmCS)];
 } LnvmCtrl;
 
-#endif
+#endif /* HW_LIGHTNVM_H */
