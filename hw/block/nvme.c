@@ -1303,9 +1303,6 @@ static void nvme_rw_cb(void *opaque, int ret)
         if (req->status != NVME_SUCCESS) {
             nvme_set_error_page(n, sq->sqid, req->cqe.cid, req->status,
                 offsetof(NvmeRwCmd, slba), blk_req->blk_offset, ns->id);
-            if (LNVM_IS_WRITE(req)) {
-                bitmap_clear(ns->util, blk_req->blk_offset, req->nlb);
-            }
         }
 
         nvme_enqueue_req_completion(cq, req);
@@ -1773,13 +1770,10 @@ static void nvme_discard_cb(void *opaque, int ret)
     NvmeSQueue *sq = req->sq;
     NvmeCtrl *n = sq->ctrl;
     NvmeCQueue *cq = n->cq[sq->cqid];
-    NvmeNamespace *ns = req->ns;
 
     QTAILQ_REMOVE(&req->blk_req_tailq_head, blk_req, blk_req_tailq);
 
-    if (!ret) {
-        bitmap_clear(ns->util, blk_req->slba, blk_req->nlb);
-    } else {
+    if (ret) {
         req->status = NVME_INTERNAL_DEV_ERROR;
     }
 
@@ -2935,22 +2929,6 @@ static uint64_t ns_calc_blks(NvmeCtrl *n, NvmeNamespace *ns)
     return n->ns_size / ((1 << NVME_ID_NS_LBADS(ns)) + NVME_ID_NS_MS(ns));
 }
 
-static void nvme_partition_ns(NvmeNamespace *ns, uint8_t lba_idx)
-{
-    /*
-      Issues:
-      * all I/O to NS must have stopped as this frees several ns structures
-        (util, uncorrectable, tbl) -- failure to do so could render I/O code
-        referencing freed memory -- DANGEROUS.
-    */
-    if (ns->util)
-        g_free(ns->util);
-    ns->util = bitmap_new(ns->ns_blks);
-    if (ns->uncorrectable)
-        g_free(ns->uncorrectable);
-    ns->uncorrectable = bitmap_new(ns->ns_blks);
-}
-
 static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
     uint8_t meta_loc, uint8_t pil, uint8_t pi, uint8_t sec_erase)
 {
@@ -2980,7 +2958,6 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
     ns->id_ns.flbas = lba_idx | meta_loc;
     ns->id_ns.dps = pil | pi;
     ns->ns_blks = ns_calc_blks(ns->ctrl, ns);
-    nvme_partition_ns(ns, lba_idx);
     if (sec_erase) {
         /* TODO: write zeros, complete asynchronously */;
     }
@@ -3832,16 +3809,11 @@ static void nvme_init_namespace(NvmeCtrl *n, NvmeNamespace *ns)
     ns->blk_backend.data = ns->blk_backend.predef + params->sec_size;
     ns->blk_backend.meta = ns->blk_backend.data +
         ns->ns_blks * params->sec_size;
-
-    ns->util = bitmap_new(ns->ns_blks);
-    ns->uncorrectable = bitmap_new(ns->ns_blks);
 }
 
 static void nvme_free_namespace(NvmeNamespace *ns) {
     g_free(ns->resetfail);
     g_free(ns->writefail);
-    g_free(ns->util);
-    g_free(ns->uncorrectable);
     g_free(ns->chunk_meta);
 }
 

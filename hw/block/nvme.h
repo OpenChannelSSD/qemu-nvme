@@ -113,8 +113,6 @@ typedef struct NvmeNamespace {
     struct NvmeCtrl *ctrl;
     NvmeIdNs        id_ns;
     NvmeRangeType   lba_range[64];
-    unsigned long   *util;
-    unsigned long   *uncorrectable;
     uint32_t        id;
     uint64_t        ns_blks;
     uint64_t        nsze;
