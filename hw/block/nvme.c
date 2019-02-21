@@ -354,6 +354,11 @@ static uint16_t lnvm_advance_wp(NvmeCtrl *n, uint64_t lba, uint16_t nlb,
         return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
     }
 
+    if (chunk_meta->type == LNVM_CHUNK_TYPE_RAN) {
+        /* do not modify the chunk state or write pointer for random chunks */
+        return NVME_SUCCESS;
+    }
+
     trace_lnvm_advance_wp(req->cqe.cid, lba, nlb);
 
     if (chunk_meta->state == LNVM_CHUNK_FREE) {
@@ -1444,6 +1449,19 @@ static uint16_t lnvm_rw_check_chunk_write(NvmeCtrl *n, NvmeCmd *cmd,
         return NVME_WRITE_FAULT | NVME_DNR;
     }
 
+
+    if (cnk->type == LNVM_CHUNK_TYPE_RAN) {
+        /* for LNVM_CHUNK_TYPE_RAN, we skip the additional constraint checks
+           and only check that the chunk is OPEN */
+        if (cnk->state != LNVM_CHUNK_OPEN) {
+            trace_lnvm_err_invalid_chunk_state(req->cqe.cid,
+                lba & ~(ln->lbaf.sec_mask), cnk->state);
+            return NVME_WRITE_FAULT | NVME_DNR;
+        }
+
+        return NVME_SUCCESS;
+    }
+
     if (ws < params->ws_min || (ws % params->ws_min) != 0) {
         trace_lnvm_err_write_constraints(req->cqe.cid, ws, params->ws_min);
         nvme_set_error_page(n, req->sq->sqid, req->cqe.cid,
@@ -1519,6 +1537,18 @@ static uint16_t lnvm_rw_check_chunk_read(NvmeCtrl *n, NvmeCmd *cmd,
     mw_cunits = params->mw_cunits;
     wp = cnk->wp;
     state = cnk->state;
+
+    if (cnk->type == LNVM_CHUNK_TYPE_RAN) {
+        /* for LNVM_CHUNK_TYPE_RAN it is sufficient to ensure that the chunk is
+           OPEN and that we are reading a valid LBA */
+        if (state != LNVM_CHUNK_OPEN || sectr >= cnk->cnlb) {
+            trace_lnvm_err_invalid_chunk_state(req->cqe.cid,
+                lba & ~(ln->lbaf.sec_mask), cnk->state);
+            return NVME_DULB;
+        }
+
+        return NVME_SUCCESS;
+    }
 
     if (state == LNVM_CHUNK_CLOSED && sectr < wp) {
         return NVME_SUCCESS;
@@ -2079,11 +2109,13 @@ static int update_chunk(NvmeCtrl *n, NvmeNamespace *ns, char *chunkinfo)
         chunk_meta->wp = 0xffff;
     }
 
-    if (strcmp(type, "W_SEQ") != 0) {
+    if (strcmp(type, "W_SEQ") == 0) {
+        chunk_meta->type = LNVM_CHUNK_TYPE_SEQ;
+    } else if (strcmp(type, "W_RAN") == 0) {
+        chunk_meta->type = LNVM_CHUNK_TYPE_RAN;
+    } else {
         return 1;
     }
-
-    chunk_meta->type = LNVM_CHUNK_TYPE_SEQ;
 
     return 0;
 }
