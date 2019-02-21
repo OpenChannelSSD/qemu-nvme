@@ -51,6 +51,7 @@ typedef struct NvmeRequest {
     uint16_t status;
     uint64_t slba;
     uint16_t nlb;
+    uint8_t  is_write;
 
     /* sector offset relative to slba where reads become invalid */
     uint64_t predef;
@@ -118,7 +119,6 @@ typedef struct NvmeNamespace {
     uint64_t        nsze;
     struct {
         uint64_t begin;
-        uint64_t predef;
         uint64_t data;
         uint64_t meta;
     } blk_backend;
@@ -202,6 +202,15 @@ typedef struct NvmeParams {
     DEFINE_PROP_UINT16("vid", _state, _props.vid, LNVM_VID), \
     DEFINE_PROP_UINT16("did", _state, _props.did, LNVM_DID)
 
+typedef struct NvmeDialect {
+    void *state;
+
+    uint16_t (*rw_check_req)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
+    uint64_t (*blk_idx)(struct NvmeCtrl *, uint64_t);
+    uint16_t (*admin_cmd)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
+    uint16_t (*io_cmd)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
+} NvmeDialect;
+
 typedef struct NvmeCtrl {
     PCIDevice    parent_obj;
     MemoryRegion iomem;
@@ -246,7 +255,7 @@ typedef struct NvmeCtrl {
     QEMUTimer   *aer_timer;
     uint8_t     aer_mask;
 
-    LnvmCtrl lnvm_ctrl;
+    NvmeDialect dialect;
 } NvmeCtrl;
 
 typedef struct NvmeDifTuple {
