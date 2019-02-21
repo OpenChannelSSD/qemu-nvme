@@ -18,30 +18,38 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "sysemu/sysemu.h"
 #include "monitor/monitor.h"
+#include "qapi/error.h"
+#include "qapi/qapi-commands-misc.h"
+#include "qapi/qmp/qerror.h"
 #include "hw/pci/pci.h"
-#include "qmp-commands.h"
+#include "hw/pci/msi.h"
+
+bool msi_nonbroken;
+bool pci_available;
 
 PciInfoList *qmp_query_pci(Error **errp)
 {
-    error_set(errp, QERR_UNSUPPORTED);
+    error_setg(errp, QERR_UNSUPPORTED);
     return NULL;
 }
 
-static void pci_error_message(Monitor *mon)
+void hmp_pcie_aer_inject_error(Monitor *mon, const QDict *qdict)
 {
     monitor_printf(mon, "PCI devices not supported\n");
 }
 
-int do_pcie_aer_inject_error(Monitor *mon,
-                             const QDict *qdict, QObject **ret_data)
+/* kvm-all wants this */
+MSIMessage pci_get_msi_message(PCIDevice *dev, int vector)
 {
-    pci_error_message(mon);
-    return -ENOSYS;
+    g_assert(false);
+    return (MSIMessage){};
 }
 
-void pcie_aer_inject_error_print(Monitor *mon, const QObject *data)
+uint16_t pci_requester_id(PCIDevice *dev)
 {
-    pci_error_message(mon);
+    g_assert(false);
+    return 0;
 }

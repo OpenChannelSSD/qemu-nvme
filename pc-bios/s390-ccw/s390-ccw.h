@@ -18,12 +18,6 @@ typedef unsigned short     u16;
 typedef unsigned int       u32;
 typedef unsigned long long u64;
 typedef unsigned long      ulong;
-typedef long               size_t;
-typedef int                bool;
-typedef unsigned char      uint8_t;
-typedef unsigned short     uint16_t;
-typedef unsigned int       uint32_t;
-typedef unsigned long long uint64_t;
 typedef unsigned char      __u8;
 typedef unsigned short     __u16;
 typedef unsigned int       __u32;
@@ -42,42 +36,69 @@ typedef unsigned long long __u64;
 #ifndef NULL
 #define NULL    0
 #endif
+#ifndef MIN
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#endif
+#ifndef MIN_NON_ZERO
+#define MIN_NON_ZERO(a, b) ((a) == 0 ? (b) : \
+                            ((b) == 0 ? (a) : (MIN(a, b))))
+#endif
+
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
 #include "cio.h"
+#include "iplb.h"
+
+typedef struct irb Irb;
+typedef struct ccw1 Ccw1;
+typedef struct cmd_orb CmdOrb;
+typedef struct schib Schib;
+typedef struct chsc_area_sda ChscAreaSda;
+typedef struct senseid SenseId;
+typedef struct subchannel_id SubChannelId;
 
 /* start.s */
 void disabled_wait(void);
+void consume_sclp_int(void);
 
 /* main.c */
-void virtio_panic(const char *string);
+void panic(const char *string);
 void write_subsystem_identification(void);
+extern char stack[PAGE_SIZE * 8] __attribute__((__aligned__(PAGE_SIZE)));
+unsigned int get_loadparm_index(void);
 
-/* sclp-ascii.c */
+/* sclp.c */
 void sclp_print(const char *string);
+void sclp_set_write_mask(uint32_t receive_mask, uint32_t send_mask);
 void sclp_setup(void);
+void sclp_get_loadparm_ascii(char *loadparm);
+int sclp_read(char *str, size_t count);
 
 /* virtio.c */
 unsigned long virtio_load_direct(ulong rec_list1, ulong rec_list2,
                                  ulong subchan_id, void *load_addr);
-bool virtio_is_blk(struct subchannel_id schid);
-void virtio_setup_block(struct subchannel_id schid);
+bool virtio_is_supported(SubChannelId schid);
+void virtio_blk_setup_device(SubChannelId schid);
 int virtio_read(ulong sector, void *load_addr);
 int enable_mss_facility(void);
+u64 get_clock(void);
+ulong get_second(void);
 
 /* bootmap.c */
 void zipl_load(void);
 
-static inline void *memset(void *s, int c, size_t n)
-{
-    int i;
-    unsigned char *p = s;
+/* jump2ipl.c */
+void jump_to_IPL_code(uint64_t address);
+void jump_to_low_kernel(void);
 
-    for (i = 0; i < n; i++) {
-        p[i] = c;
-    }
+/* menu.c */
+void menu_set_parms(uint8_t boot_menu_flag, uint32_t boot_menu_timeout);
+int menu_get_zipl_boot_index(const char *menu_data);
+bool menu_is_enabled_zipl(void);
+int menu_get_enum_boot_index(bool *valid_entries);
+bool menu_is_enabled_enum(void);
 
-    return s;
-}
+#define MAX_BOOT_ENTRIES  31
 
 static inline void fill_hex(char *out, unsigned char val)
 {
@@ -138,5 +159,45 @@ static inline void yield(void)
 }
 
 #define MAX_SECTOR_SIZE 4096
+
+static inline void sleep(unsigned int seconds)
+{
+    ulong target = get_second() + seconds;
+
+    while (get_second() < target) {
+        yield();
+    }
+}
+
+static inline void IPL_assert(bool term, const char *message)
+{
+    if (!term) {
+        sclp_print("\n! ");
+        sclp_print(message);
+        panic(" !\n"); /* no return */
+    }
+}
+
+static inline void IPL_check(bool term, const char *message)
+{
+    if (!term) {
+        sclp_print("\n! WARNING: ");
+        sclp_print(message);
+        sclp_print(" !\n");
+    }
+}
+
+extern const unsigned char ebc2asc[256];
+static inline void ebcdic_to_ascii(const char *src,
+                                   char *dst,
+                                   unsigned int size)
+{
+    unsigned int i;
+
+    for (i = 0; i < size; i++) {
+        unsigned c = src[i];
+        dst[i] = ebc2asc[c];
+    }
+}
 
 #endif /* S390_CCW_H */

@@ -23,12 +23,12 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include <linux/ip.h>
 #include <netdb.h>
-#include "config-host.h"
 #include "net/net.h"
 #include "clients.h"
-#include "monitor/monitor.h"
+#include "qapi/error.h"
 #include "qemu-common.h"
 #include "qemu/error-report.h"
 #include "qemu/option.h"
@@ -133,17 +133,15 @@ typedef struct NetL2TPV3State {
 
 } NetL2TPV3State;
 
-static int l2tpv3_can_send(void *opaque);
 static void net_l2tpv3_send(void *opaque);
 static void l2tpv3_writable(void *opaque);
 
 static void l2tpv3_update_fd_handler(NetL2TPV3State *s)
 {
-    qemu_set_fd_handler2(s->fd,
-                         s->read_poll ? l2tpv3_can_send : NULL,
-                         s->read_poll ? net_l2tpv3_send     : NULL,
-                         s->write_poll ? l2tpv3_writable : NULL,
-                         s);
+    qemu_set_fd_handler(s->fd,
+                        s->read_poll ? net_l2tpv3_send : NULL,
+                        s->write_poll ? l2tpv3_writable : NULL,
+                        s);
 }
 
 static void l2tpv3_read_poll(NetL2TPV3State *s, bool enable)
@@ -167,13 +165,6 @@ static void l2tpv3_writable(void *opaque)
     NetL2TPV3State *s = opaque;
     l2tpv3_write_poll(s, false);
     qemu_flush_queued_packets(&s->nc);
-}
-
-static int l2tpv3_can_send(void *opaque)
-{
-    NetL2TPV3State *s = opaque;
-
-    return qemu_can_send_packet(&s->nc);
 }
 
 static void l2tpv3_send_completed(NetClientState *nc, ssize_t len)
@@ -335,7 +326,7 @@ static int l2tpv3_verify_header(NetL2TPV3State *s, uint8_t *buf)
         if (s->cookie_is_64) {
             cookie = ldq_be_p(buf + s->cookie_offset);
         } else {
-            cookie = ldl_be_p(buf + s->cookie_offset);
+            cookie = ldl_be_p(buf + s->cookie_offset) & 0xffffffffULL;
         }
         if (cookie != s->rx_cookie) {
             if (!s->header_mismatch) {
@@ -489,12 +480,12 @@ static struct mmsghdr *build_l2tpv3_vector(NetL2TPV3State *s, int count)
     struct iovec *iov;
     struct mmsghdr *msgvec, *result;
 
-    msgvec = g_malloc(sizeof(struct mmsghdr) * count);
+    msgvec = g_new(struct mmsghdr, count);
     result = msgvec;
     for (i = 0; i < count ; i++) {
         msgvec->msg_hdr.msg_name = NULL;
         msgvec->msg_hdr.msg_namelen = 0;
-        iov =  g_malloc(sizeof(struct iovec) * IOVSIZE);
+        iov =  g_new(struct iovec, IOVSIZE);
         msgvec->msg_hdr.msg_iov = iov;
         iov->iov_base = g_malloc(s->header_size);
         iov->iov_len = s->header_size;
@@ -516,7 +507,7 @@ static void net_l2tpv3_cleanup(NetClientState *nc)
     qemu_purge_queued_packets(nc);
     l2tpv3_read_poll(s, false);
     l2tpv3_write_poll(s, false);
-    if (s->fd > 0) {
+    if (s->fd >= 0) {
         close(s->fd);
     }
     destroy_vector(s->msgvec, MAX_L2TPV3_MSGCNT, IOVSIZE);
@@ -526,7 +517,7 @@ static void net_l2tpv3_cleanup(NetClientState *nc)
 }
 
 static NetClientInfo net_l2tpv3_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_L2TPV3,
+    .type = NET_CLIENT_DRIVER_L2TPV3,
     .size = sizeof(NetL2TPV3State),
     .receive = net_l2tpv3_receive_dgram,
     .receive_iov = net_l2tpv3_receive_dgram_iov,
@@ -534,12 +525,10 @@ static NetClientInfo net_l2tpv3_info = {
     .cleanup = net_l2tpv3_cleanup,
 };
 
-int net_init_l2tpv3(const NetClientOptions *opts,
+int net_init_l2tpv3(const Netdev *netdev,
                     const char *name,
-                    NetClientState *peer)
+                    NetClientState *peer, Error **errp)
 {
-
-
     const NetdevL2TPv3Options *l2tpv3;
     NetL2TPV3State *s;
     NetClientState *nc;
@@ -556,8 +545,8 @@ int net_init_l2tpv3(const NetClientOptions *opts,
     s->queue_tail = 0;
     s->header_mismatch = false;
 
-    assert(opts->kind == NET_CLIENT_OPTIONS_KIND_L2TPV3);
-    l2tpv3 = opts->l2tpv3;
+    assert(netdev->type == NET_CLIENT_DRIVER_L2TPV3);
+    l2tpv3 = &netdev->u.l2tpv3;
 
     if (l2tpv3->has_ipv6 && l2tpv3->ipv6) {
         s->ipv6 = l2tpv3->ipv6;
@@ -566,7 +555,7 @@ int net_init_l2tpv3(const NetClientOptions *opts,
     }
 
     if ((l2tpv3->has_offset) && (l2tpv3->offset > 256)) {
-        error_report("l2tpv3_open : offset must be less than 256 bytes");
+        error_setg(errp, "offset must be less than 256 bytes");
         goto outerr;
     }
 
@@ -574,6 +563,8 @@ int net_init_l2tpv3(const NetClientOptions *opts,
         if (l2tpv3->has_rxcookie && l2tpv3->has_txcookie) {
             s->cookie = true;
         } else {
+            error_setg(errp,
+                       "require both 'rxcookie' and 'txcookie' or neither");
             goto outerr;
         }
     } else {
@@ -589,7 +580,7 @@ int net_init_l2tpv3(const NetClientOptions *opts,
     if (l2tpv3->has_udp && l2tpv3->udp) {
         s->udp = true;
         if (!(l2tpv3->has_srcport && l2tpv3->has_dstport)) {
-            error_report("l2tpv3_open : need both src and dst port for udp");
+            error_setg(errp, "need both src and dst port for udp");
             goto outerr;
         } else {
             srcport = l2tpv3->srcport;
@@ -650,21 +641,19 @@ int net_init_l2tpv3(const NetClientOptions *opts,
     gairet = getaddrinfo(l2tpv3->src, srcport, &hints, &result);
 
     if ((gairet != 0) || (result == NULL)) {
-        error_report(
-            "l2tpv3_open : could not resolve src, errno = %s",
-            gai_strerror(gairet)
-        );
+        error_setg(errp, "could not resolve src, errno = %s",
+                   gai_strerror(gairet));
         goto outerr;
     }
     fd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
     if (fd == -1) {
         fd = -errno;
-        error_report("l2tpv3_open : socket creation failed, errno = %d", -fd);
-        freeaddrinfo(result);
+        error_setg(errp, "socket creation failed, errno = %d",
+                   -fd);
         goto outerr;
     }
     if (bind(fd, (struct sockaddr *) result->ai_addr, result->ai_addrlen)) {
-        error_report("l2tpv3_open :  could not bind socket err=%i", errno);
+        error_setg(errp, "could not bind socket err=%i", errno);
         goto outerr;
     }
     if (result) {
@@ -689,15 +678,12 @@ int net_init_l2tpv3(const NetClientOptions *opts,
     result = NULL;
     gairet = getaddrinfo(l2tpv3->dst, dstport, &hints, &result);
     if ((gairet != 0) || (result == NULL)) {
-        error_report(
-            "l2tpv3_open : could not resolve dst, error = %s",
-            gai_strerror(gairet)
-        );
+        error_setg(errp, "could not resolve dst, error = %s",
+                   gai_strerror(gairet));
         goto outerr;
     }
 
-    s->dgram_dst = g_malloc(sizeof(struct sockaddr_storage));
-    memset(s->dgram_dst, '\0' , sizeof(struct sockaddr_storage));
+    s->dgram_dst = g_new0(struct sockaddr_storage, 1);
     memcpy(s->dgram_dst, result->ai_addr, result->ai_addrlen);
     s->dst_size = result->ai_addrlen;
 
@@ -731,7 +717,7 @@ int net_init_l2tpv3(const NetClientOptions *opts,
     }
 
     s->msgvec = build_l2tpv3_vector(s, MAX_L2TPV3_MSGCNT);
-    s->vec = g_malloc(sizeof(struct iovec) * MAX_L2TPV3_IOVCNT);
+    s->vec = g_new(struct iovec, MAX_L2TPV3_IOVCNT);
     s->header_buf = g_malloc(s->header_size);
 
     qemu_set_nonblock(fd);
@@ -746,7 +732,7 @@ int net_init_l2tpv3(const NetClientOptions *opts,
     return 0;
 outerr:
     qemu_del_net_client(nc);
-    if (fd > 0) {
+    if (fd >= 0) {
         close(fd);
     }
     if (result) {

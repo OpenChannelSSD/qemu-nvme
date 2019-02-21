@@ -23,6 +23,7 @@
  */
 
 
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qemu/acl.h"
 
@@ -132,7 +133,6 @@ int qemu_acl_insert(qemu_acl *acl,
                     const char *match,
                     int index)
 {
-    qemu_acl_entry *entry;
     qemu_acl_entry *tmp;
     int i = 0;
 
@@ -142,13 +142,14 @@ int qemu_acl_insert(qemu_acl *acl,
         return qemu_acl_append(acl, deny, match);
     }
 
-    entry = g_malloc(sizeof(*entry));
-    entry->match = g_strdup(match);
-    entry->deny = deny;
-
     QTAILQ_FOREACH(tmp, &acl->entries, next) {
         i++;
         if (i == index) {
+            qemu_acl_entry *entry;
+            entry = g_malloc(sizeof(*entry));
+            entry->match = g_strdup(match);
+            entry->deny = deny;
+
             QTAILQ_INSERT_BEFORE(tmp, entry, next);
             acl->nentries++;
             break;
@@ -176,12 +177,3 @@ int qemu_acl_remove(qemu_acl *acl,
     }
     return -1;
 }
-
-
-/*
- * Local variables:
- *  c-indent-level: 4
- *  c-basic-offset: 4
- *  tab-width: 8
- * End:
- */

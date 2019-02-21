@@ -19,19 +19,14 @@
 /* This file implements emulation of the 32-bit PCI controller found in some
  * 4xx SoCs, such as the 440EP. */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/ppc/ppc.h"
 #include "hw/ppc/ppc4xx.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
 #include "exec/address-spaces.h"
-
-#undef DEBUG
-#ifdef DEBUG
-#define DPRINTF(fmt, ...) do { printf(fmt, ## __VA_ARGS__); } while (0)
-#else
-#define DPRINTF(fmt, ...)
-#endif /* DEBUG */
+#include "trace.h"
 
 struct PCIMasterMap {
     uint32_t la;
@@ -91,30 +86,6 @@ typedef struct PPC4xxPCIState PPC4xxPCIState;
 #define PCI_REG_SIZE        0x40
 
 #define PCI_ALL_SIZE        (PCI_REG_BASE + PCI_REG_SIZE)
-
-static uint64_t pci4xx_cfgaddr_read(void *opaque, hwaddr addr,
-                                    unsigned size)
-{
-    PPC4xxPCIState *ppc4xx_pci = opaque;
-    PCIHostState *phb = PCI_HOST_BRIDGE(ppc4xx_pci);
-
-    return phb->config_reg;
-}
-
-static void pci4xx_cfgaddr_write(void *opaque, hwaddr addr,
-                                  uint64_t value, unsigned size)
-{
-    PPC4xxPCIState *ppc4xx_pci = opaque;
-    PCIHostState *phb = PCI_HOST_BRIDGE(ppc4xx_pci);
-
-    phb->config_reg = value & ~0x3;
-}
-
-static const MemoryRegionOps pci4xx_cfgaddr_ops = {
-    .read = pci4xx_cfgaddr_read,
-    .write = pci4xx_cfgaddr_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-};
 
 static void ppc4xx_pci_reg_write4(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
@@ -272,8 +243,7 @@ static int ppc4xx_pci_map_irq(PCIDevice *pci_dev, int irq_num)
 {
     int slot = pci_dev->devfn >> 3;
 
-    DPRINTF("%s: devfn %x irq %d -> %d\n", __func__,
-            pci_dev->devfn, irq_num, slot);
+    trace_ppc4xx_pci_map_irq(pci_dev->devfn, irq_num, slot);
 
     return slot - 1;
 }
@@ -282,7 +252,7 @@ static void ppc4xx_pci_set_irq(void *opaque, int irq_num, int level)
 {
     qemu_irq *pci_irqs = opaque;
 
-    DPRINTF("%s: PCI irq %d\n", __func__, irq_num);
+    trace_ppc4xx_pci_set_irq(irq_num);
     if (irq_num < 0) {
         fprintf(stderr, "%s: PCI irq %d\n", __func__, irq_num);
         return;
@@ -330,8 +300,9 @@ static const VMStateDescription vmstate_ppc4xx_pci = {
 };
 
 /* XXX Interrupt acknowledge cycles not supported. */
-static int ppc4xx_pcihost_initfn(SysBusDevice *dev)
+static void ppc4xx_pcihost_realize(DeviceState *dev, Error **errp)
 {
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     PPC4xxPCIState *s;
     PCIHostState *h;
     PCIBus *b;
@@ -341,12 +312,12 @@ static int ppc4xx_pcihost_initfn(SysBusDevice *dev)
     s = PPC4xx_PCI_HOST_BRIDGE(dev);
 
     for (i = 0; i < ARRAY_SIZE(s->irq); i++) {
-        sysbus_init_irq(dev, &s->irq[i]);
+        sysbus_init_irq(sbd, &s->irq[i]);
     }
 
-    b = pci_register_bus(DEVICE(dev), NULL, ppc4xx_pci_set_irq,
-                         ppc4xx_pci_map_irq, s->irq, get_system_memory(),
-                         get_system_io(), 0, 4, TYPE_PCI_BUS);
+    b = pci_register_root_bus(dev, NULL, ppc4xx_pci_set_irq,
+                              ppc4xx_pci_map_irq, s->irq, get_system_memory(),
+                              get_system_io(), 0, 4, TYPE_PCI_BUS);
     h->bus = b;
 
     pci_create_simple(b, 0, "ppc4xx-host-bridge");
@@ -362,10 +333,8 @@ static int ppc4xx_pcihost_initfn(SysBusDevice *dev)
     memory_region_add_subregion(&s->container, PCIC0_CFGADDR, &h->conf_mem);
     memory_region_add_subregion(&s->container, PCIC0_CFGDATA, &h->data_mem);
     memory_region_add_subregion(&s->container, PCI_REG_BASE, &s->iomem);
-    sysbus_init_mmio(dev, &s->container);
+    sysbus_init_mmio(sbd, &s->container);
     qemu_register_reset(ppc4xx_pci_reset, s);
-
-    return 0;
 }
 
 static void ppc4xx_host_bridge_class_init(ObjectClass *klass, void *data)
@@ -381,7 +350,7 @@ static void ppc4xx_host_bridge_class_init(ObjectClass *klass, void *data)
      * PCI-facing part of the host bridge, not usable without the
      * host-facing part, which can't be device_add'ed, yet.
      */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
 }
 
 static const TypeInfo ppc4xx_host_bridge_info = {
@@ -389,14 +358,17 @@ static const TypeInfo ppc4xx_host_bridge_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(PCIDevice),
     .class_init    = ppc4xx_host_bridge_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void ppc4xx_pcihost_class_init(ObjectClass *klass, void *data)
 {
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    k->init = ppc4xx_pcihost_initfn;
+    dc->realize = ppc4xx_pcihost_realize;
     dc->vmsd = &vmstate_ppc4xx_pci;
 }
 

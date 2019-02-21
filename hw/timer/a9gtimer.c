@@ -20,10 +20,13 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "hw/timer/a9gtimer.h"
+#include "qapi/error.h"
 #include "qemu/timer.h"
 #include "qemu/bitops.h"
 #include "qemu/log.h"
+#include "qom/cpu.h"
 
 #ifndef A9_GTIMER_ERR_DEBUG
 #define A9_GTIMER_ERR_DEBUG 0
@@ -34,7 +37,7 @@
         fprintf(stderr,  ": %s: ", __func__); \
         fprintf(stderr, ## __VA_ARGS__); \
     } \
-} while (0);
+} while (0)
 
 #define DB_PRINT(...) DB_PRINT_L(0, ## __VA_ARGS__)
 
@@ -79,15 +82,15 @@ static void a9_gtimer_update(A9GTimerState *s, bool sync)
         if ((s->control & R_CONTROL_TIMER_ENABLE) &&
                 (gtb->control & R_CONTROL_COMP_ENABLE)) {
             /* R2p0+, where the compare function is >= */
-            while (gtb->compare < update.new) {
+            if (gtb->compare < update.new) {
                 DB_PRINT("Compare event happened for CPU %d\n", i);
                 gtb->status = 1;
-                if (gtb->control & R_CONTROL_AUTO_INCREMENT) {
-                    DB_PRINT("Auto incrementing timer compare by %" PRId32 "\n",
-                             gtb->inc);
-                    gtb->compare += gtb->inc;
-                } else {
-                    break;
+                if (gtb->control & R_CONTROL_AUTO_INCREMENT && gtb->inc) {
+                    uint64_t inc =
+                        QEMU_ALIGN_UP(update.new - gtb->compare, gtb->inc);
+                    DB_PRINT("Auto incrementing timer compare by %"
+                                                        PRId64 "\n", inc);
+                    gtb->compare += inc;
                 }
             }
             cdiff = (int64_t)gtb->compare - (int64_t)update.new + 1;
@@ -121,7 +124,7 @@ static void a9_gtimer_update_no_sync(void *opaque)
 {
     A9GTimerState *s = A9_GTIMER(opaque);
 
-    return a9_gtimer_update(s, false);
+    a9_gtimer_update(s, false);
 }
 
 static uint64_t a9_gtimer_read(void *opaque, hwaddr addr, unsigned size)
@@ -181,7 +184,7 @@ static void a9_gtimer_write(void *opaque, hwaddr addr, uint64_t value,
     case R_COUNTER_LO:
         /*
          * Keep it simple - ARM docco explicitly says to disable timer before
-         * modding it, so dont bother trying to do all the difficult on the fly
+         * modding it, so don't bother trying to do all the difficult on the fly
          * timer modifications - (if they even work in real hardware??).
          */
         if (s->control & R_CONTROL_TIMER_ENABLE) {
@@ -289,7 +292,7 @@ static void a9_gtimer_realize(DeviceState *dev, Error **errp)
     int i;
 
     if (s->num_cpu < 1 || s->num_cpu > A9_GTIMER_MAX_CPUS) {
-        error_setg(errp, "%s: num-cpu must be between 1 and %d\n",
+        error_setg(errp, "%s: num-cpu must be between 1 and %d",
                    __func__, A9_GTIMER_MAX_CPUS);
         return;
     }
@@ -328,7 +331,7 @@ static const VMStateDescription vmstate_a9_gtimer = {
     .version_id = 1,
     .minimum_version_id = 1,
     .fields = (VMStateField[]) {
-        VMSTATE_TIMER(timer, A9GTimerState),
+        VMSTATE_TIMER_PTR(timer, A9GTimerState),
         VMSTATE_UINT64(counter, A9GTimerState),
         VMSTATE_UINT64(ref_counter, A9GTimerState),
         VMSTATE_UINT64(cpu_ref_time, A9GTimerState),

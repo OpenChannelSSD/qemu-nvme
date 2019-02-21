@@ -30,8 +30,10 @@
  * tcp.h,v 1.3 1994/08/21 05:27:34 paul Exp
  */
 
-#ifndef _TCP_H_
-#define _TCP_H_
+#ifndef TCP_H
+#define TCP_H
+
+#include <glib.h>
 
 typedef	uint32_t tcp_seq;
 
@@ -51,7 +53,7 @@ struct tcphdr {
 	uint16_t th_dport;              /* destination port */
 	tcp_seq	th_seq;			/* sequence number */
 	tcp_seq	th_ack;			/* acknowledgement number */
-#ifdef HOST_WORDS_BIGENDIAN
+#if G_BYTE_ORDER == G_BIG_ENDIAN
 	uint8_t	th_off:4,		/* data offset */
 		th_x2:4;		/* (unused) */
 #else
@@ -106,6 +108,8 @@ struct tcphdr {
  */
 #undef TCP_MSS
 #define	TCP_MSS	1460
+#undef TCP6_MSS
+#define TCP6_MSS 1440
 
 #undef TCP_MAXWIN
 #define	TCP_MAXWIN	65535	/* largest value for (unscaled) window */

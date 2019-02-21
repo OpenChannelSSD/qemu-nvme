@@ -18,8 +18,9 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "sysemu/sysemu.h"
-#include "qapi/qmp/types.h"
+#include "qapi/qmp/qdict.h"
 #include "monitor/monitor.h"
 #include "hw/pci/pci_bridge.h"
 #include "hw/pci/pcie.h"
@@ -27,6 +28,7 @@
 #include "hw/pci/msi.h"
 #include "hw/pci/pci_bus.h"
 #include "hw/pci/pcie_regs.h"
+#include "qapi/error.h"
 
 //#define DEBUG_PCIE
 #ifdef DEBUG_PCIE
@@ -40,6 +42,13 @@
 
 #define PCI_ERR_SRC_COR_OFFS    0
 #define PCI_ERR_SRC_UNCOR_OFFS  2
+
+typedef struct PCIEErrorDetails {
+    const char *id;
+    const char *root_bus;
+    int bus;
+    int devfn;
+} PCIEErrorDetails;
 
 /* From 6.2.7 Error Listing and Rules. Table 6-2, 6-3 and 6-4 */
 static uint32_t pcie_aer_uncor_default_severity(uint32_t status)
@@ -94,21 +103,17 @@ static void aer_log_clear_all_err(PCIEAERLog *aer_log)
     aer_log->log_num = 0;
 }
 
-int pcie_aer_init(PCIDevice *dev, uint16_t offset)
+int pcie_aer_init(PCIDevice *dev, uint8_t cap_ver, uint16_t offset,
+                  uint16_t size, Error **errp)
 {
-    PCIExpressDevice *exp;
+    pcie_add_capability(dev, PCI_EXT_CAP_ID_ERR, cap_ver,
+                        offset, size);
+    dev->exp.aer_cap = offset;
 
-    pcie_add_capability(dev, PCI_EXT_CAP_ID_ERR, PCI_ERR_VER,
-                        offset, PCI_ERR_SIZEOF);
-    exp = &dev->exp;
-    exp->aer_cap = offset;
-
-    /* log_max is property */
-    if (dev->exp.aer_log.log_max == PCIE_AER_LOG_MAX_UNSET) {
-        dev->exp.aer_log.log_max = PCIE_AER_LOG_MAX_DEFAULT;
-    }
-    /* clip down the value to avoid unreasobale memory usage */
+    /* clip down the value to avoid unreasonable memory usage */
     if (dev->exp.aer_log.log_max > PCIE_AER_LOG_MAX_LIMIT) {
+        error_setg(errp, "Invalid aer_log_max %d. The max number of aer log "
+                "is %d", dev->exp.aer_log.log_max, PCIE_AER_LOG_MAX_LIMIT);
         return -EINVAL;
     }
     dev->exp.aer_log.log = g_malloc0(sizeof dev->exp.aer_log.log[0] *
@@ -123,7 +128,7 @@ int pcie_aer_init(PCIDevice *dev, uint16_t offset)
                  PCI_ERR_UNC_SUPPORTED);
 
     pci_long_test_and_set_mask(dev->w1cmask + offset + PCI_ERR_COR_STATUS,
-                               PCI_ERR_COR_STATUS);
+                               PCI_ERR_COR_SUPPORTED);
 
     pci_set_long(dev->config + offset + PCI_ERR_COR_MASK,
                  PCI_ERR_COR_MASK_DEFAULT);
@@ -403,14 +408,14 @@ static void pcie_aer_msg(PCIDevice *dev, const PCIEAERMsg *msg)
              */
             return;
         }
-        dev = pci_bridge_get_device(dev->bus);
+        dev = pci_bridge_get_device(pci_get_bus(dev));
     }
 }
 
 static void pcie_aer_update_log(PCIDevice *dev, const PCIEAERErr *err)
 {
     uint8_t *aer_cap = dev->config + dev->exp.aer_cap;
-    uint8_t first_bit = ffs(err->status) - 1;
+    uint8_t first_bit = ctz32(err->status);
     uint32_t errcap = pci_get_long(aer_cap + PCI_ERR_CAP);
     int i;
 
@@ -433,7 +438,7 @@ static void pcie_aer_update_log(PCIDevice *dev, const PCIEAERErr *err)
     }
 
     if ((err->flags & PCIE_AER_ERR_TLP_PREFIX_PRESENT) &&
-        (pci_get_long(dev->config + dev->exp.exp_cap + PCI_EXP_DEVCTL2) &
+        (pci_get_long(dev->config + dev->exp.exp_cap + PCI_EXP_DEVCAP2) &
          PCI_EXP_DEVCAP2_EETLPP)) {
         for (i = 0; i < ARRAY_SIZE(err->prefix); ++i) {
             /* 7.10.12 tlp prefix log register */
@@ -618,14 +623,14 @@ static bool pcie_aer_inject_uncor_error(PCIEAERInject *inj, bool is_fatal)
  * non-Function specific error must be recorded in all functions.
  * It is the responsibility of the caller of this function.
  * It is also caller's responsibility to determine which function should
- * report the rerror.
+ * report the error.
  *
  * 6.2.4 Error Logging
- * 6.2.5 Sqeunce of Device Error Signaling and Logging Operations
- * table 6-2: Flowchard Showing Sequence of Device Error Signaling and Logging
- *            Operations
+ * 6.2.5 Sequence of Device Error Signaling and Logging Operations
+ * Figure 6-2: Flowchart Showing Sequence of Device Error Signaling and Logging
+ *             Operations
  */
-int pcie_aer_inject_error(PCIDevice *dev, const PCIEAERErr *err)
+static int pcie_aer_inject_error(PCIDevice *dev, const PCIEAERErr *err)
 {
     uint8_t *aer_cap = NULL;
     uint16_t devctl = 0;
@@ -807,28 +812,13 @@ const VMStateDescription vmstate_pcie_aer_log = {
     .minimum_version_id = 1,
     .fields = (VMStateField[]) {
         VMSTATE_UINT16(log_num, PCIEAERLog),
-        VMSTATE_UINT16_EQUAL(log_max, PCIEAERLog),
+        VMSTATE_UINT16_EQUAL(log_max, PCIEAERLog, NULL),
         VMSTATE_VALIDATE("log_num <= log_max", pcie_aer_state_log_num_valid),
         VMSTATE_STRUCT_VARRAY_POINTER_UINT16(log, PCIEAERLog, log_num,
                               vmstate_pcie_aer_err, PCIEAERErr),
         VMSTATE_END_OF_LIST()
     }
 };
-
-void pcie_aer_inject_error_print(Monitor *mon, const QObject *data)
-{
-    QDict *qdict;
-    int devfn;
-    assert(qobject_type(data) == QTYPE_QDICT);
-    qdict = qobject_to_qdict(data);
-
-    devfn = (int)qdict_get_int(qdict, "devfn");
-    monitor_printf(mon, "OK id: %s root bus: %s, bus: %x devfn: %x.%x\n",
-                   qdict_get_str(qdict, "id"),
-                   qdict_get_str(qdict, "root_bus"),
-                   (int) qdict_get_int(qdict, "bus"),
-                   PCI_SLOT(devfn), PCI_FUNC(devfn));
-}
 
 typedef struct PCIEAERErrorName {
     const char *name;
@@ -842,10 +832,6 @@ typedef struct PCIEAERErrorName {
  */
 static const struct PCIEAERErrorName pcie_aer_error_list[] = {
     {
-        .name = "TRAIN",
-        .val = PCI_ERR_UNC_TRAIN,
-        .correctable = false,
-    }, {
         .name = "DLP",
         .val = PCI_ERR_UNC_DLP,
         .correctable = false,
@@ -962,8 +948,14 @@ static int pcie_aer_parse_error_string(const char *error_name,
     return -EINVAL;
 }
 
-int do_pcie_aer_inject_error(Monitor *mon,
-                             const QDict *qdict, QObject **ret_data)
+/*
+ * Inject an error described by @qdict.
+ * On success, set @details to show where error was sent.
+ * Return negative errno if injection failed and a message was emitted.
+ */
+static int do_pcie_aer_inject_error(Monitor *mon,
+                                    const QDict *qdict,
+                                    PCIEErrorDetails *details)
 {
     const char *id = qdict_get_str(qdict, "id");
     const char *error_name;
@@ -990,7 +982,7 @@ int do_pcie_aer_inject_error(Monitor *mon,
     if (pcie_aer_parse_error_string(error_name, &error_status, &correctable)) {
         char *e = NULL;
         error_status = strtoul(error_name, &e, 0);
-        correctable = qdict_get_try_bool(qdict, "correctable", 0);
+        correctable = qdict_get_try_bool(qdict, "correctable", false);
         if (!e || *e != '\0') {
             monitor_printf(mon, "invalid error status value. \"%s\"",
                            error_name);
@@ -998,13 +990,13 @@ int do_pcie_aer_inject_error(Monitor *mon,
         }
     }
     err.status = error_status;
-    err.source_id = (pci_bus_num(dev->bus) << 8) | dev->devfn;
+    err.source_id = pci_requester_id(dev);
 
     err.flags = 0;
     if (correctable) {
         err.flags |= PCIE_AER_ERR_IS_CORRECTABLE;
     }
-    if (qdict_get_try_bool(qdict, "advisory_non_fatal", 0)) {
+    if (qdict_get_try_bool(qdict, "advisory_non_fatal", false)) {
         err.flags |= PCIE_AER_ERR_MAYBE_ADVISORY;
     }
     if (qdict_haskey(qdict, "header0")) {
@@ -1025,13 +1017,28 @@ int do_pcie_aer_inject_error(Monitor *mon,
     err.prefix[3] = qdict_get_try_int(qdict, "prefix3", 0);
 
     ret = pcie_aer_inject_error(dev, &err);
-    *ret_data = qobject_from_jsonf("{'id': %s, "
-                                   "'root_bus': %s, 'bus': %d, 'devfn': %d, "
-                                   "'ret': %d}",
-                                   id, pci_root_bus_path(dev),
-                                   pci_bus_num(dev->bus), dev->devfn,
-                                   ret);
-    assert(*ret_data);
+    if (ret < 0) {
+        monitor_printf(mon, "failed to inject error: %s\n",
+                       strerror(-ret));
+        return ret;
+    }
+    details->id = id;
+    details->root_bus = pci_root_bus_path(dev);
+    details->bus = pci_dev_bus_num(dev);
+    details->devfn = dev->devfn;
 
     return 0;
+}
+
+void hmp_pcie_aer_inject_error(Monitor *mon, const QDict *qdict)
+{
+    PCIEErrorDetails data;
+
+    if (do_pcie_aer_inject_error(mon, qdict, &data) < 0) {
+        return;
+    }
+
+    monitor_printf(mon, "OK id: %s root bus: %s, bus: %x devfn: %x.%x\n",
+                   data.id, data.root_bus, data.bus,
+                   PCI_SLOT(data.devfn), PCI_FUNC(data.devfn));
 }

@@ -1,6 +1,7 @@
 /* bootp/dhcp defines */
+
 #ifndef SLIRP_BOOTP_H
-#define SLIRP_BOOTP_H 1
+#define SLIRP_BOOTP_H
 
 #define BOOTP_SERVER	67
 #define BOOTP_CLIENT	68
@@ -69,6 +70,7 @@
 #define RFC2132_MAX_SIZE	57
 #define RFC2132_RENEWAL_TIME    58
 #define RFC2132_REBIND_TIME     59
+#define RFC2132_TFTP_SERVER_NAME 66
 
 #define DHCPDISCOVER		1
 #define DHCPOFFER		2

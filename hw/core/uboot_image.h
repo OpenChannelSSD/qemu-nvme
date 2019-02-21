@@ -26,8 +26,8 @@
  ********************************************************************
  */
 
-#ifndef __UBOOT_IMAGE_H__
-#define __UBOOT_IMAGE_H__
+#ifndef UBOOT_IMAGE_H
+#define UBOOT_IMAGE_H
 
 /*
  * Operating System Codes
@@ -124,6 +124,7 @@
 #define IH_TYPE_SCRIPT		6	/* Script file			*/
 #define IH_TYPE_FILESYSTEM	7	/* Filesystem Image (any type)	*/
 #define IH_TYPE_FLATDT		8	/* Binary Flat Device Tree Blob	*/
+#define IH_TYPE_KERNEL_NOLOAD  14	/* OS Kernel Image (noload)	*/
 
 /*
  * Compression Types
@@ -155,4 +156,4 @@ typedef struct uboot_image_header {
 } uboot_image_header_t;
 
 
-#endif	/* __IMAGE_H__ */
+#endif /* UBOOT_IMAGE_H */

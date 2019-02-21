@@ -8,11 +8,16 @@
  * (at your option) any later version. See the COPYING file in the
  * top-level directory.
  */
+#include "qemu/osdep.h"
+#include "qemu-common.h"
+#include "cpu.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/cpus.h"
+#include "sysemu/hw_accel.h"
 #include "sysemu/kvm.h"
 #include "hw/i386/apic_internal.h"
 #include "hw/sysbus.h"
+#include "tcg/tcg.h"
 
 #define VAPIC_IO_PORT           0x7e
 
@@ -377,8 +382,7 @@ static void patch_byte(X86CPU *cpu, target_ulong addr, uint8_t byte)
     cpu_memory_rw_debug(CPU(cpu), addr, &byte, 1, 1);
 }
 
-static void patch_call(VAPICROMState *s, X86CPU *cpu, target_ulong ip,
-                       uint32_t target)
+static void patch_call(X86CPU *cpu, target_ulong ip, uint32_t target)
 {
     uint32_t offset;
 
@@ -387,16 +391,59 @@ static void patch_call(VAPICROMState *s, X86CPU *cpu, target_ulong ip,
     cpu_memory_rw_debug(CPU(cpu), ip + 1, (void *)&offset, sizeof(offset), 1);
 }
 
+typedef struct PatchInfo {
+    VAPICHandlers *handler;
+    target_ulong ip;
+} PatchInfo;
+
+static void do_patch_instruction(CPUState *cs, run_on_cpu_data data)
+{
+    X86CPU *x86_cpu = X86_CPU(cs);
+    PatchInfo *info = (PatchInfo *) data.host_ptr;
+    VAPICHandlers *handlers = info->handler;
+    target_ulong ip = info->ip;
+    uint8_t opcode[2];
+    uint32_t imm32 = 0;
+
+    cpu_memory_rw_debug(cs, ip, opcode, sizeof(opcode), 0);
+
+    switch (opcode[0]) {
+    case 0x89: /* mov r32 to r/m32 */
+        patch_byte(x86_cpu, ip, 0x50 + modrm_reg(opcode[1]));  /* push reg */
+        patch_call(x86_cpu, ip + 1, handlers->set_tpr);
+        break;
+    case 0x8b: /* mov r/m32 to r32 */
+        patch_byte(x86_cpu, ip, 0x90);
+        patch_call(x86_cpu, ip + 1, handlers->get_tpr[modrm_reg(opcode[1])]);
+        break;
+    case 0xa1: /* mov abs to eax */
+        patch_call(x86_cpu, ip, handlers->get_tpr[0]);
+        break;
+    case 0xa3: /* mov eax to abs */
+        patch_call(x86_cpu, ip, handlers->set_tpr_eax);
+        break;
+    case 0xc7: /* mov imm32, r/m32 (c7/0) */
+        patch_byte(x86_cpu, ip, 0x68);  /* push imm32 */
+        cpu_memory_rw_debug(cs, ip + 6, (void *)&imm32, sizeof(imm32), 0);
+        cpu_memory_rw_debug(cs, ip + 1, (void *)&imm32, sizeof(imm32), 1);
+        patch_call(x86_cpu, ip + 5, handlers->set_tpr);
+        break;
+    case 0xff: /* push r/m32 */
+        patch_byte(x86_cpu, ip, 0x50); /* push eax */
+        patch_call(x86_cpu, ip + 1, handlers->get_tpr_stack);
+        break;
+    default:
+        abort();
+    }
+
+    g_free(info);
+}
+
 static void patch_instruction(VAPICROMState *s, X86CPU *cpu, target_ulong ip)
 {
     CPUState *cs = CPU(cpu);
-    CPUX86State *env = &cpu->env;
     VAPICHandlers *handlers;
-    uint8_t opcode[2];
-    uint32_t imm32;
-    target_ulong current_pc = 0;
-    target_ulong current_cs_base = 0;
-    int current_flags = 0;
+    PatchInfo *info;
 
     if (smp_cpus == 1) {
         handlers = &s->rom_state.up;
@@ -404,52 +451,11 @@ static void patch_instruction(VAPICROMState *s, X86CPU *cpu, target_ulong ip)
         handlers = &s->rom_state.mp;
     }
 
-    if (!kvm_enabled()) {
-        cpu_restore_state(cs, cs->mem_io_pc);
-        cpu_get_tb_cpu_state(env, &current_pc, &current_cs_base,
-                             &current_flags);
-    }
+    info  = g_new(PatchInfo, 1);
+    info->handler = handlers;
+    info->ip = ip;
 
-    pause_all_vcpus();
-
-    cpu_memory_rw_debug(cs, ip, opcode, sizeof(opcode), 0);
-
-    switch (opcode[0]) {
-    case 0x89: /* mov r32 to r/m32 */
-        patch_byte(cpu, ip, 0x50 + modrm_reg(opcode[1]));  /* push reg */
-        patch_call(s, cpu, ip + 1, handlers->set_tpr);
-        break;
-    case 0x8b: /* mov r/m32 to r32 */
-        patch_byte(cpu, ip, 0x90);
-        patch_call(s, cpu, ip + 1, handlers->get_tpr[modrm_reg(opcode[1])]);
-        break;
-    case 0xa1: /* mov abs to eax */
-        patch_call(s, cpu, ip, handlers->get_tpr[0]);
-        break;
-    case 0xa3: /* mov eax to abs */
-        patch_call(s, cpu, ip, handlers->set_tpr_eax);
-        break;
-    case 0xc7: /* mov imm32, r/m32 (c7/0) */
-        patch_byte(cpu, ip, 0x68);  /* push imm32 */
-        cpu_memory_rw_debug(cs, ip + 6, (void *)&imm32, sizeof(imm32), 0);
-        cpu_memory_rw_debug(cs, ip + 1, (void *)&imm32, sizeof(imm32), 1);
-        patch_call(s, cpu, ip + 5, handlers->set_tpr);
-        break;
-    case 0xff: /* push r/m32 */
-        patch_byte(cpu, ip, 0x50); /* push eax */
-        patch_call(s, cpu, ip + 1, handlers->get_tpr_stack);
-        break;
-    default:
-        abort();
-    }
-
-    resume_all_vcpus();
-
-    if (!kvm_enabled()) {
-        cs->current_tb = NULL;
-        tb_gen_code(cs, current_pc, current_cs_base, current_flags, 1);
-        cpu_resume_from_signal(cs, NULL);
-    }
+    async_safe_run_on_cpu(cs, do_patch_instruction, RUN_ON_CPU_HOST_PTR(info));
 }
 
 void vapic_report_tpr_access(DeviceState *dev, CPUState *cs, target_ulong ip,
@@ -481,10 +487,9 @@ typedef struct VAPICEnableTPRReporting {
     bool enable;
 } VAPICEnableTPRReporting;
 
-static void vapic_do_enable_tpr_reporting(void *data)
+static void vapic_do_enable_tpr_reporting(CPUState *cpu, run_on_cpu_data data)
 {
-    VAPICEnableTPRReporting *info = data;
-
+    VAPICEnableTPRReporting *info = data.host_ptr;
     apic_enable_tpr_access_reporting(info->apic, info->enable);
 }
 
@@ -499,7 +504,7 @@ static void vapic_enable_tpr_reporting(bool enable)
     CPU_FOREACH(cs) {
         cpu = X86_CPU(cs);
         info.apic = cpu->apic_state;
-        run_on_cpu(cs, vapic_do_enable_tpr_reporting, &info);
+        run_on_cpu(cs, vapic_do_enable_tpr_reporting, RUN_ON_CPU_HOST_PTR(&info));
     }
 }
 
@@ -529,7 +534,6 @@ static int patch_hypercalls(VAPICROMState *s)
     uint8_t alternates[2];
     const uint8_t *pattern;
     const uint8_t *patch;
-    int patches = 0;
     off_t pos;
     uint8_t *rom;
 
@@ -560,11 +564,6 @@ static int patch_hypercalls(VAPICROMState *s)
     }
 
     g_free(rom);
-
-    if (patches != 0 && patches != 2) {
-        return -1;
-    }
-
     return 0;
 }
 
@@ -635,13 +634,18 @@ static int vapic_prepare(VAPICROMState *s)
 static void vapic_write(void *opaque, hwaddr addr, uint64_t data,
                         unsigned int size)
 {
-    CPUState *cs = current_cpu;
-    X86CPU *cpu = X86_CPU(cs);
-    CPUX86State *env = &cpu->env;
-    hwaddr rom_paddr;
     VAPICROMState *s = opaque;
+    X86CPU *cpu;
+    CPUX86State *env;
+    hwaddr rom_paddr;
 
-    cpu_synchronize_state(cs);
+    if (!current_cpu) {
+        return;
+    }
+
+    cpu_synchronize_state(current_cpu);
+    cpu = X86_CPU(current_cpu);
+    env = &cpu->env;
 
     /*
      * The VAPIC supports two PIO-based hypercalls, both via port 0x7E.
@@ -727,10 +731,10 @@ static void vapic_realize(DeviceState *dev, Error **errp)
     nb_option_roms++;
 }
 
-static void do_vapic_enable(void *data)
+static void do_vapic_enable(CPUState *cs, run_on_cpu_data data)
 {
-    VAPICROMState *s = data;
-    X86CPU *cpu = X86_CPU(first_cpu);
+    VAPICROMState *s = data.host_ptr;
+    X86CPU *cpu = X86_CPU(cs);
 
     static const uint8_t enabled = 1;
     cpu_physical_memory_write(s->vapic_paddr + offsetof(VAPICState, enabled),
@@ -751,7 +755,7 @@ static void kvmvapic_vm_state_change(void *opaque, int running,
 
     if (s->state == VAPIC_ACTIVE) {
         if (smp_cpus == 1) {
-            run_on_cpu(first_cpu, do_vapic_enable, s);
+            run_on_cpu(first_cpu, do_vapic_enable, RUN_ON_CPU_HOST_PTR(s));
         } else {
             zero = g_malloc0(s->rom_state.vapic_size);
             cpu_physical_memory_write(s->vapic_paddr, zero,
@@ -761,6 +765,7 @@ static void kvmvapic_vm_state_change(void *opaque, int running,
     }
 
     qemu_del_vm_change_state_handler(s->vmsentry);
+    s->vmsentry = NULL;
 }
 
 static int vapic_post_load(void *opaque, int version_id)

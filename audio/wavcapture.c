@@ -1,5 +1,8 @@
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "monitor/monitor.h"
+#include "qapi/error.h"
+#include "qemu/error-report.h"
 #include "audio.h"
 
 typedef struct {
@@ -86,6 +89,7 @@ static void wav_capture_destroy (void *opaque)
     WAVState *wav = opaque;
 
     AUD_del_capture (wav->cap, wav);
+    g_free (wav);
 }
 
 static void wav_capture_info (void *opaque)

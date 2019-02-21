@@ -12,12 +12,12 @@
  * option) any later version.  See the COPYING file in the top-level directory.
  *
  */
+#include "qemu/osdep.h"
 #include "sysemu/sysemu.h"
 #include "hw/s390x/sclp.h"
 #include "hw/s390x/event-facility.h"
 #include "cpu.h"
 #include "sysemu/cpus.h"
-#include "sysemu/kvm.h"
 
 typedef struct ConfigMgtData {
     EventBufferHeader ebh;
@@ -25,21 +25,24 @@ typedef struct ConfigMgtData {
     uint8_t event_qualifier;
 } QEMU_PACKED ConfigMgtData;
 
-static qemu_irq *irq_cpu_hotplug; /* Only used in this file */
-
 #define EVENT_QUAL_CPU_CHANGE  1
 
 void raise_irq_cpu_hotplug(void)
 {
-    qemu_irq_raise(*irq_cpu_hotplug);
+    Object *obj = object_resolve_path_type("", TYPE_SCLP_CPU_HOTPLUG, NULL);
+
+    SCLP_EVENT(obj)->event_pending = true;
+
+    /* Trigger SCLP read operation */
+    sclp_service_interrupt(0);
 }
 
-static unsigned int send_mask(void)
+static sccb_mask_t send_mask(void)
 {
     return SCLP_EVENT_MASK_CONFIG_MGT_DATA;
 }
 
-static unsigned int receive_mask(void)
+static sccb_mask_t receive_mask(void)
 {
     return 0;
 }
@@ -70,34 +73,25 @@ static int read_event_data(SCLPEvent *event, EventBufferHeader *evt_buf_hdr,
     return 1;
 }
 
-static void trigger_signal(void *opaque, int n, int level)
-{
-    SCLPEvent *event = opaque;
-    event->event_pending = true;
-
-    /* Trigger SCLP read operation */
-    sclp_service_interrupt(0);
-}
-
-static int irq_cpu_hotplug_init(SCLPEvent *event)
-{
-    irq_cpu_hotplug = qemu_allocate_irqs(trigger_signal, event, 1);
-    return 0;
-}
-
 static void cpu_class_init(ObjectClass *oc, void *data)
 {
     SCLPEventClass *k = SCLP_EVENT_CLASS(oc);
+    DeviceClass *dc = DEVICE_CLASS(oc);
 
-    k->init = irq_cpu_hotplug_init;
     k->get_send_mask = send_mask;
     k->get_receive_mask = receive_mask;
     k->read_event_data = read_event_data;
-    k->write_event_data = NULL;
+    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
+    /*
+     * Reason: raise_irq_cpu_hotplug() depends on an unique
+     * TYPE_SCLP_CPU_HOTPLUG device, which is already created
+     * by the sclp event facility
+     */
+    dc->user_creatable = false;
 }
 
 static const TypeInfo sclp_cpu_info = {
-    .name          = "sclp-cpu-hotplug",
+    .name          = TYPE_SCLP_CPU_HOTPLUG,
     .parent        = TYPE_SCLP_EVENT,
     .instance_size = sizeof(SCLPEvent),
     .class_init    = cpu_class_init,

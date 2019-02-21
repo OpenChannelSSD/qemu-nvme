@@ -23,6 +23,7 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include "dec.h"
 #include "hw/sysbus.h"
 #include "hw/pci/pci.h"
@@ -51,9 +52,9 @@ static int dec_map_irq(PCIDevice *pci_dev, int irq_num)
     return irq_num;
 }
 
-static int dec_pci_bridge_initfn(PCIDevice *pci_dev)
+static void dec_pci_bridge_realize(PCIDevice *pci_dev, Error **errp)
 {
-    return pci_bridge_initfn(pci_dev, TYPE_PCI_BUS);
+    pci_bridge_initfn(pci_dev, TYPE_PCI_BUS);
 }
 
 static void dec_21154_pci_bridge_class_init(ObjectClass *klass, void *data)
@@ -61,7 +62,8 @@ static void dec_21154_pci_bridge_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->init = dec_pci_bridge_initfn;
+    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
+    k->realize = dec_pci_bridge_realize;
     k->exit = pci_bridge_exitfn;
     k->vendor_id = PCI_VENDOR_ID_DEC;
     k->device_id = PCI_DEVICE_ID_DEC_21154;
@@ -77,6 +79,10 @@ static const TypeInfo dec_21154_pci_bridge_info = {
     .parent        = TYPE_PCI_BRIDGE,
     .instance_size = sizeof(PCIBridge),
     .class_init    = dec_21154_pci_bridge_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 PCIBus *pci_dec_21154_init(PCIBus *parent_bus, int devfn)
@@ -92,9 +98,10 @@ PCIBus *pci_dec_21154_init(PCIBus *parent_bus, int devfn)
     return pci_bridge_get_sec_bus(br);
 }
 
-static int pci_dec_21154_device_init(SysBusDevice *dev)
+static void pci_dec_21154_device_realize(DeviceState *dev, Error **errp)
 {
     PCIHostState *phb;
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
 
     phb = PCI_HOST_BRIDGE(dev);
 
@@ -102,15 +109,13 @@ static int pci_dec_21154_device_init(SysBusDevice *dev)
                           dev, "pci-conf-idx", 0x1000);
     memory_region_init_io(&phb->data_mem, OBJECT(dev), &pci_host_data_le_ops,
                           dev, "pci-data-idx", 0x1000);
-    sysbus_init_mmio(dev, &phb->conf_mem);
-    sysbus_init_mmio(dev, &phb->data_mem);
-    return 0;
+    sysbus_init_mmio(sbd, &phb->conf_mem);
+    sysbus_init_mmio(sbd, &phb->data_mem);
 }
 
-static int dec_21154_pci_host_init(PCIDevice *d)
+static void dec_21154_pci_host_realize(PCIDevice *d, Error **errp)
 {
     /* PCI2PCI bridge same values as PearPC - check this */
-    return 0;
 }
 
 static void dec_21154_pci_host_class_init(ObjectClass *klass, void *data)
@@ -118,7 +123,8 @@ static void dec_21154_pci_host_class_init(ObjectClass *klass, void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    k->init = dec_21154_pci_host_init;
+    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
+    k->realize = dec_21154_pci_host_realize;
     k->vendor_id = PCI_VENDOR_ID_DEC;
     k->device_id = PCI_DEVICE_ID_DEC_21154;
     k->revision = 0x02;
@@ -128,7 +134,7 @@ static void dec_21154_pci_host_class_init(ObjectClass *klass, void *data)
      * PCI-facing part of the host bridge, not usable without the
      * host-facing part, which can't be device_add'ed, yet.
      */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
 }
 
 static const TypeInfo dec_21154_pci_host_info = {
@@ -136,13 +142,17 @@ static const TypeInfo dec_21154_pci_host_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(PCIDevice),
     .class_init    = dec_21154_pci_host_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void pci_dec_21154_device_class_init(ObjectClass *klass, void *data)
 {
-    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(klass);
 
-    sdc->init = pci_dec_21154_device_init;
+    dc->realize = pci_dec_21154_device_realize;
 }
 
 static const TypeInfo pci_dec_21154_device_info = {

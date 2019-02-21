@@ -1,10 +1,12 @@
-#include <glib.h>
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "block/aio.h"
 #include "block/thread-pool.h"
 #include "block/block.h"
+#include "qapi/error.h"
 #include "qemu/timer.h"
 #include "qemu/error-report.h"
+#include "qemu/main-loop.h"
 
 static AioContext *ctx;
 static ThreadPool *pool;
@@ -90,9 +92,9 @@ static void co_test_cb(void *opaque)
 static void test_submit_co(void)
 {
     WorkerTestData data;
-    Coroutine *co = qemu_coroutine_create(co_test_cb);
+    Coroutine *co = qemu_coroutine_create(co_test_cb, &data);
 
-    qemu_coroutine_enter(co, &data);
+    qemu_coroutine_enter(co);
 
     /* Back here once the worker has started.  */
 
@@ -222,18 +224,8 @@ static void test_cancel_async(void)
 
 int main(int argc, char **argv)
 {
-    int ret;
-    Error *local_error = NULL;
-
-    init_clocks();
-
-    ctx = aio_context_new(&local_error);
-    if (!ctx) {
-        error_report("Failed to create AIO Context: '%s'",
-                     error_get_pretty(local_error));
-        error_free(local_error);
-        exit(1);
-    }
+    qemu_init_main_loop(&error_abort);
+    ctx = qemu_get_current_aio_context();
     pool = aio_get_thread_pool(ctx);
 
     g_test_init(&argc, &argv, NULL);
@@ -244,8 +236,5 @@ int main(int argc, char **argv)
     g_test_add_func("/thread-pool/cancel", test_cancel);
     g_test_add_func("/thread-pool/cancel-async", test_cancel_async);
 
-    ret = g_test_run();
-
-    aio_context_unref(ctx);
-    return ret;
+    return g_test_run();
 }

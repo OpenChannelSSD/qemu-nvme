@@ -22,10 +22,15 @@
  *
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
+#include "qemu-common.h"
+#include "cpu.h" /* FIXME: why does this use TARGET_PAGE_ALIGN? */
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "trace.h"
 #include "net/net.h"
+#include "qemu/log.h"
 #include "qemu/error-report.h"
 
 #include <zlib.h>
@@ -210,7 +215,8 @@ static size_t assemble_frame(uint8_t *buf, size_t size,
     uint32_t crc;
 
     if (size < payload_size + 12) {
-        error_report("milkymist_minimac2: received too big ethernet frame");
+        qemu_log_mask(LOG_GUEST_ERROR, "milkymist_minimac2: frame too big "
+                      "(%zd bytes)\n", payload_size);
         return 0;
     }
 
@@ -303,8 +309,7 @@ static ssize_t minimac2_rx(NetClientState *nc, const uint8_t *buf, size_t size)
         r_state = R_STATE1;
         rx_buf = s->rx1_buf;
     } else {
-        trace_milkymist_minimac2_drop_rx_frame(buf);
-        return size;
+        return 0;
     }
 
     /* assemble frame */
@@ -344,14 +349,27 @@ minimac2_read(void *opaque, hwaddr addr, unsigned size)
         break;
 
     default:
-        error_report("milkymist_minimac2: read access to unknown register 0x"
-                TARGET_FMT_plx, addr << 2);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "milkymist_minimac2_rd%d: 0x%" HWADDR_PRIx "\n",
+                      size, addr << 2);
         break;
     }
 
     trace_milkymist_minimac2_memory_read(addr << 2, r);
 
     return r;
+}
+
+static int minimac2_can_rx(MilkymistMinimac2State *s)
+{
+    if (s->regs[R_STATE0] == STATE_LOADED) {
+        return 1;
+    }
+    if (s->regs[R_STATE1] == STATE_LOADED) {
+        return 1;
+    }
+
+    return 0;
 }
 
 static void
@@ -387,6 +405,9 @@ minimac2_write(void *opaque, hwaddr addr, uint64_t value,
     case R_STATE1:
         s->regs[addr] = value;
         update_rx_interrupt(s);
+        if (minimac2_can_rx(s)) {
+            qemu_flush_queued_packets(qemu_get_queue(s->nic));
+        }
         break;
     case R_SETUP:
     case R_COUNT0:
@@ -395,8 +416,10 @@ minimac2_write(void *opaque, hwaddr addr, uint64_t value,
         break;
 
     default:
-        error_report("milkymist_minimac2: write access to unknown register 0x"
-                TARGET_FMT_plx, addr << 2);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "milkymist_minimac2_wr%d: 0x%" HWADDR_PRIx
+                      " = 0x%" PRIx64 "\n",
+                      size, addr << 2, value);
         break;
     }
 }
@@ -410,27 +433,6 @@ static const MemoryRegionOps minimac2_ops = {
     },
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
-
-static int minimac2_can_rx(NetClientState *nc)
-{
-    MilkymistMinimac2State *s = qemu_get_nic_opaque(nc);
-
-    if (s->regs[R_STATE0] == STATE_LOADED) {
-        return 1;
-    }
-    if (s->regs[R_STATE1] == STATE_LOADED) {
-        return 1;
-    }
-
-    return 0;
-}
-
-static void minimac2_cleanup(NetClientState *nc)
-{
-    MilkymistMinimac2State *s = qemu_get_nic_opaque(nc);
-
-    s->nic = NULL;
-}
 
 static void milkymist_minimac2_reset(DeviceState *d)
 {
@@ -450,16 +452,14 @@ static void milkymist_minimac2_reset(DeviceState *d)
 }
 
 static NetClientInfo net_milkymist_minimac2_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_NIC,
+    .type = NET_CLIENT_DRIVER_NIC,
     .size = sizeof(NICState),
-    .can_receive = minimac2_can_rx,
     .receive = minimac2_rx,
-    .cleanup = minimac2_cleanup,
 };
 
-static int milkymist_minimac2_init(SysBusDevice *sbd)
+static void milkymist_minimac2_realize(DeviceState *dev, Error **errp)
 {
-    DeviceState *dev = DEVICE(sbd);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     MilkymistMinimac2State *s = MILKYMIST_MINIMAC2(dev);
     size_t buffers_size = TARGET_PAGE_ALIGN(3 * MINIMAC2_BUFFER_SIZE);
 
@@ -471,8 +471,8 @@ static int milkymist_minimac2_init(SysBusDevice *sbd)
     sysbus_init_mmio(sbd, &s->regs_region);
 
     /* register buffers memory */
-    memory_region_init_ram(&s->buffers, OBJECT(dev), "milkymist-minimac2.buffers",
-                           buffers_size, &error_abort);
+    memory_region_init_ram_nomigrate(&s->buffers, OBJECT(dev), "milkymist-minimac2.buffers",
+                           buffers_size, &error_fatal);
     vmstate_register_ram_global(&s->buffers);
     s->rx0_buf = memory_region_get_ram_ptr(&s->buffers);
     s->rx1_buf = s->rx0_buf + MINIMAC2_BUFFER_SIZE;
@@ -484,8 +484,6 @@ static int milkymist_minimac2_init(SysBusDevice *sbd)
     s->nic = qemu_new_nic(&net_milkymist_minimac2_info, &s->conf,
                           object_get_typename(OBJECT(dev)), dev->id, s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
-
-    return 0;
 }
 
 static const VMStateDescription vmstate_milkymist_minimac2_mdio = {
@@ -526,9 +524,8 @@ static Property milkymist_minimac2_properties[] = {
 static void milkymist_minimac2_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
-    k->init = milkymist_minimac2_init;
+    dc->realize = milkymist_minimac2_realize;
     dc->reset = milkymist_minimac2_reset;
     dc->vmsd = &vmstate_milkymist_minimac2;
     dc->props = milkymist_minimac2_properties;

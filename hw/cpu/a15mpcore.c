@@ -18,8 +18,11 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "hw/cpu/a15mpcore.h"
 #include "sysemu/kvm.h"
+#include "kvm_arm.h"
 
 static void a15mp_priv_set_irq(void *opaque, int irq, int level)
 {
@@ -32,20 +35,13 @@ static void a15mp_priv_initfn(Object *obj)
 {
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
     A15MPPrivState *s = A15MPCORE_PRIV(obj);
-    DeviceState *gicdev;
-    const char *gictype = "arm_gic";
-
-    if (kvm_irqchip_in_kernel()) {
-        gictype = "kvm-arm-gic";
-    }
 
     memory_region_init(&s->container, obj, "a15mp-priv-container", 0x8000);
     sysbus_init_mmio(sbd, &s->container);
 
-    object_initialize(&s->gic, sizeof(s->gic), gictype);
-    gicdev = DEVICE(&s->gic);
-    qdev_set_parent_bus(gicdev, sysbus_get_default());
-    qdev_prop_set_uint32(gicdev, "revision", 2);
+    sysbus_init_child_obj(obj, "gic", &s->gic, sizeof(s->gic),
+                          gic_class_name());
+    qdev_prop_set_uint32(DEVICE(&s->gic), "revision", 2);
 }
 
 static void a15mp_priv_realize(DeviceState *dev, Error **errp)
@@ -56,10 +52,28 @@ static void a15mp_priv_realize(DeviceState *dev, Error **errp)
     SysBusDevice *busdev;
     int i;
     Error *err = NULL;
+    bool has_el3;
+    bool has_el2 = false;
+    Object *cpuobj;
 
     gicdev = DEVICE(&s->gic);
     qdev_prop_set_uint32(gicdev, "num-cpu", s->num_cpu);
     qdev_prop_set_uint32(gicdev, "num-irq", s->num_irq);
+
+    if (!kvm_irqchip_in_kernel()) {
+        /* Make the GIC's TZ support match the CPUs. We assume that
+         * either all the CPUs have TZ, or none do.
+         */
+        cpuobj = OBJECT(qemu_get_cpu(0));
+        has_el3 = object_property_find(cpuobj, "has_el3", NULL) &&
+            object_property_get_bool(cpuobj, "has_el3", &error_abort);
+        qdev_prop_set_bit(gicdev, "has-security-extensions", has_el3);
+        /* Similarly for virtualization support */
+        has_el2 = object_property_find(cpuobj, "has_el2", NULL) &&
+            object_property_get_bool(cpuobj, "has_el2", &error_abort);
+        qdev_prop_set_bit(gicdev, "has-virtualization-extensions", has_el2);
+    }
+
     object_property_set_bool(OBJECT(&s->gic), true, "realized", &err);
     if (err != NULL) {
         error_propagate(errp, err);
@@ -79,28 +93,55 @@ static void a15mp_priv_realize(DeviceState *dev, Error **errp)
     for (i = 0; i < s->num_cpu; i++) {
         DeviceState *cpudev = DEVICE(qemu_get_cpu(i));
         int ppibase = s->num_irq - 32 + i * 32;
-        /* physical timer; we wire it up to the non-secure timer's ID,
-         * since a real A15 always has TrustZone but QEMU doesn't.
+        int irq;
+        /* Mapping from the output timer irq lines from the CPU to the
+         * GIC PPI inputs used on the A15:
          */
-        qdev_connect_gpio_out(cpudev, 0,
-                              qdev_get_gpio_in(gicdev, ppibase + 30));
-        /* virtual timer */
-        qdev_connect_gpio_out(cpudev, 1,
-                              qdev_get_gpio_in(gicdev, ppibase + 27));
+        const int timer_irq[] = {
+            [GTIMER_PHYS] = 30,
+            [GTIMER_VIRT] = 27,
+            [GTIMER_HYP]  = 26,
+            [GTIMER_SEC]  = 29,
+        };
+        for (irq = 0; irq < ARRAY_SIZE(timer_irq); irq++) {
+            qdev_connect_gpio_out(cpudev, irq,
+                                  qdev_get_gpio_in(gicdev,
+                                                   ppibase + timer_irq[irq]));
+        }
+        if (has_el2) {
+            /* Connect the GIC maintenance interrupt to PPI ID 25 */
+            sysbus_connect_irq(SYS_BUS_DEVICE(gicdev), i + 4 * s->num_cpu,
+                               qdev_get_gpio_in(gicdev, ppibase + 25));
+        }
     }
 
     /* Memory map (addresses are offsets from PERIPHBASE):
      *  0x0000-0x0fff -- reserved
      *  0x1000-0x1fff -- GIC Distributor
-     *  0x2000-0x2fff -- GIC CPU interface
-     *  0x4000-0x4fff -- GIC virtual interface control (not modelled)
-     *  0x5000-0x5fff -- GIC virtual interface control (not modelled)
-     *  0x6000-0x7fff -- GIC virtual CPU interface (not modelled)
+     *  0x2000-0x3fff -- GIC CPU interface
+     *  0x4000-0x4fff -- GIC virtual interface control for this CPU
+     *  0x5000-0x51ff -- GIC virtual interface control for CPU 0
+     *  0x5200-0x53ff -- GIC virtual interface control for CPU 1
+     *  0x5400-0x55ff -- GIC virtual interface control for CPU 2
+     *  0x5600-0x57ff -- GIC virtual interface control for CPU 3
+     *  0x6000-0x7fff -- GIC virtual CPU interface
      */
     memory_region_add_subregion(&s->container, 0x1000,
                                 sysbus_mmio_get_region(busdev, 0));
     memory_region_add_subregion(&s->container, 0x2000,
                                 sysbus_mmio_get_region(busdev, 1));
+    if (has_el2) {
+        memory_region_add_subregion(&s->container, 0x4000,
+                                    sysbus_mmio_get_region(busdev, 2));
+        memory_region_add_subregion(&s->container, 0x6000,
+                                    sysbus_mmio_get_region(busdev, 3));
+        for (i = 0; i < s->num_cpu; i++) {
+            hwaddr base = 0x5000 + i * 0x200;
+            MemoryRegion *mr = sysbus_mmio_get_region(busdev,
+                                                      4 + s->num_cpu + i);
+            memory_region_add_subregion(&s->container, base, mr);
+        }
+    }
 }
 
 static Property a15mp_priv_properties[] = {

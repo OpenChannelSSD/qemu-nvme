@@ -10,6 +10,7 @@
  * GNU GPL, version 2 or (at your option) any later version.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "hw/pcmcia.h"
@@ -149,22 +150,9 @@ PXA2xxPCMCIAState *pxa2xx_pcmcia_init(MemoryRegion *sysmem,
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
     s = PXA2XX_PCMCIA(dev);
 
-    if (base == 0x30000000) {
-        s->slot.slot_string = "PXA PC Card Socket 1";
-    } else {
-        s->slot.slot_string = "PXA PC Card Socket 0";
-    }
-
     qdev_init_nofail(dev);
 
     return s;
-}
-
-static void pxa2xx_pcmcia_realize(DeviceState *dev, Error **errp)
-{
-    PXA2xxPCMCIAState *s = PXA2XX_PCMCIA(dev);
-
-    pcmcia_socket_register(&s->slot);
 }
 
 static void pxa2xx_pcmcia_initfn(Object *obj)
@@ -176,7 +164,7 @@ static void pxa2xx_pcmcia_initfn(Object *obj)
     sysbus_init_mmio(sbd, &s->container_mem);
 
     /* Socket I/O Memory Space */
-    memory_region_init_io(&s->iomem, NULL, &pxa2xx_pcmcia_io_ops, s,
+    memory_region_init_io(&s->iomem, obj, &pxa2xx_pcmcia_io_ops, s,
                           "pxa2xx-pcmcia-io", 0x04000000);
     memory_region_add_subregion(&s->container_mem, 0x00000000,
                                 &s->iomem);
@@ -184,13 +172,13 @@ static void pxa2xx_pcmcia_initfn(Object *obj)
     /* Then next 64 MB is reserved */
 
     /* Socket Attribute Memory Space */
-    memory_region_init_io(&s->attr_iomem, NULL, &pxa2xx_pcmcia_attr_ops, s,
+    memory_region_init_io(&s->attr_iomem, obj, &pxa2xx_pcmcia_attr_ops, s,
                           "pxa2xx-pcmcia-attribute", 0x04000000);
     memory_region_add_subregion(&s->container_mem, 0x08000000,
                                 &s->attr_iomem);
 
     /* Socket Common Memory Space */
-    memory_region_init_io(&s->common_iomem, NULL, &pxa2xx_pcmcia_common_ops, s,
+    memory_region_init_io(&s->common_iomem, obj, &pxa2xx_pcmcia_common_ops, s,
                           "pxa2xx-pcmcia-common", 0x04000000);
     memory_region_add_subregion(&s->container_mem, 0x0c000000,
                                 &s->common_iomem);
@@ -262,19 +250,11 @@ void pxa2xx_pcmcia_set_irq_cb(void *opaque, qemu_irq irq, qemu_irq cd_irq)
     s->cd_irq = cd_irq;
 }
 
-static void pxa2xx_pcmcia_class_init(ObjectClass *oc, void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(oc);
-
-    dc->realize = pxa2xx_pcmcia_realize;
-}
-
 static const TypeInfo pxa2xx_pcmcia_type_info = {
     .name = TYPE_PXA2XX_PCMCIA,
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(PXA2xxPCMCIAState),
     .instance_init = pxa2xx_pcmcia_initfn,
-    .class_init = pxa2xx_pcmcia_class_init,
 };
 
 static void pxa2xx_pcmcia_register_types(void)

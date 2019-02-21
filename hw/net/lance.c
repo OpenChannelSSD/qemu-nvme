@@ -35,24 +35,13 @@
  * http://www.ibiblio.org/pub/historic-linux/early-ports/Sparc/NCR/NCR92C990.txt
  */
 
-#include "hw/sysbus.h"
-#include "net/net.h"
+#include "qemu/osdep.h"
 #include "qemu/timer.h"
-#include "qemu/sockets.h"
-#include "hw/sparc/sun4m.h"
-#include "pcnet.h"
+#include "hw/sparc/sparc32_dma.h"
+#include "hw/net/lance.h"
 #include "trace.h"
 #include "sysemu/sysemu.h"
 
-#define TYPE_LANCE "lance"
-#define SYSBUS_PCNET(obj) \
-    OBJECT_CHECK(SysBusPCNetState, (obj), TYPE_LANCE)
-
-typedef struct {
-    SysBusDevice parent_obj;
-
-    PCNetState state;
-} SysBusPCNetState;
 
 static void parent_lance_reset(void *opaque, int irq, int level)
 {
@@ -91,20 +80,11 @@ static const MemoryRegionOps lance_mem_ops = {
     },
 };
 
-static void lance_cleanup(NetClientState *nc)
-{
-    PCNetState *d = qemu_get_nic_opaque(nc);
-
-    pcnet_common_cleanup(d);
-}
-
 static NetClientInfo net_lance_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_NIC,
+    .type = NET_CLIENT_DRIVER_NIC,
     .size = sizeof(NICState),
-    .can_receive = pcnet_can_receive,
     .receive = pcnet_receive,
     .link_status_changed = pcnet_set_link_status,
-    .cleanup = lance_cleanup,
 };
 
 static const VMStateDescription vmstate_lance = {
@@ -117,9 +97,9 @@ static const VMStateDescription vmstate_lance = {
     }
 };
 
-static int lance_init(SysBusDevice *sbd)
+static void lance_realize(DeviceState *dev, Error **errp)
 {
-    DeviceState *dev = DEVICE(sbd);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     SysBusPCNetState *d = SYSBUS_PCNET(dev);
     PCNetState *s = &d->state;
 
@@ -134,7 +114,7 @@ static int lance_init(SysBusDevice *sbd)
 
     s->phys_mem_read = ledma_memory_read;
     s->phys_mem_write = ledma_memory_write;
-    return pcnet_common_init(dev, s, &net_lance_info);
+    pcnet_common_init(dev, s, &net_lance_info);
 }
 
 static void lance_reset(DeviceState *dev)
@@ -163,16 +143,15 @@ static Property lance_properties[] = {
 static void lance_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
-    k->init = lance_init;
+    dc->realize = lance_realize;
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
     dc->fw_name = "ethernet";
     dc->reset = lance_reset;
     dc->vmsd = &vmstate_lance;
     dc->props = lance_properties;
     /* Reason: pointer property "dma" */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
 }
 
 static const TypeInfo lance_info = {

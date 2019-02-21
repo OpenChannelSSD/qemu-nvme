@@ -18,10 +18,13 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "hw/hw.h"
 #include "qemu/timer.h"
 #include "ui/console.h"
 #include "hw/devices.h"
+#include "trace.h"
 
 #define TSC_CUT_RESOLUTION(value, p)	((value) >> (16 - (p ? 12 : 10)))
 
@@ -30,30 +33,31 @@ typedef struct {
     QEMUTimer *timer;
     uint16_t model;
 
-    int x, y;
-    int pressure;
+    int32_t x, y;
+    bool pressure;
 
-    int state, reg, irq, command;
+    uint8_t reg, state;
+    bool irq, command;
     uint16_t data, dav;
 
-    int busy;
-    int enabled;
-    int host_mode;
-    int function;
-    int nextfunction;
-    int precision;
-    int nextprecision;
-    int filter;
-    int pin_func;
-    int timing[2];
-    int noise;
-    int reset;
-    int pdst;
-    int pnd0;
+    bool busy;
+    bool enabled;
+    bool host_mode;
+    int8_t function;
+    int8_t nextfunction;
+    bool precision;
+    bool nextprecision;
+    uint16_t filter;
+    uint8_t pin_func;
+    uint16_t timing[2];
+    uint8_t noise;
+    bool reset;
+    bool pdst;
+    bool pnd0;
     uint16_t temp_thr[2];
     uint16_t aux_thr[2];
 
-    int tr[8];
+    int32_t tr[8];
 } TSC2005State;
 
 enum {
@@ -148,7 +152,7 @@ static uint16_t tsc2005_read(TSC2005State *s, int reg)
         ret = s->dav | (s->reset << 7) | (s->pdst << 2) | 0x0;
         s->dav &= ~(mode_regs[TSC_MODE_X_TEST] | mode_regs[TSC_MODE_Y_TEST] |
                         mode_regs[TSC_MODE_TS_TEST]);
-        s->reset = 1;
+        s->reset = true;
         return ret;
 
     case 0x8:	/* AUX high treshold */
@@ -195,20 +199,20 @@ static void tsc2005_write(TSC2005State *s, int reg, uint16_t data)
         break;
 
     case 0xc:	/* CFR0 */
-        s->host_mode = data >> 15;
+        s->host_mode = (data >> 15) != 0;
         if (s->enabled != !(data & 0x4000)) {
             s->enabled = !(data & 0x4000);
-            fprintf(stderr, "%s: touchscreen sense %sabled\n",
-                            __FUNCTION__, s->enabled ? "en" : "dis");
+            trace_tsc2005_sense(s->enabled ? "enabled" : "disabled");
             if (s->busy && !s->enabled)
                 timer_del(s->timer);
-            s->busy &= s->enabled;
+            s->busy = s->busy && s->enabled;
         }
         s->nextprecision = (data >> 13) & 1;
         s->timing[0] = data & 0x1fff;
-        if ((s->timing[0] >> 11) == 3)
-            fprintf(stderr, "%s: illegal conversion clock setting\n",
-                            __FUNCTION__);
+        if ((s->timing[0] >> 11) == 3) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "tsc2005_write: illegal conversion clock setting\n");
+        }
         break;
     case 0xd:	/* CFR1 */
         s->timing[1] = data & 0xf07;
@@ -219,8 +223,9 @@ static void tsc2005_write(TSC2005State *s, int reg, uint16_t data)
         break;
 
     default:
-        fprintf(stderr, "%s: write into read-only register %x\n",
-                        __FUNCTION__, reg);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: write into read-only register 0x%x\n",
+                      __func__, reg);
     }
 }
 
@@ -228,7 +233,7 @@ static void tsc2005_write(TSC2005State *s, int reg, uint16_t data)
 static void tsc2005_pin_update(TSC2005State *s)
 {
     int64_t expires;
-    int pin_state;
+    bool pin_state;
 
     switch (s->pin_func) {
     case 0:
@@ -252,7 +257,7 @@ static void tsc2005_pin_update(TSC2005State *s)
     case TSC_MODE_XYZ_SCAN:
     case TSC_MODE_XY_SCAN:
         if (!s->host_mode && s->dav)
-            s->enabled = 0;
+            s->enabled = false;
         if (!s->pressure)
             return;
         /* Fall through */
@@ -272,7 +277,7 @@ static void tsc2005_pin_update(TSC2005State *s)
     case TSC_MODE_Y_TEST:
     case TSC_MODE_TS_TEST:
         if (s->dav)
-            s->enabled = 0;
+            s->enabled = false;
         break;
 
     case TSC_MODE_RESERVED:
@@ -286,11 +291,12 @@ static void tsc2005_pin_update(TSC2005State *s)
     if (!s->enabled || s->busy)
         return;
 
-    s->busy = 1;
+    s->busy = true;
     s->precision = s->nextprecision;
     s->function = s->nextfunction;
     s->pdst = !s->pnd0;	/* Synchronised on internal clock */
-    expires = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + (get_ticks_per_sec() >> 7);
+    expires = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+        (NANOSECONDS_PER_SECOND >> 7);
     timer_mod(s->timer, expires);
 }
 
@@ -298,17 +304,17 @@ static void tsc2005_reset(TSC2005State *s)
 {
     s->state = 0;
     s->pin_func = 0;
-    s->enabled = 0;
-    s->busy = 0;
-    s->nextprecision = 0;
+    s->enabled = false;
+    s->busy = false;
+    s->nextprecision = false;
     s->nextfunction = 0;
     s->timing[0] = 0;
     s->timing[1] = 0;
-    s->irq = 0;
+    s->irq = false;
     s->dav = 0;
-    s->reset = 0;
-    s->pdst = 1;
-    s->pnd0 = 0;
+    s->reset = false;
+    s->pdst = true;
+    s->pnd0 = false;
     s->function = -1;
     s->temp_thr[0] = 0x000;
     s->temp_thr[1] = 0xfff;
@@ -334,11 +340,10 @@ static uint8_t tsc2005_txrx_word(void *opaque, uint8_t value)
                 s->nextprecision = (value >> 2) & 1;
                 if (s->enabled != !(value & 1)) {
                     s->enabled = !(value & 1);
-                    fprintf(stderr, "%s: touchscreen sense %sabled\n",
-                                    __FUNCTION__, s->enabled ? "en" : "dis");
+                    trace_tsc2005_sense(s->enabled ? "enabled" : "disabled");
                     if (s->busy && !s->enabled)
                         timer_del(s->timer);
-                    s->busy &= s->enabled;
+                    s->busy = s->busy && s->enabled;
                 }
                 tsc2005_pin_update(s);
             }
@@ -405,7 +410,7 @@ static void tsc2005_timer_tick(void *opaque)
     if (!s->busy)
         return;
 
-    s->busy = 0;
+    s->busy = false;
     s->dav |= mode_regs[s->function];
     s->function = -1;
     tsc2005_pin_update(s);
@@ -432,92 +437,51 @@ static void tsc2005_touchscreen_event(void *opaque,
         tsc2005_pin_update(s);
 }
 
-static void tsc2005_save(QEMUFile *f, void *opaque)
+static int tsc2005_post_load(void *opaque, int version_id)
 {
     TSC2005State *s = (TSC2005State *) opaque;
-    int i;
-
-    qemu_put_be16(f, s->x);
-    qemu_put_be16(f, s->y);
-    qemu_put_byte(f, s->pressure);
-
-    qemu_put_byte(f, s->state);
-    qemu_put_byte(f, s->reg);
-    qemu_put_byte(f, s->command);
-
-    qemu_put_byte(f, s->irq);
-    qemu_put_be16s(f, &s->dav);
-    qemu_put_be16s(f, &s->data);
-
-    timer_put(f, s->timer);
-    qemu_put_byte(f, s->enabled);
-    qemu_put_byte(f, s->host_mode);
-    qemu_put_byte(f, s->function);
-    qemu_put_byte(f, s->nextfunction);
-    qemu_put_byte(f, s->precision);
-    qemu_put_byte(f, s->nextprecision);
-    qemu_put_be16(f, s->filter);
-    qemu_put_byte(f, s->pin_func);
-    qemu_put_be16(f, s->timing[0]);
-    qemu_put_be16(f, s->timing[1]);
-    qemu_put_be16s(f, &s->temp_thr[0]);
-    qemu_put_be16s(f, &s->temp_thr[1]);
-    qemu_put_be16s(f, &s->aux_thr[0]);
-    qemu_put_be16s(f, &s->aux_thr[1]);
-    qemu_put_be32(f, s->noise);
-    qemu_put_byte(f, s->reset);
-    qemu_put_byte(f, s->pdst);
-    qemu_put_byte(f, s->pnd0);
-
-    for (i = 0; i < 8; i ++)
-        qemu_put_be32(f, s->tr[i]);
-}
-
-static int tsc2005_load(QEMUFile *f, void *opaque, int version_id)
-{
-    TSC2005State *s = (TSC2005State *) opaque;
-    int i;
-
-    s->x = qemu_get_be16(f);
-    s->y = qemu_get_be16(f);
-    s->pressure = qemu_get_byte(f);
-
-    s->state = qemu_get_byte(f);
-    s->reg = qemu_get_byte(f);
-    s->command = qemu_get_byte(f);
-
-    s->irq = qemu_get_byte(f);
-    qemu_get_be16s(f, &s->dav);
-    qemu_get_be16s(f, &s->data);
-
-    timer_get(f, s->timer);
-    s->enabled = qemu_get_byte(f);
-    s->host_mode = qemu_get_byte(f);
-    s->function = qemu_get_byte(f);
-    s->nextfunction = qemu_get_byte(f);
-    s->precision = qemu_get_byte(f);
-    s->nextprecision = qemu_get_byte(f);
-    s->filter = qemu_get_be16(f);
-    s->pin_func = qemu_get_byte(f);
-    s->timing[0] = qemu_get_be16(f);
-    s->timing[1] = qemu_get_be16(f);
-    qemu_get_be16s(f, &s->temp_thr[0]);
-    qemu_get_be16s(f, &s->temp_thr[1]);
-    qemu_get_be16s(f, &s->aux_thr[0]);
-    qemu_get_be16s(f, &s->aux_thr[1]);
-    s->noise = qemu_get_be32(f);
-    s->reset = qemu_get_byte(f);
-    s->pdst = qemu_get_byte(f);
-    s->pnd0 = qemu_get_byte(f);
-
-    for (i = 0; i < 8; i ++)
-        s->tr[i] = qemu_get_be32(f);
 
     s->busy = timer_pending(s->timer);
     tsc2005_pin_update(s);
 
     return 0;
 }
+
+static const VMStateDescription vmstate_tsc2005 = {
+    .name = "tsc2005",
+    .version_id = 2,
+    .minimum_version_id = 2,
+    .post_load = tsc2005_post_load,
+    .fields      = (VMStateField []) {
+        VMSTATE_BOOL(pressure, TSC2005State),
+        VMSTATE_BOOL(irq, TSC2005State),
+        VMSTATE_BOOL(command, TSC2005State),
+        VMSTATE_BOOL(enabled, TSC2005State),
+        VMSTATE_BOOL(host_mode, TSC2005State),
+        VMSTATE_BOOL(reset, TSC2005State),
+        VMSTATE_BOOL(pdst, TSC2005State),
+        VMSTATE_BOOL(pnd0, TSC2005State),
+        VMSTATE_BOOL(precision, TSC2005State),
+        VMSTATE_BOOL(nextprecision, TSC2005State),
+        VMSTATE_UINT8(reg, TSC2005State),
+        VMSTATE_UINT8(state, TSC2005State),
+        VMSTATE_UINT16(data, TSC2005State),
+        VMSTATE_UINT16(dav, TSC2005State),
+        VMSTATE_UINT16(filter, TSC2005State),
+        VMSTATE_INT8(nextfunction, TSC2005State),
+        VMSTATE_INT8(function, TSC2005State),
+        VMSTATE_INT32(x, TSC2005State),
+        VMSTATE_INT32(y, TSC2005State),
+        VMSTATE_TIMER_PTR(timer, TSC2005State),
+        VMSTATE_UINT8(pin_func, TSC2005State),
+        VMSTATE_UINT16_ARRAY(timing, TSC2005State, 2),
+        VMSTATE_UINT8(noise, TSC2005State),
+        VMSTATE_UINT16_ARRAY(temp_thr, TSC2005State, 2),
+        VMSTATE_UINT16_ARRAY(aux_thr, TSC2005State, 2),
+        VMSTATE_INT32_ARRAY(tr, TSC2005State, 8),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 void *tsc2005_init(qemu_irq pintdav)
 {
@@ -527,8 +491,8 @@ void *tsc2005_init(qemu_irq pintdav)
             g_malloc0(sizeof(TSC2005State));
     s->x = 400;
     s->y = 240;
-    s->pressure = 0;
-    s->precision = s->nextprecision = 0;
+    s->pressure = false;
+    s->precision = s->nextprecision = false;
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, tsc2005_timer_tick, s);
     s->pint = pintdav;
     s->model = 0x2005;
@@ -548,7 +512,7 @@ void *tsc2005_init(qemu_irq pintdav)
                     "QEMU TSC2005-driven Touchscreen");
 
     qemu_register_reset((void *) tsc2005_reset, s);
-    register_savevm(NULL, "tsc2005", -1, 0, tsc2005_save, tsc2005_load, s);
+    vmstate_register(NULL, 0, &vmstate_tsc2005, s);
 
     return s;
 }

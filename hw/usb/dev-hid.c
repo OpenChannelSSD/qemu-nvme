@@ -22,10 +22,12 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "ui/console.h"
 #include "hw/usb.h"
-#include "hw/usb/desc.h"
+#include "desc.h"
+#include "qapi/error.h"
 #include "qemu/timer.h"
 #include "hw/input/hid.h"
 
@@ -51,15 +53,21 @@ typedef struct USBHIDState {
     uint32_t head;
 } USBHIDState;
 
+#define TYPE_USB_HID "usb-hid"
+#define USB_HID(obj) OBJECT_CHECK(USBHIDState, (obj), TYPE_USB_HID)
+
 enum {
     STR_MANUFACTURER = 1,
     STR_PRODUCT_MOUSE,
     STR_PRODUCT_TABLET,
     STR_PRODUCT_KEYBOARD,
-    STR_SERIALNUMBER,
+    STR_SERIAL_COMPAT,
     STR_CONFIG_MOUSE,
     STR_CONFIG_TABLET,
     STR_CONFIG_KEYBOARD,
+    STR_SERIAL_MOUSE,
+    STR_SERIAL_TABLET,
+    STR_SERIAL_KEYBOARD,
 };
 
 static const USBDescStrings desc_strings = {
@@ -67,10 +75,13 @@ static const USBDescStrings desc_strings = {
     [STR_PRODUCT_MOUSE]    = "QEMU USB Mouse",
     [STR_PRODUCT_TABLET]   = "QEMU USB Tablet",
     [STR_PRODUCT_KEYBOARD] = "QEMU USB Keyboard",
-    [STR_SERIALNUMBER]     = "42", /* == remote wakeup works */
+    [STR_SERIAL_COMPAT]    = "42",
     [STR_CONFIG_MOUSE]     = "HID Mouse",
     [STR_CONFIG_TABLET]    = "HID Tablet",
     [STR_CONFIG_KEYBOARD]  = "HID Keyboard",
+    [STR_SERIAL_MOUSE]     = "89126",
+    [STR_SERIAL_TABLET]    = "28754",
+    [STR_SERIAL_KEYBOARD]  = "68284",
 };
 
 static const USBDescIface desc_iface_mouse = {
@@ -139,7 +150,7 @@ static const USBDescIface desc_iface_tablet = {
     .bInterfaceNumber              = 0,
     .bNumEndpoints                 = 1,
     .bInterfaceClass               = USB_CLASS_HID,
-    .bInterfaceProtocol            = 0x02,
+    .bInterfaceProtocol            = 0x00,
     .ndesc                         = 1,
     .descs = (USBDescOther[]) {
         {
@@ -169,7 +180,7 @@ static const USBDescIface desc_iface_tablet2 = {
     .bInterfaceNumber              = 0,
     .bNumEndpoints                 = 1,
     .bInterfaceClass               = USB_CLASS_HID,
-    .bInterfaceProtocol            = 0x02,
+    .bInterfaceProtocol            = 0x00,
     .ndesc                         = 1,
     .descs = (USBDescOther[]) {
         {
@@ -370,7 +381,7 @@ static const USBDesc desc_mouse = {
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_MOUSE,
-        .iSerialNumber     = STR_SERIALNUMBER,
+        .iSerialNumber     = STR_SERIAL_MOUSE,
     },
     .full = &desc_device_mouse,
     .str  = desc_strings,
@@ -384,7 +395,7 @@ static const USBDesc desc_mouse2 = {
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_MOUSE,
-        .iSerialNumber     = STR_SERIALNUMBER,
+        .iSerialNumber     = STR_SERIAL_MOUSE,
     },
     .full = &desc_device_mouse,
     .high = &desc_device_mouse2,
@@ -399,7 +410,7 @@ static const USBDesc desc_tablet = {
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_TABLET,
-        .iSerialNumber     = STR_SERIALNUMBER,
+        .iSerialNumber     = STR_SERIAL_TABLET,
     },
     .full = &desc_device_tablet,
     .str  = desc_strings,
@@ -413,7 +424,7 @@ static const USBDesc desc_tablet2 = {
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_TABLET,
-        .iSerialNumber     = STR_SERIALNUMBER,
+        .iSerialNumber     = STR_SERIAL_TABLET,
     },
     .full = &desc_device_tablet,
     .high = &desc_device_tablet2,
@@ -428,7 +439,7 @@ static const USBDesc desc_keyboard = {
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_KEYBOARD,
-        .iSerialNumber     = STR_SERIALNUMBER,
+        .iSerialNumber     = STR_SERIAL_KEYBOARD,
     },
     .full = &desc_device_keyboard,
     .str  = desc_strings,
@@ -442,7 +453,7 @@ static const USBDesc desc_keyboard2 = {
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_KEYBOARD,
-        .iSerialNumber     = STR_SERIALNUMBER,
+        .iSerialNumber     = STR_SERIAL_KEYBOARD,
     },
     .full = &desc_device_keyboard,
     .high = &desc_device_keyboard2,
@@ -482,7 +493,7 @@ static const uint8_t qemu_mouse_hid_report_descriptor[] = {
 
 static const uint8_t qemu_tablet_hid_report_descriptor[] = {
     0x05, 0x01,		/* Usage Page (Generic Desktop) */
-    0x09, 0x01,		/* Usage (Pointer) */
+    0x09, 0x02,		/* Usage (Mouse) */
     0xa1, 0x01,		/* Collection (Application) */
     0x09, 0x01,		/*   Usage (Pointer) */
     0xa1, 0x00,		/*   Collection (Physical) */
@@ -564,7 +575,7 @@ static void usb_hid_changed(HIDState *hs)
 
 static void usb_hid_handle_reset(USBDevice *dev)
 {
-    USBHIDState *us = DO_UPCAST(USBHIDState, dev, dev);
+    USBHIDState *us = USB_HID(dev);
 
     hid_reset(&us->hid);
 }
@@ -572,7 +583,7 @@ static void usb_hid_handle_reset(USBDevice *dev)
 static void usb_hid_handle_control(USBDevice *dev, USBPacket *p,
                int request, int value, int index, int length, uint8_t *data)
 {
-    USBHIDState *us = DO_UPCAST(USBHIDState, dev, dev);
+    USBHIDState *us = USB_HID(dev);
     HIDState *hs = &us->hid;
     int ret;
 
@@ -587,12 +598,12 @@ static void usb_hid_handle_control(USBDevice *dev, USBPacket *p,
         switch (value >> 8) {
         case 0x22:
             if (hs->kind == HID_MOUSE) {
-		memcpy(data, qemu_mouse_hid_report_descriptor,
-		       sizeof(qemu_mouse_hid_report_descriptor));
+                memcpy(data, qemu_mouse_hid_report_descriptor,
+                       sizeof(qemu_mouse_hid_report_descriptor));
                 p->actual_length = sizeof(qemu_mouse_hid_report_descriptor);
             } else if (hs->kind == HID_TABLET) {
                 memcpy(data, qemu_tablet_hid_report_descriptor,
-		       sizeof(qemu_tablet_hid_report_descriptor));
+                       sizeof(qemu_tablet_hid_report_descriptor));
                 p->actual_length = sizeof(qemu_tablet_hid_report_descriptor);
             } else if (hs->kind == HID_KEYBOARD) {
                 memcpy(data, qemu_keyboard_hid_report_descriptor,
@@ -651,7 +662,7 @@ static void usb_hid_handle_control(USBDevice *dev, USBPacket *p,
 
 static void usb_hid_handle_data(USBDevice *dev, USBPacket *p)
 {
-    USBHIDState *us = DO_UPCAST(USBHIDState, dev, dev);
+    USBHIDState *us = USB_HID(dev);
     HIDState *hs = &us->hid;
     uint8_t buf[p->iov.size];
     int len = 0;
@@ -685,9 +696,9 @@ static void usb_hid_handle_data(USBDevice *dev, USBPacket *p)
     }
 }
 
-static void usb_hid_handle_destroy(USBDevice *dev)
+static void usb_hid_unrealize(USBDevice *dev, Error **errp)
 {
-    USBHIDState *us = DO_UPCAST(USBHIDState, dev, dev);
+    USBHIDState *us = USB_HID(dev);
 
     hid_free(&us->hid);
 }
@@ -696,7 +707,7 @@ static void usb_hid_initfn(USBDevice *dev, int kind,
                            const USBDesc *usb1, const USBDesc *usb2,
                            Error **errp)
 {
-    USBHIDState *us = DO_UPCAST(USBHIDState, dev, dev);
+    USBHIDState *us = USB_HID(dev);
     switch (us->usb_version) {
     case 1:
         dev->usb_desc = usb1;
@@ -713,9 +724,7 @@ static void usb_hid_initfn(USBDevice *dev, int kind,
         return;
     }
 
-    if (dev->serial) {
-        usb_desc_set_string(dev, STR_SERIALNUMBER, dev->serial);
-    }
+    usb_desc_create_serial(dev);
     usb_desc_init(dev);
     us->intr = usb_ep_get(dev, USB_TOKEN_IN, 1);
     hid_init(&us->hid, kind, usb_hid_changed);
@@ -780,9 +789,17 @@ static void usb_hid_class_initfn(ObjectClass *klass, void *data)
     uc->handle_reset   = usb_hid_handle_reset;
     uc->handle_control = usb_hid_handle_control;
     uc->handle_data    = usb_hid_handle_data;
-    uc->handle_destroy = usb_hid_handle_destroy;
+    uc->unrealize      = usb_hid_unrealize;
     uc->handle_attach  = usb_desc_attach;
 }
+
+static const TypeInfo usb_hid_type_info = {
+    .name = TYPE_USB_HID,
+    .parent = TYPE_USB_DEVICE,
+    .instance_size = sizeof(USBHIDState),
+    .abstract = true,
+    .class_init = usb_hid_class_initfn,
+};
 
 static Property usb_tablet_properties[] = {
         DEFINE_PROP_UINT32("usb_version", USBHIDState, usb_version, 2),
@@ -796,7 +813,6 @@ static void usb_tablet_class_initfn(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
-    usb_hid_class_initfn(klass, data);
     uc->realize        = usb_tablet_realize;
     uc->product_desc   = "QEMU USB Tablet";
     dc->vmsd = &vmstate_usb_ptr;
@@ -806,8 +822,7 @@ static void usb_tablet_class_initfn(ObjectClass *klass, void *data)
 
 static const TypeInfo usb_tablet_info = {
     .name          = "usb-tablet",
-    .parent        = TYPE_USB_DEVICE,
-    .instance_size = sizeof(USBHIDState),
+    .parent        = TYPE_USB_HID,
     .class_init    = usb_tablet_class_initfn,
 };
 
@@ -821,7 +836,6 @@ static void usb_mouse_class_initfn(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
-    usb_hid_class_initfn(klass, data);
     uc->realize        = usb_mouse_realize;
     uc->product_desc   = "QEMU USB Mouse";
     dc->vmsd = &vmstate_usb_ptr;
@@ -831,8 +845,7 @@ static void usb_mouse_class_initfn(ObjectClass *klass, void *data)
 
 static const TypeInfo usb_mouse_info = {
     .name          = "usb-mouse",
-    .parent        = TYPE_USB_DEVICE,
-    .instance_size = sizeof(USBHIDState),
+    .parent        = TYPE_USB_HID,
     .class_init    = usb_mouse_class_initfn,
 };
 
@@ -847,7 +860,6 @@ static void usb_keyboard_class_initfn(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
-    usb_hid_class_initfn(klass, data);
     uc->realize        = usb_keyboard_realize;
     uc->product_desc   = "QEMU USB Keyboard";
     dc->vmsd = &vmstate_usb_kbd;
@@ -857,13 +869,13 @@ static void usb_keyboard_class_initfn(ObjectClass *klass, void *data)
 
 static const TypeInfo usb_keyboard_info = {
     .name          = "usb-kbd",
-    .parent        = TYPE_USB_DEVICE,
-    .instance_size = sizeof(USBHIDState),
+    .parent        = TYPE_USB_HID,
     .class_init    = usb_keyboard_class_initfn,
 };
 
 static void usb_hid_register_types(void)
 {
+    type_register_static(&usb_hid_type_info);
     type_register_static(&usb_tablet_info);
     usb_legacy_register("usb-tablet", "tablet", NULL);
     type_register_static(&usb_mouse_info);

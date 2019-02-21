@@ -1,43 +1,80 @@
-# Virtual Open-Channel SSD 2.0
+# QEMU Open-Channel SSD 2.0
 
-This repository implements support for exposing an NVMe device that implements the Open-Channel 2.0 specification.
+This repository contains a fork of [qemu/qemu](https://github.com/qemu/qemu)
+with modifications to the NVMe device to allow the device to expose it self as
+an Open-Channel 2.0 device.
+
+Also included is support for metadata, SGLs, predefined data according to
+`DLFEAT`, optional error recovery through the error recovery `DULBE`-attribute
+and error injection.
 
 ## Compiling & Installing
 
-Below is a minimal example of the installation process for x86_64, kvm-enabled emulation using libaio for I/O.
+Below is a minimal example of the installation process.
 
     git clone https://github.com/OpenChannelSSD/qemu-nvme.git
 
     cd qemu-nvme
-    ./configure --enable-kvm --target-list=x86_64-softmmu --enable-linux-aio --disable-werror --disable-xen --prefix=$HOME/qemu-nvme
+    ./configure --target-list=x86_64-softmmu --prefix=$HOME/qemu-nvme
     make
     make install
 
-That'll install the OCSSD enabled qemu binary into $HOME/qemu-nvme.
+**NOTE** Consider using the `--enable-trace-backends=log` configure option for
+better debugging.
 
-## Configuring the virtual open-channel SSD drive
+## Configuring the Open-Channel 2.0 SSD device
 
-The device must have a backend file to store its data. Create a backend file by (e.g., 8GB)
+The device must have a backend file to store its data. Create a backend file
+(e.g., 8GB)
 
-    dd if=/dev/zero of=ocssd_backend.img bs=1M count=8096
+```
+qemu-img create -f raw ocssd.img 8G
+```
 
-The qemu arguments must be extended with:
+To add the OCSSD NVMe device, extend the QEMU arguments with something like:
 
-    -drive file={path to ocssd backend file},id=myocssd,format=raw,if=none \
-    -device nvme,drive=myocssd,serial=deadbeef,lnum_pu=4,lstrict=1,meta=16,mc=3 \
+```
+-blockdev raw,node-name=nvme01,file.driver=file,file.filename=ocssd.img
+-device nvme,drive=nvme01,serial=deadbeef,ms=16,id=lnvm,
+        lnum_grp=2,lnum_pu=4,lnum_sec=4096,lws_min=4,lws_opt=8,
+        lchunkstate=data/chunktable.txt
+```
 
-The full command line could look like the following and creates an ocssd with 4 parallel units:
+**NOTE** Only the number of group, parallel units per group and sectors per
+chunk are configured. The number of chunks per parallel unit is inferred from
+those values to fill out the backend file (with reserved space for internal and
+external metadata).
 
-    sudo $HOME/qemu-nvme/bin/qemu-system-x86_64 -m 4G -smp 4 -s \
-    -drive file={path to vm image},id=diskdrive,format=raw,if=none \
-    -device virtio-blk-pci,drive=diskdrive,scsi=off,config-wce=off,x-data-plane=on \
-    -drive file={path to ocssd backend file},id=myocssd,format=raw,if=none \
-    -device nvme,drive=myocssd,serial=deadbeef,lnum_pu=4,lstrict=1,meta=16,mc=3
+The block device maintains an on-device Chunk Info Log Page. When the device is
+brought up any state will be restored. The restored chunk states may be
+overwritten using the `lchunkstate` parameter. An example chunk state file:
 
-A complete list of all options supported by the NVMe device can be found in [the source](hw/block/nvme.c#L61) with comments on each option at the top of the file and a list of options and their default values toward the bottom of the file.
+```
+grp=0 pu=0 chk=0 state=OPEN wp=65535 type=W_RAN wi=0
+grp=0 pu=0 chk=1 state=OFFLINE wp=65535 type=W_SEQ wi=0
+grp=0 pu=0 chk=2 state=CLOSED wp=4096 type=W_SEQ wi=0
+grp=0 pu=0 chk=3 state=OPEN wp=2048 type=W_SEQ wi=0
+```
 
-In the virtual machine, make sure to install at least Linux kernel 4.17 or latest release candidate.
+A complete list of all options supported by the NVMe device can be found in
+[the source](hw/block/nvme.c#L31).
 
-## Current limitations
+There are two QEMU parameters that change the behavior of the device. The
+first, `learly_reset` is enabled by default and allows `OPEN` chunks to be
+reset. While the OCSSD 2.0 specification does not allow this most available
+drives do. The second, `lsgl_lbal` is disabled by default and governs how the
+`LBAL` field should be interpreted if `DPTR` is an SGL (`PSDT` is `0x1` or
+`0x2`). By default `LBAL` will be not be interpreted as an SGL in any case.
+Enabling this option may be useful for NVMe over Fabrics.
 
-  - The driver does not support multiple groups. This should however be easy to implement.
+
+## Kernel
+
+You probably want to make sure the following options are enabled in the kernel
+you are going to use.
+
+```
+CONFIG_BLK_DEV_INTEGRITY=y
+CONFIG_HOTPLUG_PCI_PCIE=y
+CONFIG_HOTPLUG_PCI_ACPI=y
+```

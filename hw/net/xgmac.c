@@ -24,11 +24,10 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
-#include "sysemu/char.h"
 #include "qemu/log.h"
 #include "net/net.h"
-#include "net/checksum.h"
 
 #ifdef DEBUG_XGMAC
 #define DEBUGF_BRK(message, args...) do { \
@@ -312,10 +311,8 @@ static const MemoryRegionOps enet_mem_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static int eth_can_rx(NetClientState *nc)
+static int eth_can_rx(XgmacState *s)
 {
-    XgmacState *s = qemu_get_nic_opaque(nc);
-
     /* RX enabled?  */
     return s->regs[DMA_CONTROL] & DMA_CONTROL_SR;
 }
@@ -329,6 +326,9 @@ static ssize_t eth_rx(NetClientState *nc, const uint8_t *buf, size_t size)
     struct desc bd;
     ssize_t ret;
 
+    if (!eth_can_rx(s)) {
+        return -1;
+    }
     unicast = ~buf[0] & 0x1;
     broadcast = memcmp(buf, sa_bcast, 6) == 0;
     multicast = !unicast && !broadcast;
@@ -368,24 +368,15 @@ out:
     return ret;
 }
 
-static void eth_cleanup(NetClientState *nc)
-{
-    XgmacState *s = qemu_get_nic_opaque(nc);
-
-    s->nic = NULL;
-}
-
 static NetClientInfo net_xgmac_enet_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_NIC,
+    .type = NET_CLIENT_DRIVER_NIC,
     .size = sizeof(NICState),
-    .can_receive = eth_can_rx,
     .receive = eth_rx,
-    .cleanup = eth_cleanup,
 };
 
-static int xgmac_enet_init(SysBusDevice *sbd)
+static void xgmac_enet_realize(DeviceState *dev, Error **errp)
 {
-    DeviceState *dev = DEVICE(sbd);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     XgmacState *s = XGMAC(dev);
 
     memory_region_init_io(&s->iomem, OBJECT(s), &enet_mem_ops, s,
@@ -406,8 +397,6 @@ static int xgmac_enet_init(SysBusDevice *sbd)
                                  (s->conf.macaddr.a[2] << 16) |
                                  (s->conf.macaddr.a[1] << 8) |
                                   s->conf.macaddr.a[0];
-
-    return 0;
 }
 
 static Property xgmac_properties[] = {
@@ -417,10 +406,9 @@ static Property xgmac_properties[] = {
 
 static void xgmac_enet_class_init(ObjectClass *klass, void *data)
 {
-    SysBusDeviceClass *sbc = SYS_BUS_DEVICE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    sbc->init = xgmac_enet_init;
+    dc->realize = xgmac_enet_realize;
     dc->vmsd = &vmstate_xgmac;
     dc->props = xgmac_properties;
 }

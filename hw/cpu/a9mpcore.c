@@ -8,7 +8,10 @@
  * This code is licensed under the GPL.
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "hw/cpu/a9mpcore.h"
+#include "qom/cpu.h"
 
 static void a9mp_priv_set_irq(void *opaque, int irq, int level)
 {
@@ -24,20 +27,18 @@ static void a9mp_priv_initfn(Object *obj)
     memory_region_init(&s->container, obj, "a9mp-priv-container", 0x2000);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->container);
 
-    object_initialize(&s->scu, sizeof(s->scu), TYPE_A9_SCU);
-    qdev_set_parent_bus(DEVICE(&s->scu), sysbus_get_default());
+    sysbus_init_child_obj(obj, "scu", &s->scu, sizeof(s->scu), TYPE_A9_SCU);
 
-    object_initialize(&s->gic, sizeof(s->gic), TYPE_ARM_GIC);
-    qdev_set_parent_bus(DEVICE(&s->gic), sysbus_get_default());
+    sysbus_init_child_obj(obj, "gic", &s->gic, sizeof(s->gic), TYPE_ARM_GIC);
 
-    object_initialize(&s->gtimer, sizeof(s->gtimer), TYPE_A9_GTIMER);
-    qdev_set_parent_bus(DEVICE(&s->gtimer), sysbus_get_default());
+    sysbus_init_child_obj(obj, "gtimer", &s->gtimer, sizeof(s->gtimer),
+                          TYPE_A9_GTIMER);
 
-    object_initialize(&s->mptimer, sizeof(s->mptimer), TYPE_ARM_MPTIMER);
-    qdev_set_parent_bus(DEVICE(&s->mptimer), sysbus_get_default());
+    sysbus_init_child_obj(obj, "mptimer", &s->mptimer, sizeof(s->mptimer),
+                          TYPE_ARM_MPTIMER);
 
-    object_initialize(&s->wdt, sizeof(s->wdt), TYPE_ARM_MPTIMER);
-    qdev_set_parent_bus(DEVICE(&s->wdt), sysbus_get_default());
+    sysbus_init_child_obj(obj, "wdt", &s->wdt, sizeof(s->wdt),
+                          TYPE_ARM_MPTIMER);
 }
 
 static void a9mp_priv_realize(DeviceState *dev, Error **errp)
@@ -49,6 +50,8 @@ static void a9mp_priv_realize(DeviceState *dev, Error **errp)
                  *wdtbusdev;
     Error *err = NULL;
     int i;
+    bool has_el3;
+    Object *cpuobj;
 
     scudev = DEVICE(&s->scu);
     qdev_prop_set_uint32(scudev, "num-cpu", s->num_cpu);
@@ -62,6 +65,15 @@ static void a9mp_priv_realize(DeviceState *dev, Error **errp)
     gicdev = DEVICE(&s->gic);
     qdev_prop_set_uint32(gicdev, "num-cpu", s->num_cpu);
     qdev_prop_set_uint32(gicdev, "num-irq", s->num_irq);
+
+    /* Make the GIC's TZ support match the CPUs. We assume that
+     * either all the CPUs have TZ, or none do.
+     */
+    cpuobj = OBJECT(qemu_get_cpu(0));
+    has_el3 = object_property_find(cpuobj, "has_el3", NULL) &&
+        object_property_get_bool(cpuobj, "has_el3", &error_abort);
+    qdev_prop_set_bit(gicdev, "has-security-extensions", has_el3);
+
     object_property_set_bool(OBJECT(&s->gic), true, "realized", &err);
     if (err != NULL) {
         error_propagate(errp, err);

@@ -8,11 +8,11 @@
  * later.  See the COPYING file in the top-level directory.
  */
 
-#ifndef HW_BLOCK_COMMON_H
-#define HW_BLOCK_COMMON_H
+#ifndef HW_BLOCK_H
+#define HW_BLOCK_H
 
 #include "qemu-common.h"
-#include "qapi/error.h"
+#include "qapi/qapi-types-block-core.h"
 
 /* Configuration */
 
@@ -27,6 +27,10 @@ typedef struct BlockConf {
     uint32_t is_lightnvm;
     /* geometry, not all devices use this */
     uint32_t cyls, heads, secs;
+    OnOffAuto wce;
+    bool share_rw;
+    BlockdevOnError rerror;
+    BlockdevOnError werror;
 } BlockConf;
 
 static inline unsigned int get_physical_block_exp(BlockConf *conf)
@@ -45,26 +49,37 @@ static inline unsigned int get_physical_block_exp(BlockConf *conf)
 #define DEFINE_BLOCK_PROPERTIES(_state, _conf)                          \
     DEFINE_PROP_DRIVE("drive", _state, _conf.blk),                      \
     DEFINE_PROP_BLOCKSIZE("logical_block_size", _state,                 \
-                          _conf.logical_block_size, 512),               \
+                          _conf.logical_block_size),                    \
     DEFINE_PROP_BLOCKSIZE("physical_block_size", _state,                \
-                          _conf.physical_block_size, 512),              \
+                          _conf.physical_block_size),                   \
     DEFINE_PROP_UINT16("min_io_size", _state, _conf.min_io_size, 0),  \
     DEFINE_PROP_UINT32("opt_io_size", _state, _conf.opt_io_size, 0),    \
     DEFINE_PROP_UINT32("discard_granularity", _state, \
                        _conf.discard_granularity, -1), \
-    DEFINE_PROP_UINT32("is_lightnvm", _state, _conf.is_lightnvm, 0)
+    DEFINE_PROP_UINT32("is_lightnvm", _state, _conf.is_lightnvm, 0),    \
+    DEFINE_PROP_ON_OFF_AUTO("write-cache", _state, _conf.wce, \
+                            ON_OFF_AUTO_AUTO), \
+    DEFINE_PROP_BOOL("share-rw", _state, _conf.share_rw, false)
 
 #define DEFINE_BLOCK_CHS_PROPERTIES(_state, _conf)      \
     DEFINE_PROP_UINT32("cyls", _state, _conf.cyls, 0),  \
     DEFINE_PROP_UINT32("heads", _state, _conf.heads, 0), \
     DEFINE_PROP_UINT32("secs", _state, _conf.secs, 0)
 
+#define DEFINE_BLOCK_ERROR_PROPERTIES(_state, _conf)                    \
+    DEFINE_PROP_BLOCKDEV_ON_ERROR("rerror", _state, _conf.rerror,       \
+                                  BLOCKDEV_ON_ERROR_AUTO),              \
+    DEFINE_PROP_BLOCKDEV_ON_ERROR("werror", _state, _conf.werror,       \
+                                  BLOCKDEV_ON_ERROR_AUTO)
+
 /* Configuration helpers */
 
-void blkconf_serial(BlockConf *conf, char **serial);
-void blkconf_geometry(BlockConf *conf, int *trans,
+bool blkconf_geometry(BlockConf *conf, int *trans,
                       unsigned cyls_max, unsigned heads_max, unsigned secs_max,
                       Error **errp);
+void blkconf_blocksizes(BlockConf *conf);
+bool blkconf_apply_backend_options(BlockConf *conf, bool readonly,
+                                   bool resizable, Error **errp);
 
 /* Hard disk geometry */
 

@@ -13,10 +13,11 @@
  *
  */
 
+#include "qemu/osdep.h"
 #include "hw/qdev.h"
 #include "qemu/thread.h"
 #include "qemu/error-report.h"
-#include "sysemu/char.h"
+#include "chardev/char-fe.h"
 
 #include "hw/s390x/sclp.h"
 #include "hw/s390x/event-facility.h"
@@ -36,12 +37,16 @@ typedef struct OprtnsCommand {
 
 typedef struct SCLPConsoleLM {
     SCLPEvent event;
-    CharDriverState *chr;
+    CharBackend chr;
     bool echo;                  /* immediate echo of input if true        */
     uint32_t write_errors;      /* errors writing to char layer           */
     uint32_t length;            /* length of byte stream in buffer        */
     uint8_t buf[SIZE_CONSOLE_BUFFER];
 } SCLPConsoleLM;
+
+#define TYPE_SCLPLM_CONSOLE "sclplmconsole"
+#define SCLPLM_CONSOLE(obj) \
+    OBJECT_CHECK(SCLPConsoleLM, (obj), TYPE_SCLPLM_CONSOLE)
 
 /*
 *  Character layer call-back functions
@@ -52,7 +57,8 @@ typedef struct SCLPConsoleLM {
  * event_pending is set when a newline character is encountered
  *
  * The maximum command line length is limited by the maximum
- * space available in an SCCB
+ * space available in an SCCB. Line mode console input is sent
+ * truncated to the guest in case it doesn't fit into the SCCB.
  */
 
 static int chr_can_read(void *opaque)
@@ -61,10 +67,8 @@ static int chr_can_read(void *opaque)
 
     if (scon->event.event_pending) {
         return 0;
-    } else if (SIZE_CONSOLE_BUFFER - scon->length) {
-        return 1;
     }
-    return 0;
+    return 1;
 }
 
 static void chr_read(void *opaque, const uint8_t *buf, int size)
@@ -78,10 +82,16 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
         sclp_service_interrupt(0);
         return;
     }
+    if (scon->length == SIZE_CONSOLE_BUFFER) {
+        /* Eat the character, but still process CR and LF.  */
+        return;
+    }
     scon->buf[scon->length] = *buf;
     scon->length += 1;
     if (scon->echo) {
-        qemu_chr_fe_write(scon->chr, buf, size);
+        /* XXX this blocks entire thread. Rewrite to use
+         * qemu_chr_fe_write and background I/O callbacks */
+        qemu_chr_fe_write_all(&scon->chr, buf, size);
     }
 }
 
@@ -92,12 +102,12 @@ static bool can_handle_event(uint8_t type)
     return type == SCLP_EVENT_MESSAGE || type == SCLP_EVENT_PMSGCMD;
 }
 
-static unsigned int send_mask(void)
+static sccb_mask_t send_mask(void)
 {
     return SCLP_EVENT_MASK_OP_CMD | SCLP_EVENT_MASK_PMSGCMD;
 }
 
-static unsigned int receive_mask(void)
+static sccb_mask_t receive_mask(void)
 {
     return SCLP_EVENT_MASK_MSG | SCLP_EVENT_MASK_PMSGCMD;
 }
@@ -112,7 +122,7 @@ static int get_console_data(SCLPEvent *event, uint8_t *buf, size_t *size,
 {
     int len;
 
-    SCLPConsoleLM *cons = DO_UPCAST(SCLPConsoleLM, event, event);
+    SCLPConsoleLM *cons = SCLPLM_CONSOLE(event);
 
     len = cons->length;
     /* data need to fit into provided SCLP buffer */
@@ -125,6 +135,7 @@ static int get_console_data(SCLPEvent *event, uint8_t *buf, size_t *size,
     cons->length = 0;
     /* data provided and no more data pending */
     event->event_pending = false;
+    qemu_notify_event();
     return 0;
 }
 
@@ -182,31 +193,16 @@ static int read_event_data(SCLPEvent *event, EventBufferHeader *evt_buf_hdr,
  */
 static int write_console_data(SCLPEvent *event, const uint8_t *buf, int len)
 {
-    int ret = 0;
-    const uint8_t *buf_offset;
+    SCLPConsoleLM *scon = SCLPLM_CONSOLE(event);
 
-    SCLPConsoleLM *scon = DO_UPCAST(SCLPConsoleLM, event, event);
-
-    if (!scon->chr) {
+    if (!qemu_chr_fe_backend_connected(&scon->chr)) {
         /* If there's no backend, we can just say we consumed all data. */
         return len;
     }
 
-    buf_offset = buf;
-    while (len > 0) {
-        ret = qemu_chr_fe_write(scon->chr, buf, len);
-        if (ret == 0) {
-            /* a pty doesn't seem to be connected - no error */
-            len = 0;
-        } else if (ret == -EAGAIN || (ret > 0 && ret < len)) {
-            len -= ret;
-            buf_offset += ret;
-        } else {
-            len = 0;
-        }
-    }
-
-    return ret;
+    /* XXX this blocks entire thread. Rewrite to use
+     * qemu_chr_fe_write and background I/O callbacks */
+    return qemu_chr_fe_write_all(&scon->chr, buf, len);
 }
 
 static int process_mdb(SCLPEvent *event, MDBO *mdbo)
@@ -239,7 +235,7 @@ static int write_event_data(SCLPEvent *event, EventBufferHeader *ebh)
     int errors = 0;
     MDBO *mdbo;
     SclpMsg *data = (SclpMsg *) ebh;
-    SCLPConsoleLM *scon = DO_UPCAST(SCLPConsoleLM, event, event);
+    SCLPConsoleLM *scon = SCLPLM_CONSOLE(event);
 
     len = be16_to_cpu(data->mdb.header.length);
     if (len < sizeof(data->mdb.header)) {
@@ -308,7 +304,7 @@ static int console_init(SCLPEvent *event)
 {
     static bool console_available;
 
-    SCLPConsoleLM *scon = DO_UPCAST(SCLPConsoleLM, event, event);
+    SCLPConsoleLM *scon = SCLPLM_CONSOLE(event);
 
     if (console_available) {
         error_report("Multiple line-mode operator consoles are not supported");
@@ -316,22 +312,16 @@ static int console_init(SCLPEvent *event)
     }
     console_available = true;
 
-    if (scon->chr) {
-        qemu_chr_add_handlers(scon->chr, chr_can_read, chr_read, NULL, scon);
-    }
+    qemu_chr_fe_set_handlers(&scon->chr, chr_can_read,
+                             chr_read, NULL, NULL, scon, NULL, true);
 
-    return 0;
-}
-
-static int console_exit(SCLPEvent *event)
-{
     return 0;
 }
 
 static void console_reset(DeviceState *dev)
 {
    SCLPEvent *event = SCLP_EVENT(dev);
-   SCLPConsoleLM *scon = DO_UPCAST(SCLPConsoleLM, event, event);
+   SCLPConsoleLM *scon = SCLPLM_CONSOLE(event);
 
    event->event_pending = false;
    scon->length = 0;
@@ -354,12 +344,12 @@ static void console_class_init(ObjectClass *klass, void *data)
     dc->reset = console_reset;
     dc->vmsd = &vmstate_sclplmconsole;
     ec->init = console_init;
-    ec->exit = console_exit;
     ec->get_send_mask = send_mask;
     ec->get_receive_mask = receive_mask;
     ec->can_handle_event = can_handle_event;
     ec->read_event_data = read_event_data;
     ec->write_event_data = write_event_data;
+    set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
 }
 
 static const TypeInfo sclp_console_info = {

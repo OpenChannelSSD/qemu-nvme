@@ -5,20 +5,7 @@
  * terms and conditions of the copyright.
  */
 
-#include <slirp.h>
-#include <libslirp.h>
-
-#include "monitor/monitor.h"
-#include "qemu/main-loop.h"
-
-#ifdef DEBUG
-int slirp_debug = DBG_CALL|DBG_MISC|DBG_ERROR;
-#endif
-
-struct quehead {
-	struct quehead *qh_link;
-	struct quehead *qh_rlink;
-};
+#include "slirp.h"
 
 inline void
 insque(void *a, void *b)
@@ -41,195 +28,207 @@ remque(void *a)
   element->qh_rlink = NULL;
 }
 
-int add_exec(struct ex_list **ex_ptr, int do_pty, char *exec,
+struct gfwd_list *
+add_guestfwd(struct gfwd_list **ex_ptr,
+             SlirpWriteCb write_cb, void *opaque,
              struct in_addr addr, int port)
 {
-	struct ex_list *tmp_ptr;
+    struct gfwd_list *f = g_new0(struct gfwd_list, 1);
 
-	/* First, check if the port is "bound" */
-	for (tmp_ptr = *ex_ptr; tmp_ptr; tmp_ptr = tmp_ptr->ex_next) {
-		if (port == tmp_ptr->ex_fport &&
-		    addr.s_addr == tmp_ptr->ex_addr.s_addr)
-			return -1;
-	}
+    f->write_cb = write_cb;
+    f->opaque = opaque;
+    f->ex_fport = port;
+    f->ex_addr = addr;
+    f->ex_next = *ex_ptr;
+    *ex_ptr = f;
 
-	tmp_ptr = *ex_ptr;
-	*ex_ptr = g_new(struct ex_list, 1);
-	(*ex_ptr)->ex_fport = port;
-	(*ex_ptr)->ex_addr = addr;
-	(*ex_ptr)->ex_pty = do_pty;
-	(*ex_ptr)->ex_exec = (do_pty == 3) ? exec : g_strdup(exec);
-	(*ex_ptr)->ex_next = tmp_ptr;
-	return 0;
+    return f;
 }
 
-#ifndef HAVE_STRERROR
-
-/*
- * For systems with no strerror
- */
-
-extern int sys_nerr;
-extern char *sys_errlist[];
-
-char *
-strerror(error)
-	int error;
+struct gfwd_list *
+add_exec(struct gfwd_list **ex_ptr, const char *cmdline,
+         struct in_addr addr, int port)
 {
-	if (error < sys_nerr)
-	   return sys_errlist[error];
-	else
-	   return "Unknown error.";
+    struct gfwd_list *f = add_guestfwd(ex_ptr, NULL, NULL, addr, port);
+
+    f->ex_exec = g_strdup(cmdline);
+
+    return f;
 }
 
-#endif
-
-
-#ifdef _WIN32
-
-int
-fork_exec(struct socket *so, const char *ex, int do_pty)
+static int
+slirp_socketpair_with_oob(int sv[2])
 {
-    /* not implemented */
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port = 0,
+        .sin_addr.s_addr = INADDR_ANY,
+    };
+    socklen_t addrlen = sizeof(addr);
+    int ret, s;
+
+    sv[1] = -1;
+    s = slirp_socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0 || bind(s, (struct sockaddr *)&addr, addrlen) < 0 ||
+        listen(s, 1) < 0 ||
+        getsockname(s, (struct sockaddr *)&addr, &addrlen) < 0) {
+        goto err;
+    }
+
+    sv[1] = slirp_socket(AF_INET, SOCK_STREAM, 0);
+    if (sv[1] < 0) {
+        goto err;
+    }
+    /*
+     * This connect won't block because we've already listen()ed on
+     * the server end (even though we won't accept() the connection
+     * until later on).
+     */
+    do {
+        ret = connect(sv[1], (struct sockaddr *)&addr, addrlen);
+    } while (ret < 0 && errno == EINTR);
+    if (ret < 0) {
+        goto err;
+    }
+
+    do {
+        sv[0] = accept(s, (struct sockaddr *)&addr, &addrlen);
+    } while (sv[0] < 0 && errno == EINTR);
+    if (sv[0] < 0) {
+        goto err;
+    }
+
+    slirp_closesocket(s);
     return 0;
+
+err:
+    g_critical("slirp_socketpair(): %s", strerror(errno));
+    if (s >= 0) {
+        slirp_closesocket(s);
+    }
+    if (sv[1] >= 0) {
+        slirp_closesocket(sv[1]);
+    }
+    return -1;
 }
 
-#else
-
-/*
- * XXX This is ugly
- * We create and bind a socket, then fork off to another
- * process, which connects to this socket, after which we
- * exec the wanted program.  If something (strange) happens,
- * the accept() call could block us forever.
- *
- * do_pty = 0   Fork/exec inetd style
- * do_pty = 1   Fork/exec using slirp.telnetd
- * do_ptr = 2   Fork/exec using pty
- */
-int
-fork_exec(struct socket *so, const char *ex, int do_pty)
+static void
+fork_exec_child_setup(gpointer data)
 {
-	int s;
-	struct sockaddr_in addr;
-	socklen_t addrlen = sizeof(addr);
-	int opt;
-	const char *argv[256];
-	/* don't want to clobber the original */
-	char *bptr;
-	const char *curarg;
-	int c, i, ret;
-	pid_t pid;
+#ifndef _WIN32
+    setsid();
+#endif
+}
 
-	DEBUG_CALL("fork_exec");
-	DEBUG_ARG("so = %lx", (long)so);
-	DEBUG_ARG("ex = %lx", (long)ex);
-	DEBUG_ARG("do_pty = %lx", (long)do_pty);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
-	if (do_pty == 2) {
-                return 0;
-	} else {
-		addr.sin_family = AF_INET;
-		addr.sin_port = 0;
-		addr.sin_addr.s_addr = INADDR_ANY;
+#if !GLIB_CHECK_VERSION(2, 58, 0)
+typedef struct SlirpGSpawnFds {
+    GSpawnChildSetupFunc child_setup;
+    gpointer user_data;
+    gint stdin_fd;
+    gint stdout_fd;
+    gint stderr_fd;
+} SlirpGSpawnFds;
 
-		if ((s = qemu_socket(AF_INET, SOCK_STREAM, 0)) < 0 ||
-		    bind(s, (struct sockaddr *)&addr, addrlen) < 0 ||
-		    listen(s, 1) < 0) {
-			error_report("Error: inet socket: %s", strerror(errno));
-			closesocket(s);
+static inline void
+slirp_gspawn_fds_setup(gpointer user_data)
+{
+    SlirpGSpawnFds *q = (SlirpGSpawnFds *)user_data;
 
-			return 0;
-		}
-	}
-
-	pid = fork();
-	switch(pid) {
-	 case -1:
-		error_report("Error: fork failed: %s", strerror(errno));
-		close(s);
-		return 0;
-
-	 case 0:
-                setsid();
-
-		/* Set the DISPLAY */
-                getsockname(s, (struct sockaddr *)&addr, &addrlen);
-                close(s);
-                /*
-                 * Connect to the socket
-                 * XXX If any of these fail, we're in trouble!
-                 */
-                s = qemu_socket(AF_INET, SOCK_STREAM, 0);
-                addr.sin_addr = loopback_addr;
-                do {
-                    ret = connect(s, (struct sockaddr *)&addr, addrlen);
-                } while (ret < 0 && errno == EINTR);
-
-		dup2(s, 0);
-		dup2(s, 1);
-		dup2(s, 2);
-		for (s = getdtablesize() - 1; s >= 3; s--)
-		   close(s);
-
-		i = 0;
-		bptr = g_strdup(ex); /* No need to free() this */
-		if (do_pty == 1) {
-			/* Setup "slirp.telnetd -x" */
-			argv[i++] = "slirp.telnetd";
-			argv[i++] = "-x";
-			argv[i++] = bptr;
-		} else
-		   do {
-			/* Change the string into argv[] */
-			curarg = bptr;
-			while (*bptr != ' ' && *bptr != (char)0)
-			   bptr++;
-			c = *bptr;
-			*bptr++ = (char)0;
-			argv[i++] = g_strdup(curarg);
-		   } while (c);
-
-                argv[i] = NULL;
-		execvp(argv[0], (char **)argv);
-
-		/* Ooops, failed, let's tell the user why */
-        fprintf(stderr, "Error: execvp of %s failed: %s\n",
-                argv[0], strerror(errno));
-		close(0); close(1); close(2); /* XXX */
-		exit(1);
-
-	 default:
-		qemu_add_child_watch(pid);
-                /*
-                 * XXX this could block us...
-                 * XXX Should set a timer here, and if accept() doesn't
-                 * return after X seconds, declare it a failure
-                 * The only reason this will block forever is if socket()
-                 * of connect() fail in the child process
-                 */
-                do {
-                    so->s = accept(s, (struct sockaddr *)&addr, &addrlen);
-                } while (so->s < 0 && errno == EINTR);
-                closesocket(s);
-                socket_set_fast_reuse(so->s);
-                opt = 1;
-                qemu_setsockopt(so->s, SOL_SOCKET, SO_OOBINLINE, &opt, sizeof(int));
-		qemu_set_nonblock(so->s);
-
-		/* Append the telnet options now */
-                if (so->so_m != NULL && do_pty == 1)  {
-			sbappend(so, so->so_m);
-                        so->so_m = NULL;
-		}
-
-		return 1;
-	}
+    dup2(q->stdin_fd, 0);
+    dup2(q->stdout_fd, 1);
+    dup2(q->stderr_fd, 2);
+    q->child_setup(q->user_data);
 }
 #endif
 
-void slirp_connection_info(Slirp *slirp, Monitor *mon)
+static inline gboolean
+g_spawn_async_with_fds_slirp(const gchar *working_directory,
+                            gchar **argv,
+                            gchar **envp,
+                            GSpawnFlags flags,
+                            GSpawnChildSetupFunc child_setup,
+                            gpointer user_data,
+                            GPid *child_pid,
+                            gint stdin_fd,
+                            gint stdout_fd,
+                            gint stderr_fd,
+                            GError **error)
 {
+#if GLIB_CHECK_VERSION(2, 58, 0)
+    return g_spawn_async_with_fds(working_directory, argv, envp, flags,
+                                  child_setup, user_data,
+                                  child_pid, stdin_fd, stdout_fd, stderr_fd,
+                                  error);
+#else
+    SlirpGSpawnFds setup = {
+        .child_setup = child_setup,
+        .user_data = user_data,
+        .stdin_fd = stdin_fd,
+        .stdout_fd = stdout_fd,
+        .stderr_fd = stderr_fd,
+    };
+
+    return g_spawn_async(working_directory, argv, envp, flags,
+                         slirp_gspawn_fds_setup, &setup,
+                         child_pid, error);
+#endif
+}
+
+#define g_spawn_async_with_fds(wd, argv, env, f, c, d, p, ifd, ofd, efd, err) \
+    g_spawn_async_with_fds_slirp(wd, argv, env, f, c, d, p, ifd, ofd, efd, err)
+
+#pragma GCC diagnostic pop
+
+int
+fork_exec(struct socket *so, const char *ex)
+{
+    GError *err = NULL;
+    char **argv;
+    int opt, sp[2];
+
+    DEBUG_CALL("fork_exec");
+    DEBUG_ARG("so = %p", so);
+    DEBUG_ARG("ex = %p", ex);
+
+    if (slirp_socketpair_with_oob(sp) < 0) {
+        return 0;
+    }
+
+    argv = g_strsplit(ex, " ", -1);
+    g_spawn_async_with_fds(NULL /* cwd */,
+                           argv,
+                           NULL /* env */,
+                           G_SPAWN_SEARCH_PATH,
+                           fork_exec_child_setup, NULL /* data */,
+                           NULL /* child_pid */,
+                           sp[1], sp[1], sp[1],
+                           &err);
+    g_strfreev(argv);
+
+    if (err) {
+        g_critical("fork_exec: %s", err->message);
+        g_error_free(err);
+        slirp_closesocket(sp[0]);
+        slirp_closesocket(sp[1]);
+        return 0;
+    }
+
+    so->s = sp[0];
+    slirp_closesocket(sp[1]);
+    slirp_socket_set_fast_reuse(so->s);
+    opt = 1;
+    slirp_setsockopt(so->s, SOL_SOCKET, SO_OOBINLINE, &opt, sizeof(int));
+    slirp_set_nonblock(so->s);
+    so->slirp->cb->register_poll_fd(so->s, so->slirp->opaque);
+    return 1;
+}
+
+char *slirp_connection_info(Slirp *slirp)
+{
+    GString *str = g_string_new(NULL);
     const char * const tcpstates[] = {
         [TCPS_CLOSED]       = "CLOSED",
         [TCPS_LISTEN]       = "LISTEN",
@@ -251,8 +250,9 @@ void slirp_connection_info(Slirp *slirp, Monitor *mon)
     const char *state;
     char buf[20];
 
-    monitor_printf(mon, "  Protocol[State]    FD  Source Address  Port   "
-                        "Dest. Address  Port RecvQ SendQ\n");
+    g_string_append_printf(str,
+        "  Protocol[State]    FD  Source Address  Port   "
+        "Dest. Address  Port RecvQ SendQ\n");
 
     for (so = slirp->tcb.so_next; so != &slirp->tcb; so = so->so_next) {
         if (so->so_state & SS_HOSTFWD) {
@@ -274,10 +274,10 @@ void slirp_connection_info(Slirp *slirp, Monitor *mon)
             dst_port = so->so_fport;
         }
         snprintf(buf, sizeof(buf), "  TCP[%s]", state);
-        monitor_printf(mon, "%-19s %3d %15s %5d ", buf, so->s,
+        g_string_append_printf(str, "%-19s %3d %15s %5d ", buf, so->s,
                        src.sin_addr.s_addr ? inet_ntoa(src.sin_addr) : "*",
                        ntohs(src.sin_port));
-        monitor_printf(mon, "%15s %5d %5d %5d\n",
+        g_string_append_printf(str, "%15s %5d %5d %5d\n",
                        inet_ntoa(dst_addr), ntohs(dst_port),
                        so->so_rcv.sb_cc, so->so_snd.sb_cc);
     }
@@ -297,10 +297,10 @@ void slirp_connection_info(Slirp *slirp, Monitor *mon)
             dst_addr = so->so_faddr;
             dst_port = so->so_fport;
         }
-        monitor_printf(mon, "%-19s %3d %15s %5d ", buf, so->s,
+        g_string_append_printf(str, "%-19s %3d %15s %5d ", buf, so->s,
                        src.sin_addr.s_addr ? inet_ntoa(src.sin_addr) : "*",
                        ntohs(src.sin_port));
-        monitor_printf(mon, "%15s %5d %5d %5d\n",
+        g_string_append_printf(str, "%15s %5d %5d %5d\n",
                        inet_ntoa(dst_addr), ntohs(dst_port),
                        so->so_rcv.sb_cc, so->so_snd.sb_cc);
     }
@@ -310,9 +310,11 @@ void slirp_connection_info(Slirp *slirp, Monitor *mon)
                      (so->so_expire - curtime) / 1000);
         src.sin_addr = so->so_laddr;
         dst_addr = so->so_faddr;
-        monitor_printf(mon, "%-19s %3d %15s  -    ", buf, so->s,
+        g_string_append_printf(str, "%-19s %3d %15s  -    ", buf, so->s,
                        src.sin_addr.s_addr ? inet_ntoa(src.sin_addr) : "*");
-        monitor_printf(mon, "%15s  -    %5d %5d\n", inet_ntoa(dst_addr),
+        g_string_append_printf(str, "%15s  -    %5d %5d\n", inet_ntoa(dst_addr),
                        so->so_rcv.sb_cc, so->so_snd.sb_cc);
     }
+
+    return g_string_free(str, FALSE);
 }

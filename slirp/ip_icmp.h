@@ -30,8 +30,8 @@
  * ip_icmp.h,v 1.4 1995/05/30 08:09:43 rgrimes Exp
  */
 
-#ifndef _NETINET_IP_ICMP_H_
-#define _NETINET_IP_ICMP_H_
+#ifndef NETINET_IP_ICMP_H
+#define NETINET_IP_ICMP_H
 
 /*
  * Interface Control Message Protocol Definitions.
@@ -44,22 +44,22 @@ typedef uint32_t n_time;
  * Structure of an icmp header.
  */
 struct icmp {
-	u_char	icmp_type;		/* type of message, see below */
-	u_char	icmp_code;		/* type sub code */
-	u_short	icmp_cksum;		/* ones complement cksum of struct */
+	uint8_t	icmp_type;		/* type of message, see below */
+	uint8_t	icmp_code;		/* type sub code */
+	uint16_t	icmp_cksum;		/* ones complement cksum of struct */
 	union {
-		u_char ih_pptr;			/* ICMP_PARAMPROB */
+		uint8_t ih_pptr;			/* ICMP_PARAMPROB */
 		struct in_addr ih_gwaddr;	/* ICMP_REDIRECT */
 		struct ih_idseq {
-			u_short	icd_id;
-			u_short	icd_seq;
+			uint16_t	icd_id;
+			uint16_t	icd_seq;
 		} ih_idseq;
 		int ih_void;
 
 		/* ICMP_UNREACH_NEEDFRAG -- Path MTU Discovery (RFC1191) */
 		struct ih_pmtu {
-			u_short ipm_void;
-			u_short ipm_nextmtu;
+			uint16_t ipm_void;
+			uint16_t ipm_nextmtu;
 		} ih_pmtu;
 	} icmp_hun;
 #define	icmp_pptr	icmp_hun.ih_pptr
@@ -156,8 +156,8 @@ struct icmp {
 void icmp_init(Slirp *slirp);
 void icmp_cleanup(Slirp *slirp);
 void icmp_input(struct mbuf *, int);
-void icmp_error(struct mbuf *msrc, u_char type, u_char code, int minsize,
-                const char *message);
+void icmp_send_error(struct mbuf *msrc, uint8_t type, uint8_t code, int minsize,
+                     const char *message);
 void icmp_reflect(struct mbuf *);
 void icmp_receive(struct socket *so);
 void icmp_detach(struct socket *so);

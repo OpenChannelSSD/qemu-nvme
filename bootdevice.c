@@ -1,7 +1,7 @@
 /*
  * QEMU Boot Device Implement
  *
- * Copyright (c) 2014 HUAWEI TECHNOLOGIES CO.,LTD.
+ * Copyright (c) 2014 HUAWEI TECHNOLOGIES CO., LTD.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -22,9 +22,14 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "sysemu/sysemu.h"
 #include "qapi/visitor.h"
 #include "qemu/error-report.h"
+#include "sysemu/reset.h"
+#include "hw/qdev-core.h"
+#include "hw/boards.h"
 
 typedef struct FWBootEntry FWBootEntry;
 
@@ -37,6 +42,80 @@ struct FWBootEntry {
 
 static QTAILQ_HEAD(, FWBootEntry) fw_boot_order =
     QTAILQ_HEAD_INITIALIZER(fw_boot_order);
+static QEMUBootSetHandler *boot_set_handler;
+static void *boot_set_opaque;
+
+void qemu_register_boot_set(QEMUBootSetHandler *func, void *opaque)
+{
+    boot_set_handler = func;
+    boot_set_opaque = opaque;
+}
+
+void qemu_boot_set(const char *boot_order, Error **errp)
+{
+    Error *local_err = NULL;
+
+    if (!boot_set_handler) {
+        error_setg(errp, "no function defined to set boot device list for"
+                         " this architecture");
+        return;
+    }
+
+    validate_bootdevices(boot_order, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return;
+    }
+
+    boot_set_handler(boot_set_opaque, boot_order, errp);
+}
+
+void validate_bootdevices(const char *devices, Error **errp)
+{
+    /* We just do some generic consistency checks */
+    const char *p;
+    int bitmap = 0;
+
+    for (p = devices; *p != '\0'; p++) {
+        /* Allowed boot devices are:
+         * a-b: floppy disk drives
+         * c-f: IDE disk drives
+         * g-m: machine implementation dependent drives
+         * n-p: network devices
+         * It's up to each machine implementation to check if the given boot
+         * devices match the actual hardware implementation and firmware
+         * features.
+         */
+        if (*p < 'a' || *p > 'p') {
+            error_setg(errp, "Invalid boot device '%c'", *p);
+            return;
+        }
+        if (bitmap & (1 << (*p - 'a'))) {
+            error_setg(errp, "Boot device '%c' was given twice", *p);
+            return;
+        }
+        bitmap |= 1 << (*p - 'a');
+    }
+}
+
+void restore_boot_order(void *opaque)
+{
+    char *normal_boot_order = opaque;
+    static int first = 1;
+
+    /* Restore boot order and remove ourselves after the first boot */
+    if (first) {
+        first = 0;
+        return;
+    }
+
+    if (boot_set_handler) {
+        qemu_boot_set(normal_boot_order, &error_abort);
+    }
+
+    qemu_unregister_reset(restore_boot_order, normal_boot_order);
+    g_free(normal_boot_order);
+}
 
 void check_boot_index(int32_t bootindex, Error **errp)
 {
@@ -130,14 +209,18 @@ DeviceState *get_boot_device(uint32_t position)
  * memory pointed by "size" is assigned total length of the array in bytes
  *
  */
-char *get_boot_devices_list(size_t *size, bool ignore_suffixes)
+char *get_boot_devices_list(size_t *size)
 {
     FWBootEntry *i;
     size_t total = 0;
     char *list = NULL;
+    MachineClass *mc = MACHINE_GET_CLASS(qdev_get_machine());
+    bool ignore_suffixes = mc->ignore_boot_device_suffixes;
 
     QTAILQ_FOREACH(i, &fw_boot_order, link) {
-        char *devpath = NULL, *bootpath;
+        char *devpath = NULL,  *suffix = NULL;
+        char *bootpath;
+        char *d;
         size_t len;
 
         if (i->dev) {
@@ -145,20 +228,26 @@ char *get_boot_devices_list(size_t *size, bool ignore_suffixes)
             assert(devpath);
         }
 
-        if (i->suffix && !ignore_suffixes && devpath) {
-            size_t bootpathlen = strlen(devpath) + strlen(i->suffix) + 1;
-
-            bootpath = g_malloc(bootpathlen);
-            snprintf(bootpath, bootpathlen, "%s%s", devpath, i->suffix);
-            g_free(devpath);
-        } else if (devpath) {
-            bootpath = devpath;
-        } else if (!ignore_suffixes) {
-            assert(i->suffix);
-            bootpath = g_strdup(i->suffix);
-        } else {
-            bootpath = g_strdup("");
+        if (!ignore_suffixes) {
+            if (i->dev) {
+                d = qdev_get_own_fw_dev_path_from_handler(i->dev->parent_bus,
+                                                          i->dev);
+                if (d) {
+                    assert(!i->suffix);
+                    suffix = d;
+                } else {
+                    suffix = g_strdup(i->suffix);
+                }
+            } else {
+                suffix = g_strdup(i->suffix);
+            }
         }
+
+        bootpath = g_strdup_printf("%s%s",
+                                   devpath ? devpath : "",
+                                   suffix ? suffix : "");
+        g_free(devpath);
+        g_free(suffix);
 
         if (total) {
             list[total-1] = '\n';
@@ -187,21 +276,21 @@ typedef struct {
     DeviceState *dev;
 } BootIndexProperty;
 
-static void device_get_bootindex(Object *obj, Visitor *v, void *opaque,
-                                 const char *name, Error **errp)
+static void device_get_bootindex(Object *obj, Visitor *v, const char *name,
+                                 void *opaque, Error **errp)
 {
     BootIndexProperty *prop = opaque;
-    visit_type_int32(v, prop->bootindex, name, errp);
+    visit_type_int32(v, name, prop->bootindex, errp);
 }
 
-static void device_set_bootindex(Object *obj, Visitor *v, void *opaque,
-                                 const char *name, Error **errp)
+static void device_set_bootindex(Object *obj, Visitor *v, const char *name,
+                                 void *opaque, Error **errp)
 {
     BootIndexProperty *prop = opaque;
     int32_t boot_index;
     Error *local_err = NULL;
 
-    visit_type_int32(v, &boot_index, name, &local_err);
+    visit_type_int32(v, name, &boot_index, &local_err);
     if (local_err) {
         goto out;
     }
@@ -216,9 +305,7 @@ static void device_set_bootindex(Object *obj, Visitor *v, void *opaque,
     add_boot_device_path(*prop->bootindex, prop->dev, prop->suffix);
 
 out:
-    if (local_err) {
-        error_propagate(errp, local_err);
-    }
+    error_propagate(errp, local_err);
 }
 
 static void property_release_bootindex(Object *obj, const char *name,

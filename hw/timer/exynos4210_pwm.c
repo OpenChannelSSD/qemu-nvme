@@ -20,6 +20,8 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "hw/sysbus.h"
 #include "qemu/timer.h"
 #include "qemu-common.h"
@@ -251,9 +253,9 @@ static uint64_t exynos4210_pwm_read(void *opaque, hwaddr offset,
         break;
 
     default:
-        fprintf(stderr,
-                "[exynos4210.pwm: bad read offset " TARGET_FMT_plx "]\n",
-                offset);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "exynos4210.pwm: bad read offset " TARGET_FMT_plx,
+                      offset);
         break;
     }
     return value;
@@ -342,9 +344,9 @@ static void exynos4210_pwm_write(void *opaque, hwaddr offset,
         break;
 
     default:
-        fprintf(stderr,
-                "[exynos4210.pwm: bad write offset " TARGET_FMT_plx "]\n",
-                offset);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "exynos4210.pwm: bad write offset " TARGET_FMT_plx,
+                      offset);
         break;
 
     }
@@ -379,33 +381,30 @@ static const MemoryRegionOps exynos4210_pwm_ops = {
 /*
  * PWM timer initialization
  */
-static int exynos4210_pwm_init(SysBusDevice *dev)
+static void exynos4210_pwm_init(Object *obj)
 {
-    Exynos4210PWMState *s = EXYNOS4210_PWM(dev);
+    Exynos4210PWMState *s = EXYNOS4210_PWM(obj);
+    SysBusDevice *dev = SYS_BUS_DEVICE(obj);
     int i;
     QEMUBH *bh;
 
     for (i = 0; i < EXYNOS4210_PWM_TIMERS_NUM; i++) {
         bh = qemu_bh_new(exynos4210_pwm_tick, &s->timer[i]);
         sysbus_init_irq(dev, &s->timer[i].irq);
-        s->timer[i].ptimer = ptimer_init(bh);
+        s->timer[i].ptimer = ptimer_init(bh, PTIMER_POLICY_DEFAULT);
         s->timer[i].id = i;
         s->timer[i].parent = s;
     }
 
-    memory_region_init_io(&s->iomem, OBJECT(s), &exynos4210_pwm_ops, s,
+    memory_region_init_io(&s->iomem, obj, &exynos4210_pwm_ops, s,
                           "exynos4210-pwm", EXYNOS4210_PWM_REG_MEM_SIZE);
     sysbus_init_mmio(dev, &s->iomem);
-
-    return 0;
 }
 
 static void exynos4210_pwm_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
-    k->init = exynos4210_pwm_init;
     dc->reset = exynos4210_pwm_reset;
     dc->vmsd = &vmstate_exynos4210_pwm_state;
 }
@@ -414,6 +413,7 @@ static const TypeInfo exynos4210_pwm_info = {
     .name          = TYPE_EXYNOS4210_PWM,
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(Exynos4210PWMState),
+    .instance_init = exynos4210_pwm_init,
     .class_init    = exynos4210_pwm_class_init,
 };
 

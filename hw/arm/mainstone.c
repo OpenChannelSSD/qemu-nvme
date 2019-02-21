@@ -11,6 +11,9 @@
  * Contributions after 2012-01-13 are licensed under the terms of the
  * GNU GPL, version 2 or (at your option) any later version.
  */
+#include "qemu/osdep.h"
+#include "qemu/error-report.h"
+#include "qapi/error.h"
 #include "hw/hw.h"
 #include "hw/arm/pxa.h"
 #include "hw/arm/arm.h"
@@ -18,10 +21,10 @@
 #include "hw/devices.h"
 #include "hw/boards.h"
 #include "hw/block/flash.h"
-#include "sysemu/block-backend.h"
 #include "hw/sysbus.h"
 #include "exec/address-spaces.h"
 #include "sysemu/qtest.h"
+#include "cpu.h"
 
 /* Device addresses */
 #define MST_FPGA_PHYS	0x08000000
@@ -71,8 +74,10 @@ static const struct keymap map[0xE0] = {
     [0x2f] = {3,3}, /* v */
     [0x11] = {3,4}, /* w */
     [0x2d] = {3,5}, /* x */
+    [0x34] = {4,0}, /* . */
     [0x15] = {4,2}, /* y */
     [0x2c] = {4,3}, /* z */
+    [0x35] = {4,4}, /* / */
     [0xc7] = {5,0}, /* Home */
     [0x2a] = {5,1}, /* shift */
     /*
@@ -86,7 +91,8 @@ static const struct keymap map[0xE0] = {
      * Matrix position {5,4} and other keys are missing here.
      * TODO: Compare with Linux code and test real hardware.
      */
-    [0x1c] = {5,5}, /* enter (TODO: might be wrong) */
+    [0x1c] = {5,4}, /* enter */
+    [0x0e] = {5,5}, /* backspace */
     [0xc8] = {6,0}, /* up */
     [0xd0] = {6,1}, /* down */
     [0xcb] = {6,2}, /* left */
@@ -116,16 +122,12 @@ static void mainstone_common_init(MemoryRegion *address_space_mem,
     int i;
     int be;
     MemoryRegion *rom = g_new(MemoryRegion, 1);
-    const char *cpu_model = machine->cpu_model;
-
-    if (!cpu_model)
-        cpu_model = "pxa270-c5";
 
     /* Setup CPU & memory */
-    mpu = pxa270_init(address_space_mem, mainstone_binfo.ram_size, cpu_model);
+    mpu = pxa270_init(address_space_mem, mainstone_binfo.ram_size,
+                      machine->cpu_type);
     memory_region_init_ram(rom, NULL, "mainstone.rom", MAINSTONE_ROM,
-                           &error_abort);
-    vmstate_register_ram_global(rom);
+                           &error_fatal);
     memory_region_set_readonly(rom, true);
     memory_region_add_subregion(address_space_mem, 0, rom);
 
@@ -141,8 +143,8 @@ static void mainstone_common_init(MemoryRegion *address_space_mem,
             if (qtest_enabled()) {
                 break;
             }
-            fprintf(stderr, "Two flash images must be given with the "
-                    "'pflash' parameter\n");
+            error_report("Two flash images must be given with the "
+                         "'pflash' parameter");
             exit(1);
         }
 
@@ -152,7 +154,7 @@ static void mainstone_common_init(MemoryRegion *address_space_mem,
                                    blk_by_legacy_dinfo(dinfo),
                                    sector_len, MAINSTONE_FLASH / sector_len,
                                    4, 0, 0, 0, 0, be)) {
-            fprintf(stderr, "qemu: Error registering flash memory.\n");
+            error_report("Error registering flash memory");
             exit(1);
         }
     }
@@ -188,15 +190,12 @@ static void mainstone_init(MachineState *machine)
     mainstone_common_init(get_system_memory(), machine, mainstone, 0x196);
 }
 
-static QEMUMachine mainstone2_machine = {
-    .name = "mainstone",
-    .desc = "Mainstone II (PXA27x)",
-    .init = mainstone_init,
-};
-
-static void mainstone_machine_init(void)
+static void mainstone2_machine_init(MachineClass *mc)
 {
-    qemu_register_machine(&mainstone2_machine);
+    mc->desc = "Mainstone II (PXA27x)";
+    mc->init = mainstone_init;
+    mc->ignore_memory_transaction_failures = true;
+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("pxa270-c5");
 }
 
-machine_init(mainstone_machine_init);
+DEFINE_MACHINE("mainstone", mainstone2_machine_init)

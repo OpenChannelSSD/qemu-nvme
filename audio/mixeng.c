@@ -22,7 +22,10 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
 #include "qemu-common.h"
+#include "qemu/bswap.h"
+#include "qemu/error-report.h"
 #include "audio.h"
 
 #define AUDIO_CAP "mixeng"
@@ -265,11 +268,42 @@ f_sample *mixeng_clip[2][2][2][3] = {
     }
 };
 
+
+void audio_sample_to_uint64(void *samples, int pos,
+                            uint64_t *left, uint64_t *right)
+{
+    struct st_sample *sample = samples;
+    sample += pos;
+#ifdef FLOAT_MIXENG
+    error_report(
+        "Coreaudio and floating point samples are not supported by replay yet");
+    abort();
+#else
+    *left = sample->l;
+    *right = sample->r;
+#endif
+}
+
+void audio_sample_from_uint64(void *samples, int pos,
+                            uint64_t left, uint64_t right)
+{
+    struct st_sample *sample = samples;
+    sample += pos;
+#ifdef FLOAT_MIXENG
+    error_report(
+        "Coreaudio and floating point samples are not supported by replay yet");
+    abort();
+#else
+    sample->l = left;
+    sample->r = right;
+#endif
+}
+
 /*
  * August 21, 1998
  * Copyright 1998 Fabrice Bellard.
  *
- * [Rewrote completly the code of Lance Norskog And Sundry
+ * [Rewrote completely the code of Lance Norskog And Sundry
  * Contributors with a more efficient algorithm.]
  *
  * This source code is freely redistributable and may be used for
@@ -310,7 +344,7 @@ struct rate {
  */
 void *st_rate_start (int inrate, int outrate)
 {
-    struct rate *rate = audio_calloc (AUDIO_FUNC, 1, sizeof (*rate));
+    struct rate *rate = audio_calloc(__func__, 1, sizeof(*rate));
 
     if (!rate) {
         dolog ("Could not allocate resampler (%zu bytes)\n", sizeof (*rate));

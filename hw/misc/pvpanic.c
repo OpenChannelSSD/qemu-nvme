@@ -12,14 +12,12 @@
  *
  */
 
-#include "qapi/qmp/qobject.h"
-#include "qapi/qmp/qjson.h"
+#include "qemu/osdep.h"
 #include "sysemu/sysemu.h"
 #include "qemu/log.h"
 
 #include "hw/nvram/fw_cfg.h"
-#include "hw/i386/pc.h"
-#include "qapi-event.h"
+#include "hw/misc/pvpanic.h"
 
 /* The bit of supported pv event */
 #define PVPANIC_F_PANICKED      0
@@ -27,9 +25,8 @@
 /* The pv event value */
 #define PVPANIC_PANICKED        (1 << PVPANIC_F_PANICKED)
 
-#define TYPE_ISA_PVPANIC_DEVICE    "pvpanic"
 #define ISA_PVPANIC_DEVICE(obj)    \
-    OBJECT_CHECK(PVPanicState, (obj), TYPE_ISA_PVPANIC_DEVICE)
+    OBJECT_CHECK(PVPanicState, (obj), TYPE_PVPANIC)
 
 static void handle_event(int event)
 {
@@ -41,8 +38,7 @@ static void handle_event(int event)
     }
 
     if (event & PVPANIC_PANICKED) {
-        qapi_event_send_guest_panicked(GUEST_PANIC_ACTION_PAUSE, &error_abort);
-        vm_stop(RUN_STATE_GUEST_PANICKED);
+        qemu_system_guest_panicked(NULL);
         return;
     }
 }
@@ -103,17 +99,6 @@ static void pvpanic_isa_realizefn(DeviceState *dev, Error **errp)
     isa_register_ioport(d, &s->io, s->ioport);
 }
 
-#define PVPANIC_IOPORT_PROP "ioport"
-
-uint16_t pvpanic_port(void)
-{
-    Object *o = object_resolve_path_type("", TYPE_ISA_PVPANIC_DEVICE, NULL);
-    if (!o) {
-        return 0;
-    }
-    return object_property_get_int(o, PVPANIC_IOPORT_PROP, NULL);
-}
-
 static Property pvpanic_isa_properties[] = {
     DEFINE_PROP_UINT16(PVPANIC_IOPORT_PROP, PVPanicState, ioport, 0x505),
     DEFINE_PROP_END_OF_LIST(),
@@ -129,7 +114,7 @@ static void pvpanic_isa_class_init(ObjectClass *klass, void *data)
 }
 
 static TypeInfo pvpanic_isa_info = {
-    .name          = TYPE_ISA_PVPANIC_DEVICE,
+    .name          = TYPE_PVPANIC,
     .parent        = TYPE_ISA_DEVICE,
     .instance_size = sizeof(PVPanicState),
     .instance_init = pvpanic_isa_initfn,

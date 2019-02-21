@@ -22,10 +22,8 @@
  * THE SOFTWARE.
  */
 
-
-#ifndef __QEMU_VNC_AUTH_SASL_H__
-#define __QEMU_VNC_AUTH_SASL_H__
-
+#ifndef QEMU_VNC_AUTH_SASL_H
+#define QEMU_VNC_AUTH_SASL_H
 
 #include <sasl/sasl.h>
 
@@ -55,6 +53,7 @@ struct VncStateSASL {
      */
     const uint8_t *encoded;
     unsigned int encodedLength;
+    unsigned int encodedRawLength;
     unsigned int encodedOffset;
     char *username;
     char *mechlist;
@@ -66,10 +65,9 @@ struct VncDisplaySASL {
 
 void vnc_sasl_client_cleanup(VncState *vs);
 
-long vnc_client_read_sasl(VncState *vs);
-long vnc_client_write_sasl(VncState *vs);
+size_t vnc_client_read_sasl(VncState *vs);
+size_t vnc_client_write_sasl(VncState *vs);
 
 void start_auth_sasl(VncState *vs);
 
-#endif /* __QEMU_VNC_AUTH_SASL_H__ */
-
+#endif /* QEMU_VNC_AUTH_SASL_H */

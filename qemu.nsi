@@ -20,7 +20,7 @@
 ; NSIS_WIN32_MAKENSIS
 
 !define PRODUCT "QEMU"
-!define URL     "http://www.qemu-project.org/"
+!define URL     "https://www.qemu.org/"
 
 !define UNINST_EXE "$INSTDIR\qemu-uninstall.exe"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT}"
@@ -139,6 +139,9 @@ Section "${PRODUCT} (required)"
 
     ; Write the uninstall keys for Windows
     WriteRegStr HKLM "${UNINST_KEY}" "DisplayName" "QEMU"
+!ifdef DISPLAYVERSION
+    WriteRegStr HKLM "${UNINST_KEY}" "DisplayVersion" "${DISPLAYVERSION}"
+!endif
     WriteRegStr HKLM "${UNINST_KEY}" "UninstallString" '"${UNINST_EXE}"'
     WriteRegDWORD HKLM "${UNINST_KEY}" "NoModify" 1
     WriteRegDWORD HKLM "${UNINST_KEY}" "NoRepair" 1
@@ -168,10 +171,8 @@ SectionEnd
 Section "Documentation" SectionDoc
     SetOutPath "$INSTDIR"
     File "${BINDIR}\qemu-doc.html"
-    File "${BINDIR}\qemu-tech.html"
     CreateDirectory "$SMPROGRAMS\${PRODUCT}"
     CreateShortCut "$SMPROGRAMS\${PRODUCT}\User Documentation.lnk" "$INSTDIR\qemu-doc.html" "" "$INSTDIR\qemu-doc.html" 0
-    CreateShortCut "$SMPROGRAMS\${PRODUCT}\Technical Documentation.lnk" "$INSTDIR\qemu-tech.html" "" "$INSTDIR\qemu-tech.html" 0
 SectionEnd
 !endif
 
@@ -216,7 +217,6 @@ Section "Uninstall"
     Delete "$INSTDIR\qemu.exe"
     Delete "$INSTDIR\qemu-system-*.exe"
     Delete "$INSTDIR\qemu-doc.html"
-    Delete "$INSTDIR\qemu-tech.html"
     RMDir /r "$INSTDIR\keymaps"
     RMDir /r "$INSTDIR\share"
     ; Remove generated files

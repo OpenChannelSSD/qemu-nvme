@@ -40,14 +40,17 @@
  *      * Wake-on-LAN is not implemented.
  */
 
-#include <stddef.h>             /* offsetof */
+#include "qemu/osdep.h"
+#include "qemu/units.h"
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
 #include "net/net.h"
+#include "net/eth.h"
 #include "hw/nvram/eeprom93xx.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/dma.h"
 #include "qemu/bitops.h"
+#include "qapi/error.h"
 
 /* QEMU sends frames smaller than 60 bytes to ethernet nics.
  * Such frames are rejected by real nics and their emulations.
@@ -57,8 +60,6 @@
  * become useful the future if the core networking is ever
  * changed to pad short packets itself. */
 #define CONFIG_PAD_RECEIVED_FRAMES
-
-#define KiB 1024
 
 /* Debug EEPRO100 card. */
 #if 0
@@ -322,44 +323,20 @@ static const uint16_t eepro100_mdi_mask[] = {
     0xffff, 0xffff, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
 };
 
-#define POLYNOMIAL 0x04c11db6
-
 static E100PCIDeviceInfo *eepro100_get_class(EEPRO100State *s);
-
-/* From FreeBSD (locally modified). */
-static unsigned e100_compute_mcast_idx(const uint8_t *ep)
-{
-    uint32_t crc;
-    int carry, i, j;
-    uint8_t b;
-
-    crc = 0xffffffff;
-    for (i = 0; i < 6; i++) {
-        b = *ep++;
-        for (j = 0; j < 8; j++) {
-            carry = ((crc & 0x80000000L) ? 1 : 0) ^ (b & 0x01);
-            crc <<= 1;
-            b >>= 1;
-            if (carry) {
-                crc = ((crc ^ POLYNOMIAL) | carry);
-            }
-        }
-    }
-    return (crc & BITS(7, 2)) >> 2;
-}
 
 /* Read a 16 bit control/status (CSR) register. */
 static uint16_t e100_read_reg2(EEPRO100State *s, E100RegisterOffset addr)
 {
     assert(!((uintptr_t)&s->mem[addr] & 1));
-    return le16_to_cpup((uint16_t *)&s->mem[addr]);
+    return lduw_le_p(&s->mem[addr]);
 }
 
 /* Read a 32 bit control/status (CSR) register. */
 static uint32_t e100_read_reg4(EEPRO100State *s, E100RegisterOffset addr)
 {
     assert(!((uintptr_t)&s->mem[addr] & 3));
-    return le32_to_cpup((uint32_t *)&s->mem[addr]);
+    return ldl_le_p(&s->mem[addr]);
 }
 
 /* Write a 16 bit control/status (CSR) register. */
@@ -367,7 +344,7 @@ static void e100_write_reg2(EEPRO100State *s, E100RegisterOffset addr,
                             uint16_t val)
 {
     assert(!((uintptr_t)&s->mem[addr] & 1));
-    cpu_to_le16w((uint16_t *)&s->mem[addr], val);
+    stw_le_p(&s->mem[addr], val);
 }
 
 /* Read a 32 bit control/status (CSR) register. */
@@ -375,7 +352,7 @@ static void e100_write_reg4(EEPRO100State *s, E100RegisterOffset addr,
                             uint32_t val)
 {
     assert(!((uintptr_t)&s->mem[addr] & 3));
-    cpu_to_le32w((uint32_t *)&s->mem[addr], val);
+    stl_le_p(&s->mem[addr], val);
 }
 
 #if defined(DEBUG_EEPRO100)
@@ -494,7 +471,7 @@ static void eepro100_fcp_interrupt(EEPRO100State * s)
 }
 #endif
 
-static void e100_pci_reset(EEPRO100State * s)
+static void e100_pci_reset(EEPRO100State *s, Error **errp)
 {
     E100PCIDeviceInfo *info = eepro100_get_class(s);
     uint32_t device = s->device;
@@ -570,8 +547,12 @@ static void e100_pci_reset(EEPRO100State * s)
         /* Power Management Capabilities */
         int cfg_offset = 0xdc;
         int r = pci_add_capability(&s->dev, PCI_CAP_ID_PM,
-                                   cfg_offset, PCI_PM_SIZEOF);
-        assert(r >= 0);
+                                   cfg_offset, PCI_PM_SIZEOF,
+                                   errp);
+        if (r < 0) {
+            return;
+        }
+
         pci_set_word(pci_conf + cfg_offset + PCI_PM_PMC, 0x7e21);
 #if 0 /* TODO: replace dummy code for power management emulation. */
         /* TODO: Power Management Control / Status. */
@@ -749,8 +730,8 @@ static void read_cb(EEPRO100State *s)
 
 static void tx_command(EEPRO100State *s)
 {
-    uint32_t tbd_array = le32_to_cpu(s->tx.tbd_array_addr);
-    uint16_t tcb_bytes = (le16_to_cpu(s->tx.tcb_bytes) & 0x3fff);
+    uint32_t tbd_array = s->tx.tbd_array_addr;
+    uint16_t tcb_bytes = s->tx.tcb_bytes & 0x3fff;
     /* Sends larger than MAX_ETH_FRAME_SIZE are allowed, up to 2600 bytes. */
     uint8_t buf[2600];
     uint16_t size = 0;
@@ -769,18 +750,11 @@ static void tx_command(EEPRO100State *s)
     }
     assert(tcb_bytes <= sizeof(buf));
     while (size < tcb_bytes) {
-        uint32_t tx_buffer_address = ldl_le_pci_dma(&s->dev, tbd_address);
-        uint16_t tx_buffer_size = lduw_le_pci_dma(&s->dev, tbd_address + 4);
-#if 0
-        uint16_t tx_buffer_el = lduw_le_pci_dma(&s->dev, tbd_address + 6);
-#endif
-        tbd_address += 8;
         TRACE(RXTX, logout
             ("TBD (simplified mode): buffer address 0x%08x, size 0x%04x\n",
-             tx_buffer_address, tx_buffer_size));
-        tx_buffer_size = MIN(tx_buffer_size, sizeof(buf) - size);
-        pci_dma_read(&s->dev, tx_buffer_address, &buf[size], tx_buffer_size);
-        size += tx_buffer_size;
+             tbd_address, tcb_bytes));
+        pci_dma_read(&s->dev, tbd_address, &buf[size], tcb_bytes);
+        size += tcb_bytes;
     }
     if (tbd_array == 0xffffffff) {
         /* Simplified mode. Was already handled by code above. */
@@ -847,7 +821,8 @@ static void set_multicast_list(EEPRO100State *s)
         uint8_t multicast_addr[6];
         pci_dma_read(&s->dev, s->cb_address + 10 + i, multicast_addr, 6);
         TRACE(OTHER, logout("multicast entry %s\n", nic_dump(multicast_addr, 6)));
-        unsigned mcast_idx = e100_compute_mcast_idx(multicast_addr);
+        unsigned mcast_idx = (net_crc32(multicast_addr, ETH_ALEN) &
+                              BITS(7, 2)) >> 2;
         assert(mcast_idx < 64);
         s->mult[mcast_idx >> 3] |= (1 << (mcast_idx & 7));
     }
@@ -855,6 +830,10 @@ static void set_multicast_list(EEPRO100State *s)
 
 static void action_command(EEPRO100State *s)
 {
+    /* The loop below won't stop if it gets special handcrafted data.
+       Therefore we limit the number of iterations. */
+    unsigned max_loop_count = 16;
+
     for (;;) {
         bool bit_el;
         bool bit_s;
@@ -870,6 +849,13 @@ static void action_command(EEPRO100State *s)
 #if 0
         bool bit_sf = ((s->tx.command & COMMAND_SF) != 0);
 #endif
+
+        if (max_loop_count-- == 0) {
+            /* Prevent an endless loop. */
+            logout("loop in %s:%u\n", __FILE__, __LINE__);
+            break;
+        }
+
         s->cu_offset = s->tx.link;
         TRACE(OTHER,
               logout("val=(cu start), status=0x%04x, command=0x%04x, link=0x%08x\n",
@@ -1617,16 +1603,6 @@ static const MemoryRegionOps eepro100_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static int nic_can_receive(NetClientState *nc)
-{
-    EEPRO100State *s = qemu_get_nic_opaque(nc);
-    TRACE(RXTX, logout("%p\n", s));
-    return get_ru_state(s) == ru_ready;
-#if 0
-    return !eepro100_buffer_full(s);
-#endif
-}
-
 static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
 {
     /* TODO:
@@ -1682,7 +1658,7 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
         if (s->configuration[21] & BIT(3)) {
           /* Multicast all bit is set, receive all multicast frames. */
         } else {
-          unsigned mcast_idx = e100_compute_mcast_idx(buf);
+          unsigned mcast_idx = (net_crc32(buf, ETH_ALEN) & BITS(7, 2)) >> 2;
           assert(mcast_idx < 64);
           if (s->mult[mcast_idx >> 3] & (1 << (mcast_idx & 7))) {
             /* Multicast frame is allowed in hash table. */
@@ -1702,7 +1678,7 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
         rfd_status |= 0x0004;
     } else if (s->configuration[20] & BIT(6)) {
         /* Multiple IA bit set. */
-        unsigned mcast_idx = compute_mcast_idx(buf);
+        unsigned mcast_idx = net_crc32(buf, ETH_ALEN) >> 26;
         assert(mcast_idx < 64);
         if (s->mult[mcast_idx >> 3] & (1 << (mcast_idx & 7))) {
             TRACE(RXTX, logout("%p accepted, multiple IA bit set\n", s));
@@ -1832,40 +1808,37 @@ static const VMStateDescription vmstate_eepro100 = {
     }
 };
 
-static void nic_cleanup(NetClientState *nc)
-{
-    EEPRO100State *s = qemu_get_nic_opaque(nc);
-
-    s->nic = NULL;
-}
-
 static void pci_nic_uninit(PCIDevice *pci_dev)
 {
     EEPRO100State *s = DO_UPCAST(EEPRO100State, dev, pci_dev);
 
     vmstate_unregister(&pci_dev->qdev, s->vmstate, s);
+    g_free(s->vmstate);
     eeprom93xx_free(&pci_dev->qdev, s->eeprom);
     qemu_del_nic(s->nic);
 }
 
 static NetClientInfo net_eepro100_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_NIC,
+    .type = NET_CLIENT_DRIVER_NIC,
     .size = sizeof(NICState),
-    .can_receive = nic_can_receive,
     .receive = nic_receive,
-    .cleanup = nic_cleanup,
 };
 
-static int e100_nic_init(PCIDevice *pci_dev)
+static void e100_nic_realize(PCIDevice *pci_dev, Error **errp)
 {
     EEPRO100State *s = DO_UPCAST(EEPRO100State, dev, pci_dev);
     E100PCIDeviceInfo *info = eepro100_get_class(s);
+    Error *local_err = NULL;
 
     TRACE(OTHER, logout("\n"));
 
     s->device = info->device;
 
-    e100_pci_reset(s);
+    e100_pci_reset(s, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return;
+    }
 
     /* Add 64 * 2 EEPROM. i82557 and i82558 support a 64 word EEPROM,
      * i82559 and later support 64 or 256 word EEPROM. */
@@ -1896,12 +1869,9 @@ static int e100_nic_init(PCIDevice *pci_dev)
 
     qemu_register_reset(nic_reset, s);
 
-    s->vmstate = g_malloc(sizeof(vmstate_eepro100));
-    memcpy(s->vmstate, &vmstate_eepro100, sizeof(vmstate_eepro100));
+    s->vmstate = g_memdup(&vmstate_eepro100, sizeof(vmstate_eepro100));
     s->vmstate->name = qemu_get_queue(s->nic)->model;
     vmstate_register(&pci_dev->qdev, -1, s->vmstate, s);
-
-    return 0;
 }
 
 static void eepro100_instance_init(Object *obj)
@@ -2091,7 +2061,7 @@ static void eepro100_class_init(ObjectClass *klass, void *data)
     k->vendor_id = PCI_VENDOR_ID_INTEL;
     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
     k->romfile = "pxe-eepro100.rom";
-    k->init = e100_nic_init;
+    k->realize = e100_nic_realize;
     k->exit = pci_nic_uninit;
     k->device_id = info->device_id;
     k->revision = info->revision;
@@ -2111,6 +2081,10 @@ static void eepro100_register_types(void)
         type_info.class_init = eepro100_class_init;
         type_info.instance_size = sizeof(EEPRO100State);
         type_info.instance_init = eepro100_instance_init;
+        type_info.interfaces = (InterfaceInfo[]) {
+            { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+            { },
+        };
 
         type_register(&type_info);
     }

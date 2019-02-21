@@ -13,7 +13,6 @@
 #define HOTPLUG_H
 
 #include "qom/object.h"
-#include "qemu/typedefs.h"
 
 #define TYPE_HOTPLUG_HANDLER "hotplug-handler"
 
@@ -24,11 +23,7 @@
 #define HOTPLUG_HANDLER(obj) \
      INTERFACE_CHECK(HotplugHandler, (obj), TYPE_HOTPLUG_HANDLER)
 
-
-typedef struct HotplugHandler {
-    /* <private> */
-    Object Parent;
-} HotplugHandler;
+typedef struct HotplugHandler HotplugHandler;
 
 /**
  * hotplug_fn:
@@ -46,19 +41,21 @@ typedef void (*hotplug_fn)(HotplugHandler *plug_handler,
  * hardware (un)plug functions.
  *
  * @parent: Opaque parent interface.
- * @plug: plug callback.
+ * @pre_plug: pre plug callback called at start of device.realize(true)
+ * @plug: plug callback called at end of device.realize(true).
  * @unplug_request: unplug request callback.
  *                  Used as a means to initiate device unplug for devices that
  *                  require asynchronous unplug handling.
  * @unplug: unplug callback.
  *          Used for device removal with devices that implement
- *          asynchronous and synchronous (suprise) removal.
+ *          asynchronous and synchronous (surprise) removal.
  */
 typedef struct HotplugHandlerClass {
     /* <private> */
     InterfaceClass parent;
 
     /* <public> */
+    hotplug_fn pre_plug;
     hotplug_fn plug;
     hotplug_fn unplug_request;
     hotplug_fn unplug;
@@ -72,6 +69,15 @@ typedef struct HotplugHandlerClass {
 void hotplug_handler_plug(HotplugHandler *plug_handler,
                           DeviceState *plugged_dev,
                           Error **errp);
+
+/**
+ * hotplug_handler_pre_plug:
+ *
+ * Call #HotplugHandlerClass.pre_plug callback of @plug_handler.
+ */
+void hotplug_handler_pre_plug(HotplugHandler *plug_handler,
+                              DeviceState *plugged_dev,
+                              Error **errp);
 
 /**
  * hotplug_handler_unplug_request:

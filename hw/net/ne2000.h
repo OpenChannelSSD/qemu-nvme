@@ -1,8 +1,12 @@
 #ifndef HW_NE2000_H
-#define HW_NE2000_H 1
+#define HW_NE2000_H
 
-#define NE2000_PMEM_SIZE    (32*1024)
-#define NE2000_PMEM_START   (16*1024)
+#include "qemu/units.h"
+#include "hw/hw.h"
+#include "net/net.h"
+
+#define NE2000_PMEM_SIZE    (32 * KiB)
+#define NE2000_PMEM_START   (16 * KiB)
 #define NE2000_PMEM_END     (NE2000_PMEM_SIZE+NE2000_PMEM_START)
 #define NE2000_MEM_SIZE     NE2000_PMEM_END
 
@@ -34,7 +38,6 @@ typedef struct NE2000State {
 void ne2000_setup_io(NE2000State *s, DeviceState *dev, unsigned size);
 extern const VMStateDescription vmstate_ne2000;
 void ne2000_reset(NE2000State *s);
-int ne2000_can_receive(NetClientState *nc);
 ssize_t ne2000_receive(NetClientState *nc, const uint8_t *buf, size_t size_);
 
 #endif

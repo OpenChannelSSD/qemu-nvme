@@ -12,13 +12,7 @@
  * See the COPYING file in the top-level directory.
  */
 
-#include <glib.h>
-#include <string.h>
-#include <stdio.h>
-#include <unistd.h>
-#include <errno.h>
-#include <sys/mman.h>
-#include <stdlib.h>
+#include "qemu/osdep.h"
 
 #include "libqtest.h"
 #include "libqos/pci.h"
@@ -26,8 +20,6 @@
 #include "hw/pci/pci_regs.h"
 
 #define BROKEN 1
-
-#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
 typedef struct TestData
 {
@@ -46,7 +38,7 @@ static QPCIBus *test_start_get_bus(const TestData *s)
     cmdline = g_strdup_printf("-smp %d", s->num_cpus);
     qtest_start(cmdline);
     g_free(cmdline);
-    return qpci_init_pc();
+    return qpci_init_pc(global_qtest, NULL);
 }
 
 static void test_i440fx_defaults(gconstpointer opaque)
@@ -142,6 +134,8 @@ static void test_i440fx_defaults(gconstpointer opaque)
     /* 3.2.26 */
     g_assert_cmpint(qpci_config_readb(dev, 0x93), ==, 0x00); /* TRC */
 
+    g_free(dev);
+    qpci_free_pc(bus);
     qtest_end();
 }
 
@@ -191,7 +185,7 @@ static void write_area(uint32_t start, uint32_t end, uint8_t value)
     uint32_t size = end - start + 1;
     uint8_t *data;
 
-    data = g_malloc0(size);
+    data = g_malloc(size);
     memset(data, value, size);
     memwrite(start, data, size);
 
@@ -278,6 +272,9 @@ static void test_i440fx_pam(gconstpointer opaque)
         /* Verify the area is not our new mask */
         g_assert(!verify_area(pam_area[i].start, pam_area[i].end, 0x82));
     }
+
+    g_free(dev);
+    qpci_free_pc(bus);
     qtest_end();
 }
 
@@ -342,8 +339,9 @@ static void test_i440fx_firmware(FirmwareTestFixture *fixture,
     g_assert(fw_pathname != NULL);
 
     /* Better hope the user didn't put metacharacters in TMPDIR and co. */
-    cmdline = g_strdup_printf("-S %s %s",
-                              fixture->is_bios ? "-bios" : "-pflash",
+    cmdline = g_strdup_printf("-S %s%s", fixture->is_bios
+                                         ? "-bios "
+                                         : "-drive if=pflash,format=raw,file=",
                               fw_pathname);
     g_test_message("qemu cmdline: %s", cmdline);
     qtest_start(cmdline);
@@ -382,8 +380,8 @@ static void add_firmware_test(const char *testpath,
                               void (*setup_fixture)(FirmwareTestFixture *f,
                                                     gconstpointer test_data))
 {
-    g_test_add(testpath, FirmwareTestFixture, NULL, setup_fixture,
-               test_i440fx_firmware, NULL);
+    qtest_add(testpath, FirmwareTestFixture, NULL, setup_fixture,
+              test_i440fx_firmware, NULL);
 }
 
 static void request_bios(FirmwareTestFixture *fixture,
@@ -401,17 +399,15 @@ static void request_pflash(FirmwareTestFixture *fixture,
 int main(int argc, char **argv)
 {
     TestData data;
-    int ret;
 
     g_test_init(&argc, &argv, NULL);
 
     data.num_cpus = 1;
 
-    g_test_add_data_func("/i440fx/defaults", &data, test_i440fx_defaults);
-    g_test_add_data_func("/i440fx/pam", &data, test_i440fx_pam);
-    add_firmware_test("/i440fx/firmware/bios", request_bios);
-    add_firmware_test("/i440fx/firmware/pflash", request_pflash);
+    qtest_add_data_func("i440fx/defaults", &data, test_i440fx_defaults);
+    qtest_add_data_func("i440fx/pam", &data, test_i440fx_pam);
+    add_firmware_test("i440fx/firmware/bios", request_bios);
+    add_firmware_test("i440fx/firmware/pflash", request_pflash);
 
-    ret = g_test_run();
-    return ret;
+    return g_test_run();
 }

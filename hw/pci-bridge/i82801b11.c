@@ -41,9 +41,9 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>
  */
 
+#include "qemu/osdep.h"
 #include "hw/pci/pci.h"
 #include "hw/i386/ich9.h"
-
 
 /*****************************************************************************/
 /* ICH9 DMI-to-PCI bridge */
@@ -57,28 +57,33 @@ typedef struct I82801b11Bridge {
     /*< public >*/
 } I82801b11Bridge;
 
-static int i82801b11_bridge_initfn(PCIDevice *d)
+static void i82801b11_bridge_realize(PCIDevice *d, Error **errp)
 {
     int rc;
 
-    rc = pci_bridge_initfn(d, TYPE_PCI_BUS);
-    if (rc < 0) {
-        return rc;
-    }
+    pci_bridge_initfn(d, TYPE_PCI_BUS);
 
     rc = pci_bridge_ssvid_init(d, I82801ba_SSVID_OFFSET,
-                               I82801ba_SSVID_SVID, I82801ba_SSVID_SSID);
+                               I82801ba_SSVID_SVID, I82801ba_SSVID_SSID,
+                               errp);
     if (rc < 0) {
         goto err_bridge;
     }
     pci_config_set_prog_interface(d->config, PCI_CLASS_BRIDGE_PCI_INF_SUB);
-    return 0;
+    return;
 
 err_bridge:
     pci_bridge_exitfn(d);
-
-    return rc;
 }
+
+static const VMStateDescription i82801b11_bridge_dev_vmstate = {
+    .name = "i82801b11_bridge",
+    .priority = MIG_PRI_PCI_BUS,
+    .fields = (VMStateField[]) {
+        VMSTATE_PCI_DEVICE(parent_obj, PCIBridge),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static void i82801b11_bridge_class_init(ObjectClass *klass, void *data)
 {
@@ -89,8 +94,10 @@ static void i82801b11_bridge_class_init(ObjectClass *klass, void *data)
     k->vendor_id = PCI_VENDOR_ID_INTEL;
     k->device_id = PCI_DEVICE_ID_INTEL_82801BA_11;
     k->revision = ICH9_D2P_A2_REVISION;
-    k->init = i82801b11_bridge_initfn;
+    k->realize = i82801b11_bridge_realize;
     k->config_write = pci_bridge_write_config;
+    dc->vmsd = &i82801b11_bridge_dev_vmstate;
+    dc->reset = pci_bridge_reset;
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
 }
 
@@ -99,28 +106,11 @@ static const TypeInfo i82801b11_bridge_info = {
     .parent        = TYPE_PCI_BRIDGE,
     .instance_size = sizeof(I82801b11Bridge),
     .class_init    = i82801b11_bridge_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
-
-PCIBus *ich9_d2pbr_init(PCIBus *bus, int devfn, int sec_bus)
-{
-    PCIDevice *d;
-    PCIBridge *br;
-    char buf[16];
-    DeviceState *qdev;
-
-    d = pci_create_multifunction(bus, devfn, true, "i82801b11-bridge");
-    if (!d) {
-        return NULL;
-    }
-    br = PCI_BRIDGE(d);
-    qdev = DEVICE(d);
-
-    snprintf(buf, sizeof(buf), "pci.%d", sec_bus);
-    pci_bridge_map_irq(br, buf, pci_swizzle_map_irq_fn);
-    qdev_init_nofail(qdev);
-
-    return pci_bridge_get_sec_bus(br);
-}
 
 static void d2pbr_register(void)
 {

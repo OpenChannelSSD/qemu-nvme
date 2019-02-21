@@ -16,7 +16,7 @@
  */
 
 #ifndef FW_PATH_PROVIDER_H
-#define FW_PATH_PROVIDER_H 1
+#define FW_PATH_PROVIDER_H
 
 #include "qemu-common.h"
 #include "qom/object.h"
@@ -30,9 +30,7 @@
 #define FW_PATH_PROVIDER(obj) \
      INTERFACE_CHECK(FWPathProvider, (obj), TYPE_FW_PATH_PROVIDER)
 
-typedef struct FWPathProvider {
-    Object parent_obj;
-} FWPathProvider;
+typedef struct FWPathProvider FWPathProvider;
 
 typedef struct FWPathProviderClass {
     InterfaceClass parent_class;

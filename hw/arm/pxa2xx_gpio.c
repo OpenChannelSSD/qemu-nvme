@@ -7,9 +7,12 @@
  * This code is licensed under the GPL.
  */
 
+#include "qemu/osdep.h"
+#include "cpu.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "hw/arm/pxa.h"
+#include "qemu/log.h"
 
 #define PXA2XX_GPIO_BANKS	4
 
@@ -104,7 +107,7 @@ static void pxa2xx_gpio_set(void *opaque, int line, int level)
     uint32_t mask;
 
     if (line >= s->lines) {
-        printf("%s: No GPIO pin %i\n", __FUNCTION__, line);
+        printf("%s: No GPIO pin %i\n", __func__, line);
         return;
     }
 
@@ -137,7 +140,7 @@ static void pxa2xx_gpio_handler_update(PXA2xxGPIOInfo *s) {
         level = s->olevel[i] & s->dir[i];
 
         for (diff = s->prev_level[i] ^ level; diff; diff ^= 1 << bit) {
-            bit = ffs(diff) - 1;
+            bit = ctz32(diff);
             line = bit + 32 * i;
             qemu_set_irq(s->handler[line], (level >> bit) & 1);
         }
@@ -192,7 +195,7 @@ static uint64_t pxa2xx_gpio_read(void *opaque, hwaddr offset,
         return s->status[bank];
 
     default:
-        hw_error("%s: Bad offset " REG_FMT "\n", __FUNCTION__, offset);
+        hw_error("%s: Bad offset " REG_FMT "\n", __func__, offset);
     }
 
     return 0;
@@ -245,7 +248,7 @@ static void pxa2xx_gpio_write(void *opaque, hwaddr offset,
         break;
 
     default:
-        hw_error("%s: Bad offset " REG_FMT "\n", __FUNCTION__, offset);
+        hw_error("%s: Bad offset " REG_FMT "\n", __func__, offset);
     }
 }
 
@@ -277,23 +280,28 @@ DeviceState *pxa2xx_gpio_init(hwaddr base,
     return dev;
 }
 
-static int pxa2xx_gpio_initfn(SysBusDevice *sbd)
+static void pxa2xx_gpio_initfn(Object *obj)
 {
+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
     DeviceState *dev = DEVICE(sbd);
+    PXA2xxGPIOInfo *s = PXA2XX_GPIO(dev);
+
+    memory_region_init_io(&s->iomem, obj, &pxa_gpio_ops,
+                          s, "pxa2xx-gpio", 0x1000);
+    sysbus_init_mmio(sbd, &s->iomem);
+    sysbus_init_irq(sbd, &s->irq0);
+    sysbus_init_irq(sbd, &s->irq1);
+    sysbus_init_irq(sbd, &s->irqX);
+}
+
+static void pxa2xx_gpio_realize(DeviceState *dev, Error **errp)
+{
     PXA2xxGPIOInfo *s = PXA2XX_GPIO(dev);
 
     s->cpu = ARM_CPU(qemu_get_cpu(s->ncpu));
 
     qdev_init_gpio_in(dev, pxa2xx_gpio_set, s->lines);
     qdev_init_gpio_out(dev, s->handler, s->lines);
-
-    memory_region_init_io(&s->iomem, OBJECT(s), &pxa_gpio_ops, s, "pxa2xx-gpio", 0x1000);
-    sysbus_init_mmio(sbd, &s->iomem);
-    sysbus_init_irq(sbd, &s->irq0);
-    sysbus_init_irq(sbd, &s->irq1);
-    sysbus_init_irq(sbd, &s->irqX);
-
-    return 0;
 }
 
 /*
@@ -333,18 +341,18 @@ static Property pxa2xx_gpio_properties[] = {
 static void pxa2xx_gpio_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
-    k->init = pxa2xx_gpio_initfn;
     dc->desc = "PXA2xx GPIO controller";
     dc->props = pxa2xx_gpio_properties;
     dc->vmsd = &vmstate_pxa2xx_gpio_regs;
+    dc->realize = pxa2xx_gpio_realize;
 }
 
 static const TypeInfo pxa2xx_gpio_info = {
     .name          = TYPE_PXA2XX_GPIO,
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(PXA2xxGPIOInfo),
+    .instance_init = pxa2xx_gpio_initfn,
     .class_init    = pxa2xx_gpio_class_init,
 };
 

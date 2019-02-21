@@ -20,18 +20,22 @@
  *
  *
  * Specification available at:
- *   http://www.milkymist.org/socdoc/tmu2.pdf
+ *   http://milkymist.walle.cc/socdoc/tmu2.pdf
  *
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "trace.h"
+#include "qapi/error.h"
 #include "qemu/error-report.h"
+#include "qapi/error.h"
+#include "hw/display/milkymist_tmu2.h"
 
 #include <X11/Xlib.h>
-#include <GL/gl.h>
-#include <GL/glx.h>
+#include <epoxy/gl.h>
+#include <epoxy/glx.h>
 
 enum {
     R_CTL = 0,
@@ -83,7 +87,7 @@ struct MilkymistTMU2State {
     SysBusDevice parent_obj;
 
     MemoryRegion regs_region;
-    CharDriverState *chr;
+    Chardev *chr;
     qemu_irq irq;
 
     uint32_t regs[R_MAX];
@@ -211,7 +215,7 @@ static void tmu2_start(MilkymistTMU2State *s)
     /* Read the QEMU source framebuffer into an OpenGL texture */
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
-    fb_len = 2*s->regs[R_TEXHRES]*s->regs[R_TEXVRES];
+    fb_len = 2ULL * s->regs[R_TEXHRES] * s->regs[R_TEXVRES];
     fb = cpu_physical_memory_map(s->regs[R_TEXFBUF], &fb_len, 0);
     if (fb == NULL) {
         glDeleteTextures(1, &texture);
@@ -255,7 +259,7 @@ static void tmu2_start(MilkymistTMU2State *s)
     glColor4f(m, m, m, (float)(s->regs[R_ALPHA] + 1) / 64.0f);
 
     /* Read the QEMU dest. framebuffer into the OpenGL framebuffer */
-    fb_len = 2 * s->regs[R_DSTHRES] * s->regs[R_DSTVRES];
+    fb_len = 2ULL * s->regs[R_DSTHRES] * s->regs[R_DSTVRES];
     fb = cpu_physical_memory_map(s->regs[R_DSTFBUF], &fb_len, 0);
     if (fb == NULL) {
         glDeleteTextures(1, &texture);
@@ -291,7 +295,7 @@ static void tmu2_start(MilkymistTMU2State *s)
     cpu_physical_memory_unmap(mesh, mesh_len, 0, mesh_len);
 
     /* Write back the OpenGL framebuffer to the QEMU framebuffer */
-    fb_len = 2 * s->regs[R_DSTHRES] * s->regs[R_DSTVRES];
+    fb_len = 2ULL * s->regs[R_DSTHRES] * s->regs[R_DSTVRES];
     fb = cpu_physical_memory_map(s->regs[R_DSTFBUF], &fb_len, 1);
     if (fb == NULL) {
         glDeleteTextures(1, &texture);
@@ -442,21 +446,25 @@ static void milkymist_tmu2_reset(DeviceState *d)
     }
 }
 
-static int milkymist_tmu2_init(SysBusDevice *dev)
+static void milkymist_tmu2_init(Object *obj)
+{
+    MilkymistTMU2State *s = MILKYMIST_TMU2(obj);
+    SysBusDevice *dev = SYS_BUS_DEVICE(obj);
+
+    sysbus_init_irq(dev, &s->irq);
+
+    memory_region_init_io(&s->regs_region, obj, &tmu2_mmio_ops, s,
+            "milkymist-tmu2", R_MAX * 4);
+    sysbus_init_mmio(dev, &s->regs_region);
+}
+
+static void milkymist_tmu2_realize(DeviceState *dev, Error **errp)
 {
     MilkymistTMU2State *s = MILKYMIST_TMU2(dev);
 
     if (tmu2_glx_init(s)) {
-        return 1;
+        error_setg(errp, "tmu2_glx_init failed");
     }
-
-    sysbus_init_irq(dev, &s->irq);
-
-    memory_region_init_io(&s->regs_region, OBJECT(s), &tmu2_mmio_ops, s,
-            "milkymist-tmu2", R_MAX * 4);
-    sysbus_init_mmio(dev, &s->regs_region);
-
-    return 0;
 }
 
 static const VMStateDescription vmstate_milkymist_tmu2 = {
@@ -472,9 +480,8 @@ static const VMStateDescription vmstate_milkymist_tmu2 = {
 static void milkymist_tmu2_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
-    k->init = milkymist_tmu2_init;
+    dc->realize = milkymist_tmu2_realize;
     dc->reset = milkymist_tmu2_reset;
     dc->vmsd = &vmstate_milkymist_tmu2;
 }
@@ -483,6 +490,7 @@ static const TypeInfo milkymist_tmu2_info = {
     .name          = TYPE_MILKYMIST_TMU2,
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(MilkymistTMU2State),
+    .instance_init = milkymist_tmu2_init,
     .class_init    = milkymist_tmu2_class_init,
 };
 
@@ -492,3 +500,51 @@ static void milkymist_tmu2_register_types(void)
 }
 
 type_init(milkymist_tmu2_register_types)
+
+DeviceState *milkymist_tmu2_create(hwaddr base, qemu_irq irq)
+{
+    DeviceState *dev;
+    Display *d;
+    GLXFBConfig *configs;
+    int nelements;
+    int ver_major, ver_minor;
+
+    /* check that GLX will work */
+    d = XOpenDisplay(NULL);
+    if (d == NULL) {
+        return NULL;
+    }
+
+    if (!glXQueryVersion(d, &ver_major, &ver_minor)) {
+        /*
+         * Yeah, sometimes getting the GLX version can fail.
+         * Isn't X beautiful?
+         */
+        XCloseDisplay(d);
+        return NULL;
+    }
+
+    if ((ver_major < 1) || ((ver_major == 1) && (ver_minor < 3))) {
+        printf("Your GLX version is %d.%d,"
+          "but TMU emulation needs at least 1.3. TMU disabled.\n",
+          ver_major, ver_minor);
+        XCloseDisplay(d);
+        return NULL;
+    }
+
+    configs = glXChooseFBConfig(d, 0, glx_fbconfig_attr, &nelements);
+    if (configs == NULL) {
+        XCloseDisplay(d);
+        return NULL;
+    }
+
+    XFree(configs);
+    XCloseDisplay(d);
+
+    dev = qdev_create(NULL, TYPE_MILKYMIST_TMU2);
+    qdev_init_nofail(dev);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, irq);
+
+    return dev;
+}

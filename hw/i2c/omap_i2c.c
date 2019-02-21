@@ -16,10 +16,14 @@
  * You should have received a copy of the GNU General Public License along
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
+#include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "hw/hw.h"
 #include "hw/i2c/i2c.h"
 #include "hw/arm/omap.h"
 #include "hw/sysbus.h"
+#include "qemu/error-report.h"
+#include "qapi/error.h"
 
 #define TYPE_OMAP_I2C "omap_i2c"
 #define OMAP_I2C(obj) OBJECT_CHECK(OMAPI2CState, (obj), TYPE_OMAP_I2C)
@@ -171,9 +175,13 @@ static uint32_t omap_i2c_read(void *opaque, hwaddr addr)
     case 0x0c:	/* I2C_IV */
         if (s->revision >= OMAP2_INTR_REV)
             break;
-        ret = ffs(s->stat & s->mask);
-        if (ret)
-            s->stat ^= 1 << (ret - 1);
+        ret = ctz32(s->stat & s->mask);
+        if (ret != 32) {
+            s->stat ^= 1 << ret;
+            ret++;
+        } else {
+            ret = 0;
+        }
         omap_i2c_interrupts_update(s);
         return ret;
 
@@ -332,14 +340,15 @@ static void omap_i2c_write(void *opaque, hwaddr addr,
             }
             break;
         }
-        if ((value & (1 << 15)) && !(value & (1 << 10))) {	/* MST */
-            fprintf(stderr, "%s: I^2C slave mode not supported\n",
-                            __FUNCTION__);
+        if ((value & (1 << 15)) && !(value & (1 << 10))) {    /* MST */
+            qemu_log_mask(LOG_UNIMP, "%s: I^2C slave mode not supported\n",
+                          __func__);
             break;
         }
-        if ((value & (1 << 15)) && value & (1 << 8)) {		/* XA */
-            fprintf(stderr, "%s: 10-bit addressing mode not supported\n",
-                            __FUNCTION__);
+        if ((value & (1 << 15)) && value & (1 << 8)) {        /* XA */
+            qemu_log_mask(LOG_UNIMP,
+                          "%s: 10-bit addressing mode not supported\n",
+                          __func__);
             break;
         }
         if ((value & (1 << 15)) && value & (1 << 0)) {		/* STT */
@@ -385,8 +394,10 @@ static void omap_i2c_write(void *opaque, hwaddr addr,
                 s->stat |= 0x3f;
                 omap_i2c_interrupts_update(s);
             }
-        if (value & (1 << 15))					/* ST_EN */
-            fprintf(stderr, "%s: System Test not supported\n", __FUNCTION__);
+        if (value & (1 << 15)) {                    /* ST_EN */
+            qemu_log_mask(LOG_UNIMP,
+                          "%s: System Test not supported\n", __func__);
+        }
         break;
 
     default:
@@ -423,42 +434,71 @@ static void omap_i2c_writeb(void *opaque, hwaddr addr,
     }
 }
 
+static uint64_t omap_i2c_readfn(void *opaque, hwaddr addr,
+                                unsigned size)
+{
+    switch (size) {
+    case 2:
+        return omap_i2c_read(opaque, addr);
+    default:
+        return omap_badwidth_read16(opaque, addr);
+    }
+}
+
+static void omap_i2c_writefn(void *opaque, hwaddr addr,
+                             uint64_t value, unsigned size)
+{
+    switch (size) {
+    case 1:
+        /* Only the last fifo write can be 8 bit. */
+        omap_i2c_writeb(opaque, addr, value);
+        break;
+    case 2:
+        omap_i2c_write(opaque, addr, value);
+        break;
+    default:
+        omap_badwidth_write16(opaque, addr, value);
+        break;
+    }
+}
+
 static const MemoryRegionOps omap_i2c_ops = {
-    .old_mmio = {
-        .read = {
-            omap_badwidth_read16,
-            omap_i2c_read,
-            omap_badwidth_read16,
-        },
-        .write = {
-            omap_i2c_writeb, /* Only the last fifo write can be 8 bit.  */
-            omap_i2c_write,
-            omap_badwidth_write16,
-        },
-    },
+    .read = omap_i2c_readfn,
+    .write = omap_i2c_writefn,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
-static int omap_i2c_init(SysBusDevice *sbd)
+static void omap_i2c_init(Object *obj)
 {
-    DeviceState *dev = DEVICE(sbd);
-    OMAPI2CState *s = OMAP_I2C(dev);
+    DeviceState *dev = DEVICE(obj);
+    OMAPI2CState *s = OMAP_I2C(obj);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
-    if (!s->fclk) {
-        hw_error("omap_i2c: fclk not connected\n");
-    }
-    if (s->revision >= OMAP2_INTR_REV && !s->iclk) {
-        /* Note that OMAP1 doesn't have a separate interface clock */
-        hw_error("omap_i2c: iclk not connected\n");
-    }
     sysbus_init_irq(sbd, &s->irq);
     sysbus_init_irq(sbd, &s->drq[0]);
     sysbus_init_irq(sbd, &s->drq[1]);
-    memory_region_init_io(&s->iomem, OBJECT(s), &omap_i2c_ops, s, "omap.i2c",
-                          (s->revision < OMAP2_INTR_REV) ? 0x800 : 0x1000);
     sysbus_init_mmio(sbd, &s->iomem);
     s->bus = i2c_init_bus(dev, NULL);
-    return 0;
+}
+
+static void omap_i2c_realize(DeviceState *dev, Error **errp)
+{
+    OMAPI2CState *s = OMAP_I2C(dev);
+
+    memory_region_init_io(&s->iomem, OBJECT(dev), &omap_i2c_ops, s, "omap.i2c",
+                          (s->revision < OMAP2_INTR_REV) ? 0x800 : 0x1000);
+
+    if (!s->fclk) {
+        error_setg(errp, "omap_i2c: fclk not connected");
+        return;
+    }
+    if (s->revision >= OMAP2_INTR_REV && !s->iclk) {
+        /* Note that OMAP1 doesn't have a separate interface clock */
+        error_setg(errp, "omap_i2c: iclk not connected");
+        return;
+    }
 }
 
 static Property omap_i2c_properties[] = {
@@ -471,18 +511,19 @@ static Property omap_i2c_properties[] = {
 static void omap_i2c_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-    k->init = omap_i2c_init;
+
     dc->props = omap_i2c_properties;
     dc->reset = omap_i2c_reset;
     /* Reason: pointer properties "iclk", "fclk" */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
+    dc->realize = omap_i2c_realize;
 }
 
 static const TypeInfo omap_i2c_info = {
     .name = TYPE_OMAP_I2C,
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(OMAPI2CState),
+    .instance_init = omap_i2c_init,
     .class_init = omap_i2c_class_init,
 };
 

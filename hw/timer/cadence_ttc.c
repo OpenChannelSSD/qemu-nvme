@@ -16,6 +16,7 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
 #include "qemu/timer.h"
 
@@ -23,7 +24,7 @@
 #define DB_PRINT(...) do { \
     fprintf(stderr,  ": %s: ", __func__); \
     fprintf(stderr, ## __VA_ARGS__); \
-    } while (0);
+    } while (0)
 #else
     #define DB_PRINT(...)
 #endif
@@ -208,15 +209,14 @@ static void cadence_timer_sync(CadenceTimerState *s)
             s->reg_intr |= (2 << i);
         }
     }
+    if ((x < 0) || (x >= interval)) {
+        s->reg_intr |= (s->reg_count & COUNTER_CTRL_INT) ?
+            COUNTER_INTR_IV : COUNTER_INTR_OV;
+    }
     while (x < 0) {
         x += interval;
     }
     s->reg_value = (uint32_t)(x % interval);
-
-    if (s->reg_value != x) {
-        s->reg_intr |= (s->reg_count & COUNTER_CTRL_INT) ?
-            COUNTER_INTR_IV : COUNTER_INTR_OV;
-    }
     cadence_timer_update(s);
 }
 
@@ -421,9 +421,11 @@ static void cadence_ttc_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
 }
 
-static void cadence_timer_pre_save(void *opaque)
+static int cadence_timer_pre_save(void *opaque)
 {
     cadence_timer_sync((CadenceTimerState *)opaque);
+
+    return 0;
 }
 
 static int cadence_timer_post_load(void *opaque, int version_id)

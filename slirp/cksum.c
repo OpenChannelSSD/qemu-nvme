@@ -30,7 +30,7 @@
  * in_cksum.c,v 1.2 1994/08/02 07:48:16 davidg Exp
  */
 
-#include <slirp.h>
+#include "slirp.h"
 
 /*
  * Checksum routine for Internet Protocol family headers (Portable Version).
@@ -69,9 +69,7 @@ int cksum(struct mbuf *m, int len)
 
 	if (len < mlen)
 	   mlen = len;
-#ifdef DEBUG
 	len -= mlen;
-#endif
 	/*
 	 * Force to even boundary.
 	 */
@@ -121,12 +119,10 @@ int cksum(struct mbuf *m, int len)
 	   s_util.c[0] = *(uint8_t *)w;
 
 cont:
-#ifdef DEBUG
 	if (len) {
-		DEBUG_ERROR((dfd, "cksum: out of data\n"));
-		DEBUG_ERROR((dfd, " len = %d\n", len));
+		DEBUG_ERROR("cksum: out of data");
+		DEBUG_ERROR(" len = %d", len);
 	}
-#endif
 	if (mlen == -1) {
 		/* The last mbuf has odd # of bytes. Follow the
 		 standard (the odd byte may be shifted left by 8 bits
@@ -136,4 +132,29 @@ cont:
 	}
 	REDUCE;
 	return (~sum & 0xffff);
+}
+
+int ip6_cksum(struct mbuf *m)
+{
+    /* TODO: Optimize this by being able to pass the ip6_pseudohdr to cksum
+     * separately from the mbuf */
+    struct ip6 save_ip, *ip = mtod(m, struct ip6 *);
+    struct ip6_pseudohdr *ih = mtod(m, struct ip6_pseudohdr *);
+    int sum;
+
+    save_ip = *ip;
+
+    ih->ih_src = save_ip.ip_src;
+    ih->ih_dst = save_ip.ip_dst;
+    ih->ih_pl = htonl((uint32_t)ntohs(save_ip.ip_pl));
+    ih->ih_zero_hi = 0;
+    ih->ih_zero_lo = 0;
+    ih->ih_nh = save_ip.ip_nh;
+
+    sum = cksum(m, ((int)sizeof(struct ip6_pseudohdr))
+                    + ntohl(ih->ih_pl));
+
+    *ip = save_ip;
+
+    return sum;
 }

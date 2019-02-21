@@ -50,6 +50,7 @@
  * table will be deleted in favor of the existing cache entry.
  */
 
+#include "qemu/osdep.h"
 #include "trace.h"
 #include "qed.h"
 
@@ -100,6 +101,8 @@ CachedL2Table *qed_alloc_l2_cache_entry(L2TableCache *l2_cache)
 /**
  * Decrease an entry's reference count and free if necessary when the reference
  * count drops to zero.
+ *
+ * Called with table_lock held.
  */
 void qed_unref_l2_cache_entry(CachedL2Table *entry)
 {
@@ -121,6 +124,8 @@ void qed_unref_l2_cache_entry(CachedL2Table *entry)
  *
  * For a cached entry, this function increases the reference count and returns
  * the entry.
+ *
+ * Called with table_lock held.
  */
 CachedL2Table *qed_find_l2_cache_entry(L2TableCache *l2_cache, uint64_t offset)
 {
@@ -149,6 +154,8 @@ CachedL2Table *qed_find_l2_cache_entry(L2TableCache *l2_cache, uint64_t offset)
  * N.B. This function steals a reference to the l2_table from the caller so the
  * caller must obtain a new reference by issuing a call to
  * qed_find_l2_cache_entry().
+ *
+ * Called with table_lock held.
  */
 void qed_commit_l2_cache_entry(L2TableCache *l2_cache, CachedL2Table *l2_table)
 {

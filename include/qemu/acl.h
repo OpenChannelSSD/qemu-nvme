@@ -22,8 +22,8 @@
  * THE SOFTWARE.
  */
 
-#ifndef __QEMU_ACL_H__
-#define __QEMU_ACL_H__
+#ifndef QEMU_ACL_H
+#define QEMU_ACL_H
 
 #include "qemu/queue.h"
 
@@ -49,26 +49,18 @@ qemu_acl *qemu_acl_init(const char *aclname);
 qemu_acl *qemu_acl_find(const char *aclname);
 
 int qemu_acl_party_is_allowed(qemu_acl *acl,
-			      const char *party);
+                              const char *party);
 
 void qemu_acl_reset(qemu_acl *acl);
 
 int qemu_acl_append(qemu_acl *acl,
-		    int deny,
-		    const char *match);
+                    int deny,
+                    const char *match);
 int qemu_acl_insert(qemu_acl *acl,
-		    int deny,
-		    const char *match,
-		    int index);
+                    int deny,
+                    const char *match,
+                    int index);
 int qemu_acl_remove(qemu_acl *acl,
-		    const char *match);
+                    const char *match);
 
-#endif /* __QEMU_ACL_H__ */
-
-/*
- * Local variables:
- *  c-indent-level: 4
- *  c-basic-offset: 4
- *  tab-width: 8
- * End:
- */
+#endif /* QEMU_ACL_H */

@@ -23,13 +23,16 @@
 #error cpu.h included from common code
 #endif
 
-#include "config.h"
-#include <inttypes.h>
-#include "qemu/osdep.h"
+#include "qemu/host-utils.h"
+#include "qemu/thread.h"
 #include "qemu/queue.h"
+#ifdef CONFIG_TCG
+#include "tcg-target.h"
+#endif
 #ifndef CONFIG_USER_ONLY
 #include "exec/hwaddr.h"
 #endif
+#include "exec/memattrs.h"
 
 #ifndef TARGET_LONG_BITS
 #error TARGET_LONG_BITS must be defined before including this header
@@ -54,23 +57,7 @@ typedef uint64_t target_ulong;
 #error TARGET_LONG_SIZE undefined
 #endif
 
-#define EXCP_INTERRUPT 	0x10000 /* async interruption */
-#define EXCP_HLT        0x10001 /* hlt instruction reached */
-#define EXCP_DEBUG      0x10002 /* cpu stopped after a breakpoint or singlestep */
-#define EXCP_HALTED     0x10003 /* cpu is halted (waiting for external event) */
-#define EXCP_YIELD      0x10004 /* cpu wants to yield timeslice to another */
-
-/* Only the bottom TB_JMP_PAGE_BITS of the jump cache hash bits vary for
-   addresses on the same page.  The top bits are the same.  This allows
-   TLB invalidation to quickly clear a subset of the hash table.  */
-#define TB_JMP_PAGE_BITS (TB_JMP_CACHE_BITS / 2)
-#define TB_JMP_PAGE_SIZE (1 << TB_JMP_PAGE_BITS)
-#define TB_JMP_ADDR_MASK (TB_JMP_PAGE_SIZE - 1)
-#define TB_JMP_PAGE_MASK (TB_JMP_CACHE_SIZE - TB_JMP_PAGE_SIZE)
-
-#if !defined(CONFIG_USER_ONLY)
-#define CPU_TLB_BITS 8
-#define CPU_TLB_SIZE (1 << CPU_TLB_BITS)
+#if !defined(CONFIG_USER_ONLY) && defined(CONFIG_TCG)
 /* use a fully associative victim tlb of 8 entries */
 #define CPU_VTLB_SIZE 8
 
@@ -80,6 +67,24 @@ typedef uint64_t target_ulong;
 #define CPU_TLB_ENTRY_BITS 5
 #endif
 
+#define CPU_TLB_DYN_MIN_BITS 6
+#define CPU_TLB_DYN_DEFAULT_BITS 8
+
+# if HOST_LONG_BITS == 32
+/* Make sure we do not require a double-word shift for the TLB load */
+#  define CPU_TLB_DYN_MAX_BITS (32 - TARGET_PAGE_BITS)
+# else /* HOST_LONG_BITS == 64 */
+/*
+ * Assuming TARGET_PAGE_BITS==12, with 2**22 entries we can cover 2**(22+12) ==
+ * 2**34 == 16G of address space. This is roughly what one would expect a
+ * TLB to cover in a modern (as of 2018) x86_64 CPU. For instance, Intel
+ * Skylake's Level-2 STLB has 16 1G entries.
+ * Also, make sure we do not size the TLB past the guest's address space.
+ */
+#  define CPU_TLB_DYN_MAX_BITS                                  \
+    MIN(22, TARGET_VIRT_ADDR_SPACE_BITS - TARGET_PAGE_BITS)
+# endif
+
 typedef struct CPUTLBEntry {
     /* bit TARGET_LONG_BITS to TARGET_PAGE_BITS : virtual address
        bit TARGET_PAGE_BITS-1..4  : Nonzero for accesses that should not
@@ -87,30 +92,109 @@ typedef struct CPUTLBEntry {
        bit 3                      : indicates that the entry is invalid
        bit 2..0                   : zero
     */
-    target_ulong addr_read;
-    target_ulong addr_write;
-    target_ulong addr_code;
-    /* Addend to virtual address to get host address.  IO accesses
-       use the corresponding iotlb value.  */
-    uintptr_t addend;
-    /* padding to get a power of two size */
-    uint8_t dummy[(1 << CPU_TLB_ENTRY_BITS) -
-                  (sizeof(target_ulong) * 3 +
-                   ((-sizeof(target_ulong) * 3) & (sizeof(uintptr_t) - 1)) +
-                   sizeof(uintptr_t))];
+    union {
+        struct {
+            target_ulong addr_read;
+            target_ulong addr_write;
+            target_ulong addr_code;
+            /* Addend to virtual address to get host address.  IO accesses
+               use the corresponding iotlb value.  */
+            uintptr_t addend;
+        };
+        /* padding to get a power of two size */
+        uint8_t dummy[1 << CPU_TLB_ENTRY_BITS];
+    };
 } CPUTLBEntry;
 
 QEMU_BUILD_BUG_ON(sizeof(CPUTLBEntry) != (1 << CPU_TLB_ENTRY_BITS));
 
+/* The IOTLB is not accessed directly inline by generated TCG code,
+ * so the CPUIOTLBEntry layout is not as critical as that of the
+ * CPUTLBEntry. (This is also why we don't want to combine the two
+ * structs into one.)
+ */
+typedef struct CPUIOTLBEntry {
+    /*
+     * @addr contains:
+     *  - in the lower TARGET_PAGE_BITS, a physical section number
+     *  - with the lower TARGET_PAGE_BITS masked off, an offset which
+     *    must be added to the virtual address to obtain:
+     *     + the ram_addr_t of the target RAM (if the physical section
+     *       number is PHYS_SECTION_NOTDIRTY or PHYS_SECTION_ROM)
+     *     + the offset within the target MemoryRegion (otherwise)
+     */
+    hwaddr addr;
+    MemTxAttrs attrs;
+} CPUIOTLBEntry;
+
+/**
+ * struct CPUTLBWindow
+ * @begin_ns: host time (in ns) at the beginning of the time window
+ * @max_entries: maximum number of entries observed in the window
+ *
+ * See also: tlb_mmu_resize_locked()
+ */
+typedef struct CPUTLBWindow {
+    int64_t begin_ns;
+    size_t max_entries;
+} CPUTLBWindow;
+
+typedef struct CPUTLBDesc {
+    /*
+     * Describe a region covering all of the large pages allocated
+     * into the tlb.  When any page within this region is flushed,
+     * we must flush the entire tlb.  The region is matched if
+     * (addr & large_page_mask) == large_page_addr.
+     */
+    target_ulong large_page_addr;
+    target_ulong large_page_mask;
+    /* The next index to use in the tlb victim table.  */
+    size_t vindex;
+    CPUTLBWindow window;
+    size_t n_used_entries;
+} CPUTLBDesc;
+
+/*
+ * Data elements that are shared between all MMU modes.
+ */
+typedef struct CPUTLBCommon {
+    /* Serialize updates to tlb_table and tlb_v_table, and others as noted. */
+    QemuSpin lock;
+    /*
+     * Within dirty, for each bit N, modifications have been made to
+     * mmu_idx N since the last time that mmu_idx was flushed.
+     * Protected by tlb_c.lock.
+     */
+    uint16_t dirty;
+    /*
+     * Statistics.  These are not lock protected, but are read and
+     * written atomically.  This allows the monitor to print a snapshot
+     * of the stats without interfering with the cpu.
+     */
+    size_t full_flush_count;
+    size_t part_flush_count;
+    size_t elide_flush_count;
+} CPUTLBCommon;
+
+# define CPU_TLB                                                        \
+    /* tlb_mask[i] contains (n_entries - 1) << CPU_TLB_ENTRY_BITS */    \
+    uintptr_t tlb_mask[NB_MMU_MODES];                                   \
+    CPUTLBEntry *tlb_table[NB_MMU_MODES];
+# define CPU_IOTLB                              \
+    CPUIOTLBEntry *iotlb[NB_MMU_MODES];
+
+/*
+ * The meaning of each of the MMU modes is defined in the target code.
+ * Note that NB_MMU_MODES is not yet defined; we can only reference it
+ * within preprocessor defines that will be expanded later.
+ */
 #define CPU_COMMON_TLB \
-    /* The meaning of the MMU modes is defined in the target code. */   \
-    CPUTLBEntry tlb_table[NB_MMU_MODES][CPU_TLB_SIZE];                  \
+    CPUTLBCommon tlb_c;                                                 \
+    CPUTLBDesc tlb_d[NB_MMU_MODES];                                     \
+    CPU_TLB                                                             \
     CPUTLBEntry tlb_v_table[NB_MMU_MODES][CPU_VTLB_SIZE];               \
-    hwaddr iotlb[NB_MMU_MODES][CPU_TLB_SIZE];                           \
-    hwaddr iotlb_v[NB_MMU_MODES][CPU_VTLB_SIZE];                        \
-    target_ulong tlb_flush_addr;                                        \
-    target_ulong tlb_flush_mask;                                        \
-    target_ulong vtlb_index;                                            \
+    CPU_IOTLB                                                           \
+    CPUIOTLBEntry iotlb_v[NB_MMU_MODES][CPU_VTLB_SIZE];
 
 #else
 
@@ -119,7 +203,6 @@ QEMU_BUILD_BUG_ON(sizeof(CPUTLBEntry) != (1 << CPU_TLB_ENTRY_BITS));
 #endif
 
 
-#define CPU_TEMP_BUF_NLONGS 128
 #define CPU_COMMON                                                      \
     /* soft mmu support */                                              \
     CPU_COMMON_TLB                                                      \

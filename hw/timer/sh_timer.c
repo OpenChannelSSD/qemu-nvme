@@ -8,11 +8,11 @@
  * This code is licensed under the GPL.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/sh4/sh.h"
 #include "qemu/timer.h"
 #include "qemu/main-loop.h"
-#include "exec/address-spaces.h"
 #include "hw/ptimer.h"
 
 //#define DEBUG_TIMER
@@ -74,6 +74,7 @@ static uint32_t sh_timer_read(void *opaque, hwaddr offset)
     case OFFSET_TCPR:
         if (s->feat & TIMER_FEAT_CAPT)
             return s->tcpr;
+        /* fall through */
     default:
         hw_error("sh_timer_read: Bad offset %x\n", (int)offset);
         return 0;
@@ -202,7 +203,7 @@ static void *sh_timer_init(uint32_t freq, int feat, qemu_irq irq)
     s->irq = irq;
 
     bh = qemu_bh_new(sh_timer_tick, s);
-    s->timer = ptimer_init(bh);
+    s->timer = ptimer_init(bh, PTIMER_POLICY_DEFAULT);
 
     sh_timer_write(s, OFFSET_TCOR >> 2, s->tcor);
     sh_timer_write(s, OFFSET_TCNT >> 2, s->tcnt);

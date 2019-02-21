@@ -10,7 +10,7 @@ all:
 .PHONY:	all build clean install update
 
 %.mo: %.po
-	$(call quiet-command, msgfmt -o $@ $<, "  GEN   $@")
+	$(call quiet-command, msgfmt -o $@ $<,"GEN","$@")
 
 -include ../config-host.mak
 include $(SRC_PATH)/rules.mak
@@ -32,21 +32,21 @@ update: $(SRCS)
 build: $(OBJS)
 
 clean:
-	$(RM) $(OBJS)
+	rm -f $(OBJS)
 
 install: $(OBJS)
 	for obj in $(OBJS); do \
-	    base=`basename $$obj .mo`; \
+	    base=$$(basename $$obj .mo); \
 	    $(INSTALL) -d $(DESTDIR)$(prefix)/share/locale/$$base/LC_MESSAGES; \
 	    $(INSTALL) -m644 $$obj $(DESTDIR)$(prefix)/share/locale/$$base/LC_MESSAGES/qemu.mo; \
 	done
 
 $(PO_PATH)/messages.po: $(SRC_PATH)/ui/gtk.c
 	$(call quiet-command, ( cd $(SRC_PATH) && \
-          xgettext -o - --from-code=UTF-8 --foreign-user \
+          xgettext -o - --from-code=UTF-8 --foreign-user --no-location \
 	    --package-name=QEMU --package-version=$(VERSION) \
 	    --msgid-bugs-address=qemu-devel@nongnu.org -k_ -C ui/gtk.c | \
-	  sed -e s/CHARSET/UTF-8/) >$@, "  GEN   $@")
+	  sed -e s/CHARSET/UTF-8/) >$@,"GEN","$@")
 
 $(PO_PATH)/%.po: $(PO_PATH)/messages.po
-	$(call quiet-command, msgmerge -q $@ $< > $@.bak && mv $@.bak $@, "  GEN   $@")
+	$(call quiet-command, msgmerge -q $@ $< > $@.bak && mv $@.bak $@,"GEN","$@")

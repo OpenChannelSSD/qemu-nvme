@@ -14,27 +14,36 @@
 #define VSS_WIN32_REQUESTER_H
 
 #include <basetyps.h>           /* STDAPI */
-#include "qemu/compiler.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+struct Error;
+
 /* Callback to set Error; used to avoid linking glib to the DLL */
-typedef void (*ErrorSetFunc)(void **errp, int win32_err, int err_class,
-                             const char *fmt, ...) GCC_FMT_ATTR(4, 5);
+typedef void (*ErrorSetFunc)(struct Error **errp,
+                             const char *src, int line, const char *func,
+                             int win32_err, const char *fmt, ...)
+    GCC_FMT_ATTR(6, 7);
 typedef struct ErrorSet {
-    ErrorSetFunc error_set;
-    void **errp;
-    int err_class;
+    ErrorSetFunc error_setg_win32_wrapper;
+    struct Error **errp;        /* restriction: must not be null */
 } ErrorSet;
 
 STDAPI requester_init(void);
 STDAPI requester_deinit(void);
 
-typedef void (*QGAVSSRequesterFunc)(int *, ErrorSet *);
-void requester_freeze(int *num_vols, ErrorSet *errset);
-void requester_thaw(int *num_vols, ErrorSet *errset);
+typedef struct volList volList;
+
+struct volList {
+    volList *next;
+    char *value;
+};
+
+typedef void (*QGAVSSRequesterFunc)(int *, void *, ErrorSet *);
+void requester_freeze(int *num_vols, void *volList, ErrorSet *errset);
+void requester_thaw(int *num_vols, void *volList, ErrorSet *errset);
 
 #ifdef __cplusplus
 }

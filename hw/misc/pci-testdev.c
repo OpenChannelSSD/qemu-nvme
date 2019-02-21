@@ -17,10 +17,11 @@
  * You should have received a copy of the GNU General Public License along
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
 #include "qemu/event_notifier.h"
-#include "qemu/osdep.h"
+#include "sysemu/kvm.h"
 
 typedef struct PCITestDevHdr {
     uint8_t test;
@@ -84,6 +85,9 @@ typedef struct PCITestDevState {
     MemoryRegion portio;
     IOTest *tests;
     int current;
+
+    uint64_t membar_size;
+    MemoryRegion membar;
 } PCITestDevState;
 
 #define TYPE_PCI_TEST_DEV "pci-testdev"
@@ -233,12 +237,13 @@ static const MemoryRegionOps pci_testdev_pio_ops = {
     },
 };
 
-static int pci_testdev_init(PCIDevice *pci_dev)
+static void pci_testdev_realize(PCIDevice *pci_dev, Error **errp)
 {
     PCITestDevState *d = PCI_TEST_DEV(pci_dev);
     uint8_t *pci_conf;
     char *name;
     int r, i;
+    bool fastmmio = kvm_ioeventfd_any_length_enabled();
 
     pci_conf = pci_dev->config;
 
@@ -251,6 +256,16 @@ static int pci_testdev_init(PCIDevice *pci_dev)
     pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &d->mmio);
     pci_register_bar(pci_dev, 1, PCI_BASE_ADDRESS_SPACE_IO, &d->portio);
 
+    if (d->membar_size) {
+        memory_region_init(&d->membar, OBJECT(d), "pci-testdev-membar",
+                           d->membar_size);
+        pci_register_bar(pci_dev, 2,
+                         PCI_BASE_ADDRESS_SPACE_MEMORY |
+                         PCI_BASE_ADDRESS_MEM_PREFETCH |
+                         PCI_BASE_ADDRESS_MEM_TYPE_64,
+                         &d->membar);
+    }
+
     d->current = -1;
     d->tests = g_malloc0(IOTEST_MAX * sizeof *d->tests);
     for (i = 0; i < IOTEST_MAX; ++i) {
@@ -261,8 +276,12 @@ static int pci_testdev_init(PCIDevice *pci_dev)
         memcpy(test->hdr->name, name, strlen(name) + 1);
         g_free(name);
         test->hdr->offset = cpu_to_le32(IOTEST_SIZE(i) + i * IOTEST_ACCESS_WIDTH);
-        test->size = IOTEST_ACCESS_WIDTH;
         test->match_data = strcmp(IOTEST_TEST(i), "wildcard-eventfd");
+        if (fastmmio && IOTEST_IS_MEM(i) && !test->match_data) {
+            test->size = 0;
+        } else {
+            test->size = IOTEST_ACCESS_WIDTH;
+        }
         test->hdr->test = i;
         test->hdr->data = test->match_data ? IOTEST_DATAMATCH : IOTEST_NOMATCH;
         test->hdr->width = IOTEST_ACCESS_WIDTH;
@@ -275,8 +294,6 @@ static int pci_testdev_init(PCIDevice *pci_dev)
         assert(r >= 0);
         test->hasnotifier = true;
     }
-
-    return 0;
 }
 
 static void
@@ -301,12 +318,17 @@ static void qdev_pci_testdev_reset(DeviceState *dev)
     pci_testdev_reset(d);
 }
 
+static Property pci_testdev_properties[] = {
+    DEFINE_PROP_SIZE("membar", PCITestDevState, membar_size, 0),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
 static void pci_testdev_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->init = pci_testdev_init;
+    k->realize = pci_testdev_realize;
     k->exit = pci_testdev_uninit;
     k->vendor_id = PCI_VENDOR_ID_REDHAT;
     k->device_id = PCI_DEVICE_ID_REDHAT_TEST;
@@ -315,6 +337,7 @@ static void pci_testdev_class_init(ObjectClass *klass, void *data)
     dc->desc = "PCI Test Device";
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
     dc->reset = qdev_pci_testdev_reset;
+    dc->props = pci_testdev_properties;
 }
 
 static const TypeInfo pci_testdev_info = {
@@ -322,6 +345,10 @@ static const TypeInfo pci_testdev_info = {
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(PCITestDevState),
     .class_init    = pci_testdev_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void pci_testdev_register_types(void)

@@ -254,7 +254,9 @@ static const name2keysym_t name2keysym[]={
 {"Left", 0xff51},      /* XK_Left */
 {"Up", 0xff52},        /* XK_Up */
 {"Down", 0xff54},      /* XK_Down */
+{"Next", 0xff56},
 {"Page_Down", 0xff56}, /* XK_Page_Down */
+{"Prior", 0xff55},
 {"Page_Up", 0xff55},   /* XK_Page_Up */
 {"Insert", 0xff63},    /* XK_Insert */
 {"Delete", 0xffff},    /* XK_Delete */
@@ -404,6 +406,7 @@ static const name2keysym_t name2keysym[]={
 {"breve",                         0x01a2},  /* U+02D8 BREVE */
 {"caron",                         0x01b7},  /* U+02C7 CARON */
 {"Ccaron",                        0x01c8},  /* U+010C LATIN CAPITAL LETTER C WITH CARON */
+{"numerosign",                    0x06b0},  /* U+2116 NUMERO SIGN */
 {"Cyrillic_a",                    0x06c1},  /* U+0430 CYRILLIC SMALL LETTER A */
 {"Cyrillic_A",                    0x06e1},  /* U+0410 CYRILLIC CAPITAL LETTER A */
 {"Cyrillic_be",                   0x06c2},  /* U+0431 CYRILLIC SMALL LETTER BE */

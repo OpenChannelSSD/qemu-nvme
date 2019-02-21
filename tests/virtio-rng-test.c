@@ -7,10 +7,8 @@
  * See the COPYING file in the top-level directory.
  */
 
-#include <glib.h>
-#include <string.h>
-#include "libqtest.h"
 #include "qemu/osdep.h"
+#include "libqtest.h"
 #include "libqos/pci.h"
 
 #define PCI_SLOT_HP             0x06
@@ -22,8 +20,14 @@ static void pci_nop(void)
 
 static void hotplug(void)
 {
-    qpci_plug_device_test("virtio-rng-pci", "rng1", PCI_SLOT_HP, NULL);
-    qpci_unplug_acpi_device_test("rng1", PCI_SLOT_HP);
+    const char *arch = qtest_get_arch();
+
+    qtest_qmp_device_add("virtio-rng-pci", "rng1",
+                         "{'addr': %s}", stringify(PCI_SLOT_HP));
+
+    if (strcmp(arch, "i386") == 0 || strcmp(arch, "x86_64") == 0) {
+        qpci_unplug_acpi_device_test("rng1", PCI_SLOT_HP);
+    }
 }
 
 int main(int argc, char **argv)

@@ -1,3 +1,4 @@
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "net/net.h"
 #include "trace.h"
@@ -80,8 +81,11 @@ static ssize_t mipsnet_receive(NetClientState *nc, const uint8_t *buf, size_t si
 
     trace_mipsnet_receive(size);
     if (!mipsnet_can_receive(nc))
-        return -1;
+        return 0;
 
+    if (size >= sizeof(s->rx_buffer)) {
+        return 0;
+    }
     s->busy = 1;
 
     /* Just accept everything. */
@@ -108,32 +112,35 @@ static uint64_t mipsnet_ioport_read(void *opaque, hwaddr addr,
     addr &= 0x3f;
     switch (addr) {
     case MIPSNET_DEV_ID:
-	ret = be32_to_cpu(0x4d495053);		/* MIPS */
+        ret = be32_to_cpu(0x4d495053);		/* MIPS */
         break;
     case MIPSNET_DEV_ID + 4:
-	ret = be32_to_cpu(0x4e455430);		/* NET0 */
+        ret = be32_to_cpu(0x4e455430);		/* NET0 */
         break;
     case MIPSNET_BUSY:
-	ret = s->busy;
+        ret = s->busy;
         break;
     case MIPSNET_RX_DATA_COUNT:
-	ret = s->rx_count;
+        ret = s->rx_count;
         break;
     case MIPSNET_TX_DATA_COUNT:
-	ret = s->tx_count;
+        ret = s->tx_count;
         break;
     case MIPSNET_INT_CTL:
-	ret = s->intctl;
+        ret = s->intctl;
         s->intctl &= ~MIPSNET_INTCTL_TESTBIT;
         break;
     case MIPSNET_INTERRUPT_INFO:
         /* XXX: This seems to be a per-VPE interrupt number. */
-	ret = 0;
+        ret = 0;
         break;
     case MIPSNET_RX_DATA_BUFFER:
         if (s->rx_count) {
             s->rx_count--;
             ret = s->rx_buffer[s->rx_read++];
+            if (mipsnet_can_receive(s->nic->ncs)) {
+                qemu_flush_queued_packets(qemu_get_queue(s->nic));
+            }
         }
         break;
     /* Reads as zero. */
@@ -154,7 +161,7 @@ static void mipsnet_ioport_write(void *opaque, hwaddr addr,
     trace_mipsnet_write(addr, val);
     switch (addr) {
     case MIPSNET_TX_DATA_COUNT:
-	s->tx_count = (val <= MAX_ETH_FRAME_SIZE) ? val : 0;
+        s->tx_count = (val <= MAX_ETH_FRAME_SIZE) ? val : 0;
         s->tx_written = 0;
         break;
     case MIPSNET_INT_CTL:
@@ -170,13 +177,18 @@ static void mipsnet_ioport_write(void *opaque, hwaddr addr,
         }
         s->busy = !!s->intctl;
         mipsnet_update_irq(s);
+        if (mipsnet_can_receive(s->nic->ncs)) {
+            qemu_flush_queued_packets(qemu_get_queue(s->nic));
+        }
         break;
     case MIPSNET_TX_DATA_BUFFER:
         s->tx_buffer[s->tx_written++] = val;
-        if (s->tx_written == s->tx_count) {
+        if ((s->tx_written >= MAX_ETH_FRAME_SIZE)
+            || (s->tx_written == s->tx_count)) {
             /* Send buffer. */
-            trace_mipsnet_send(s->tx_count);
-            qemu_send_packet(qemu_get_queue(s->nic), s->tx_buffer, s->tx_count);
+            trace_mipsnet_send(s->tx_written);
+            qemu_send_packet(qemu_get_queue(s->nic),
+                                s->tx_buffer, s->tx_written);
             s->tx_count = s->tx_written = 0;
             s->intctl |= MIPSNET_INTCTL_TXDONE;
             s->busy = 1;
@@ -211,19 +223,10 @@ static const VMStateDescription vmstate_mipsnet = {
     }
 };
 
-static void mipsnet_cleanup(NetClientState *nc)
-{
-    MIPSnetState *s = qemu_get_nic_opaque(nc);
-
-    s->nic = NULL;
-}
-
 static NetClientInfo net_mipsnet_info = {
-    .type = NET_CLIENT_OPTIONS_KIND_NIC,
+    .type = NET_CLIENT_DRIVER_NIC,
     .size = sizeof(NICState),
-    .can_receive = mipsnet_can_receive,
     .receive = mipsnet_receive,
-    .cleanup = mipsnet_cleanup,
 };
 
 static const MemoryRegionOps mipsnet_ioport_ops = {
@@ -233,9 +236,9 @@ static const MemoryRegionOps mipsnet_ioport_ops = {
     .impl.max_access_size = 4,
 };
 
-static int mipsnet_sysbus_init(SysBusDevice *sbd)
+static void mipsnet_realize(DeviceState *dev, Error **errp)
 {
-    DeviceState *dev = DEVICE(sbd);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     MIPSnetState *s = MIPS_NET(dev);
 
     memory_region_init_io(&s->io, OBJECT(dev), &mipsnet_ioport_ops, s,
@@ -246,8 +249,6 @@ static int mipsnet_sysbus_init(SysBusDevice *sbd)
     s->nic = qemu_new_nic(&net_mipsnet_info, &s->conf,
                           object_get_typename(OBJECT(dev)), dev->id, s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
-
-    return 0;
 }
 
 static void mipsnet_sysbus_reset(DeviceState *dev)
@@ -264,9 +265,8 @@ static Property mipsnet_properties[] = {
 static void mipsnet_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
-    k->init = mipsnet_sysbus_init;
+    dc->realize = mipsnet_realize;
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
     dc->desc = "MIPS Simulator network device";
     dc->reset = mipsnet_sysbus_reset;

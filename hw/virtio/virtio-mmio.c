@@ -19,10 +19,14 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
+#include "standard-headers/linux/virtio_mmio.h"
 #include "hw/sysbus.h"
 #include "hw/virtio/virtio.h"
 #include "qemu/host-utils.h"
+#include "sysemu/kvm.h"
 #include "hw/virtio/virtio-bus.h"
+#include "qemu/error-report.h"
 
 /* #define DEBUG_VIRTIO_MMIO */
 
@@ -49,28 +53,6 @@ do { printf("virtio_mmio: " fmt , ## __VA_ARGS__); } while (0)
 #define VIRTIO_MMIO(obj) \
         OBJECT_CHECK(VirtIOMMIOProxy, (obj), TYPE_VIRTIO_MMIO)
 
-/* Memory mapped register offsets */
-#define VIRTIO_MMIO_MAGIC 0x0
-#define VIRTIO_MMIO_VERSION 0x4
-#define VIRTIO_MMIO_DEVICEID 0x8
-#define VIRTIO_MMIO_VENDORID 0xc
-#define VIRTIO_MMIO_HOSTFEATURES 0x10
-#define VIRTIO_MMIO_HOSTFEATURESSEL 0x14
-#define VIRTIO_MMIO_GUESTFEATURES 0x20
-#define VIRTIO_MMIO_GUESTFEATURESSEL 0x24
-#define VIRTIO_MMIO_GUESTPAGESIZE 0x28
-#define VIRTIO_MMIO_QUEUESEL 0x30
-#define VIRTIO_MMIO_QUEUENUMMAX 0x34
-#define VIRTIO_MMIO_QUEUENUM 0x38
-#define VIRTIO_MMIO_QUEUEALIGN 0x3c
-#define VIRTIO_MMIO_QUEUEPFN 0x40
-#define VIRTIO_MMIO_QUEUENOTIFY 0x50
-#define VIRTIO_MMIO_INTERRUPTSTATUS 0x60
-#define VIRTIO_MMIO_INTERRUPTACK 0x64
-#define VIRTIO_MMIO_STATUS 0x70
-/* Device specific config space starts here */
-#define VIRTIO_MMIO_CONFIG 0x100
-
 #define VIRT_MAGIC 0x74726976 /* 'virt' */
 #define VIRT_VERSION 1
 #define VIRT_VENDOR 0x554D4551 /* 'QEMU' */
@@ -80,14 +62,45 @@ typedef struct {
     SysBusDevice parent_obj;
     MemoryRegion iomem;
     qemu_irq irq;
-    uint32_t host_features;
     /* Guest accessible state needing migration and reset */
     uint32_t host_features_sel;
     uint32_t guest_features_sel;
     uint32_t guest_page_shift;
     /* virtio-bus */
     VirtioBusState bus;
+    bool format_transport_address;
 } VirtIOMMIOProxy;
+
+static bool virtio_mmio_ioeventfd_enabled(DeviceState *d)
+{
+    return kvm_eventfds_enabled();
+}
+
+static int virtio_mmio_ioeventfd_assign(DeviceState *d,
+                                        EventNotifier *notifier,
+                                        int n, bool assign)
+{
+    VirtIOMMIOProxy *proxy = VIRTIO_MMIO(d);
+
+    if (assign) {
+        memory_region_add_eventfd(&proxy->iomem, VIRTIO_MMIO_QUEUE_NOTIFY, 4,
+                                  true, n, notifier);
+    } else {
+        memory_region_del_eventfd(&proxy->iomem, VIRTIO_MMIO_QUEUE_NOTIFY, 4,
+                                  true, n, notifier);
+    }
+    return 0;
+}
+
+static void virtio_mmio_start_ioeventfd(VirtIOMMIOProxy *proxy)
+{
+    virtio_bus_start_ioeventfd(&proxy->bus);
+}
+
+static void virtio_mmio_stop_ioeventfd(VirtIOMMIOProxy *proxy)
+{
+    virtio_bus_stop_ioeventfd(&proxy->bus);
+}
 
 static uint64_t virtio_mmio_read(void *opaque, hwaddr offset, unsigned size)
 {
@@ -106,11 +119,11 @@ static uint64_t virtio_mmio_read(void *opaque, hwaddr offset, unsigned size)
          * device ID of zero means no backend will claim it.
          */
         switch (offset) {
-        case VIRTIO_MMIO_MAGIC:
+        case VIRTIO_MMIO_MAGIC_VALUE:
             return VIRT_MAGIC;
         case VIRTIO_MMIO_VERSION:
             return VIRT_VERSION;
-        case VIRTIO_MMIO_VENDORID:
+        case VIRTIO_MMIO_VENDOR_ID:
             return VIRT_VENDOR;
         default:
             return 0;
@@ -135,40 +148,40 @@ static uint64_t virtio_mmio_read(void *opaque, hwaddr offset, unsigned size)
         return 0;
     }
     switch (offset) {
-    case VIRTIO_MMIO_MAGIC:
+    case VIRTIO_MMIO_MAGIC_VALUE:
         return VIRT_MAGIC;
     case VIRTIO_MMIO_VERSION:
         return VIRT_VERSION;
-    case VIRTIO_MMIO_DEVICEID:
+    case VIRTIO_MMIO_DEVICE_ID:
         return vdev->device_id;
-    case VIRTIO_MMIO_VENDORID:
+    case VIRTIO_MMIO_VENDOR_ID:
         return VIRT_VENDOR;
-    case VIRTIO_MMIO_HOSTFEATURES:
+    case VIRTIO_MMIO_DEVICE_FEATURES:
         if (proxy->host_features_sel) {
             return 0;
         }
-        return proxy->host_features;
-    case VIRTIO_MMIO_QUEUENUMMAX:
+        return vdev->host_features;
+    case VIRTIO_MMIO_QUEUE_NUM_MAX:
         if (!virtio_queue_get_num(vdev, vdev->queue_sel)) {
             return 0;
         }
         return VIRTQUEUE_MAX_SIZE;
-    case VIRTIO_MMIO_QUEUEPFN:
+    case VIRTIO_MMIO_QUEUE_PFN:
         return virtio_queue_get_addr(vdev, vdev->queue_sel)
             >> proxy->guest_page_shift;
-    case VIRTIO_MMIO_INTERRUPTSTATUS:
-        return vdev->isr;
+    case VIRTIO_MMIO_INTERRUPT_STATUS:
+        return atomic_read(&vdev->isr);
     case VIRTIO_MMIO_STATUS:
         return vdev->status;
-    case VIRTIO_MMIO_HOSTFEATURESSEL:
-    case VIRTIO_MMIO_GUESTFEATURES:
-    case VIRTIO_MMIO_GUESTFEATURESSEL:
-    case VIRTIO_MMIO_GUESTPAGESIZE:
-    case VIRTIO_MMIO_QUEUESEL:
-    case VIRTIO_MMIO_QUEUENUM:
-    case VIRTIO_MMIO_QUEUEALIGN:
-    case VIRTIO_MMIO_QUEUENOTIFY:
-    case VIRTIO_MMIO_INTERRUPTACK:
+    case VIRTIO_MMIO_DEVICE_FEATURES_SEL:
+    case VIRTIO_MMIO_DRIVER_FEATURES:
+    case VIRTIO_MMIO_DRIVER_FEATURES_SEL:
+    case VIRTIO_MMIO_GUEST_PAGE_SIZE:
+    case VIRTIO_MMIO_QUEUE_SEL:
+    case VIRTIO_MMIO_QUEUE_NUM:
+    case VIRTIO_MMIO_QUEUE_ALIGN:
+    case VIRTIO_MMIO_QUEUE_NOTIFY:
+    case VIRTIO_MMIO_INTERRUPT_ACK:
         DPRINTF("read of write-only register\n");
         return 0;
     default:
@@ -217,18 +230,18 @@ static void virtio_mmio_write(void *opaque, hwaddr offset, uint64_t value,
         return;
     }
     switch (offset) {
-    case VIRTIO_MMIO_HOSTFEATURESSEL:
+    case VIRTIO_MMIO_DEVICE_FEATURES_SEL:
         proxy->host_features_sel = value;
         break;
-    case VIRTIO_MMIO_GUESTFEATURES:
+    case VIRTIO_MMIO_DRIVER_FEATURES:
         if (!proxy->guest_features_sel) {
             virtio_set_features(vdev, value);
         }
         break;
-    case VIRTIO_MMIO_GUESTFEATURESSEL:
+    case VIRTIO_MMIO_DRIVER_FEATURES_SEL:
         proxy->guest_features_sel = value;
         break;
-    case VIRTIO_MMIO_GUESTPAGESIZE:
+    case VIRTIO_MMIO_GUEST_PAGE_SIZE:
         proxy->guest_page_shift = ctz32(value);
         if (proxy->guest_page_shift > 31) {
             proxy->guest_page_shift = 0;
@@ -236,19 +249,22 @@ static void virtio_mmio_write(void *opaque, hwaddr offset, uint64_t value,
         DPRINTF("guest page size %" PRIx64 " shift %d\n", value,
                 proxy->guest_page_shift);
         break;
-    case VIRTIO_MMIO_QUEUESEL:
-        if (value < VIRTIO_PCI_QUEUE_MAX) {
+    case VIRTIO_MMIO_QUEUE_SEL:
+        if (value < VIRTIO_QUEUE_MAX) {
             vdev->queue_sel = value;
         }
         break;
-    case VIRTIO_MMIO_QUEUENUM:
+    case VIRTIO_MMIO_QUEUE_NUM:
         DPRINTF("mmio_queue write %d max %d\n", (int)value, VIRTQUEUE_MAX_SIZE);
         virtio_queue_set_num(vdev, vdev->queue_sel, value);
+        /* Note: only call this function for legacy devices */
+        virtio_queue_update_rings(vdev, vdev->queue_sel);
         break;
-    case VIRTIO_MMIO_QUEUEALIGN:
+    case VIRTIO_MMIO_QUEUE_ALIGN:
+        /* Note: this is only valid for legacy devices */
         virtio_queue_set_align(vdev, vdev->queue_sel, value);
         break;
-    case VIRTIO_MMIO_QUEUEPFN:
+    case VIRTIO_MMIO_QUEUE_PFN:
         if (value == 0) {
             virtio_reset(vdev);
         } else {
@@ -256,28 +272,37 @@ static void virtio_mmio_write(void *opaque, hwaddr offset, uint64_t value,
                                   value << proxy->guest_page_shift);
         }
         break;
-    case VIRTIO_MMIO_QUEUENOTIFY:
-        if (value < VIRTIO_PCI_QUEUE_MAX) {
+    case VIRTIO_MMIO_QUEUE_NOTIFY:
+        if (value < VIRTIO_QUEUE_MAX) {
             virtio_queue_notify(vdev, value);
         }
         break;
-    case VIRTIO_MMIO_INTERRUPTACK:
-        vdev->isr &= ~value;
+    case VIRTIO_MMIO_INTERRUPT_ACK:
+        atomic_and(&vdev->isr, ~value);
         virtio_update_irq(vdev);
         break;
     case VIRTIO_MMIO_STATUS:
+        if (!(value & VIRTIO_CONFIG_S_DRIVER_OK)) {
+            virtio_mmio_stop_ioeventfd(proxy);
+        }
+
         virtio_set_status(vdev, value & 0xff);
+
+        if (value & VIRTIO_CONFIG_S_DRIVER_OK) {
+            virtio_mmio_start_ioeventfd(proxy);
+        }
+
         if (vdev->status == 0) {
             virtio_reset(vdev);
         }
         break;
-    case VIRTIO_MMIO_MAGIC:
+    case VIRTIO_MMIO_MAGIC_VALUE:
     case VIRTIO_MMIO_VERSION:
-    case VIRTIO_MMIO_DEVICEID:
-    case VIRTIO_MMIO_VENDORID:
-    case VIRTIO_MMIO_HOSTFEATURES:
-    case VIRTIO_MMIO_QUEUENUMMAX:
-    case VIRTIO_MMIO_INTERRUPTSTATUS:
+    case VIRTIO_MMIO_DEVICE_ID:
+    case VIRTIO_MMIO_VENDOR_ID:
+    case VIRTIO_MMIO_DEVICE_FEATURES:
+    case VIRTIO_MMIO_QUEUE_NUM_MAX:
+    case VIRTIO_MMIO_INTERRUPT_STATUS:
         DPRINTF("write to readonly register\n");
         break;
 
@@ -301,16 +326,9 @@ static void virtio_mmio_update_irq(DeviceState *opaque, uint16_t vector)
     if (!vdev) {
         return;
     }
-    level = (vdev->isr != 0);
+    level = (atomic_read(&vdev->isr) != 0);
     DPRINTF("virtio_mmio setting IRQ %d\n", level);
     qemu_set_irq(proxy->irq, level);
-}
-
-static unsigned int virtio_mmio_get_features(DeviceState *opaque)
-{
-    VirtIOMMIOProxy *proxy = VIRTIO_MMIO(opaque);
-
-    return proxy->host_features;
 }
 
 static int virtio_mmio_load_config(DeviceState *opaque, QEMUFile *f)
@@ -336,23 +354,80 @@ static void virtio_mmio_reset(DeviceState *d)
 {
     VirtIOMMIOProxy *proxy = VIRTIO_MMIO(d);
 
+    virtio_mmio_stop_ioeventfd(proxy);
     virtio_bus_reset(&proxy->bus);
     proxy->host_features_sel = 0;
     proxy->guest_features_sel = 0;
     proxy->guest_page_shift = 0;
 }
 
+static int virtio_mmio_set_guest_notifier(DeviceState *d, int n, bool assign,
+                                          bool with_irqfd)
+{
+    VirtIOMMIOProxy *proxy = VIRTIO_MMIO(d);
+    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
+    VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
+    VirtQueue *vq = virtio_get_queue(vdev, n);
+    EventNotifier *notifier = virtio_queue_get_guest_notifier(vq);
+
+    if (assign) {
+        int r = event_notifier_init(notifier, 0);
+        if (r < 0) {
+            return r;
+        }
+        virtio_queue_set_guest_notifier_fd_handler(vq, true, with_irqfd);
+    } else {
+        virtio_queue_set_guest_notifier_fd_handler(vq, false, with_irqfd);
+        event_notifier_cleanup(notifier);
+    }
+
+    if (vdc->guest_notifier_mask && vdev->use_guest_notifier_mask) {
+        vdc->guest_notifier_mask(vdev, n, !assign);
+    }
+
+    return 0;
+}
+
+static int virtio_mmio_set_guest_notifiers(DeviceState *d, int nvqs,
+                                           bool assign)
+{
+    VirtIOMMIOProxy *proxy = VIRTIO_MMIO(d);
+    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
+    /* TODO: need to check if kvm-arm supports irqfd */
+    bool with_irqfd = false;
+    int r, n;
+
+    nvqs = MIN(nvqs, VIRTIO_QUEUE_MAX);
+
+    for (n = 0; n < nvqs; n++) {
+        if (!virtio_queue_get_num(vdev, n)) {
+            break;
+        }
+
+        r = virtio_mmio_set_guest_notifier(d, n, assign, with_irqfd);
+        if (r < 0) {
+            goto assign_error;
+        }
+    }
+
+    return 0;
+
+assign_error:
+    /* We get here on assignment failure. Recover by undoing for VQs 0 .. n. */
+    assert(assign);
+    while (--n >= 0) {
+        virtio_mmio_set_guest_notifier(d, n, !assign, false);
+    }
+    return r;
+}
+
 /* virtio-mmio device */
 
-/* This is called by virtio-bus just after the device is plugged. */
-static void virtio_mmio_device_plugged(DeviceState *opaque)
-{
-    VirtIOMMIOProxy *proxy = VIRTIO_MMIO(opaque);
-
-    proxy->host_features |= (0x1 << VIRTIO_F_NOTIFY_ON_EMPTY);
-    proxy->host_features = virtio_bus_get_vdev_features(&proxy->bus,
-                                                        proxy->host_features);
-}
+static Property virtio_mmio_properties[] = {
+    DEFINE_PROP_BOOL("format_transport_address", VirtIOMMIOProxy,
+                     format_transport_address, true),
+    DEFINE_PROP_END_OF_LIST(),
+};
 
 static void virtio_mmio_realizefn(DeviceState *d, Error **errp)
 {
@@ -367,19 +442,14 @@ static void virtio_mmio_realizefn(DeviceState *d, Error **errp)
     sysbus_init_mmio(sbd, &proxy->iomem);
 }
 
-static Property virtio_mmio_properties[] = {
-    DEFINE_VIRTIO_COMMON_FEATURES(VirtIOMMIOProxy, host_features),
-    DEFINE_PROP_END_OF_LIST(),
-};
-
 static void virtio_mmio_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->props = virtio_mmio_properties;
     dc->realize = virtio_mmio_realizefn;
     dc->reset = virtio_mmio_reset;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
+    dc->props = virtio_mmio_properties;
 }
 
 static const TypeInfo virtio_mmio_info = {
@@ -391,6 +461,46 @@ static const TypeInfo virtio_mmio_info = {
 
 /* virtio-mmio-bus. */
 
+static char *virtio_mmio_bus_get_dev_path(DeviceState *dev)
+{
+    BusState *virtio_mmio_bus;
+    VirtIOMMIOProxy *virtio_mmio_proxy;
+    char *proxy_path;
+    SysBusDevice *proxy_sbd;
+    char *path;
+
+    virtio_mmio_bus = qdev_get_parent_bus(dev);
+    virtio_mmio_proxy = VIRTIO_MMIO(virtio_mmio_bus->parent);
+    proxy_path = qdev_get_dev_path(DEVICE(virtio_mmio_proxy));
+
+    /*
+     * If @format_transport_address is false, then we just perform the same as
+     * virtio_bus_get_dev_path(): we delegate the address formatting for the
+     * device on the virtio-mmio bus to the bus that the virtio-mmio proxy
+     * (i.e., the device that implements the virtio-mmio bus) resides on. In
+     * this case the base address of the virtio-mmio transport will be
+     * invisible.
+     */
+    if (!virtio_mmio_proxy->format_transport_address) {
+        return proxy_path;
+    }
+
+    /* Otherwise, we append the base address of the transport. */
+    proxy_sbd = SYS_BUS_DEVICE(virtio_mmio_proxy);
+    assert(proxy_sbd->num_mmio == 1);
+    assert(proxy_sbd->mmio[0].memory == &virtio_mmio_proxy->iomem);
+
+    if (proxy_path) {
+        path = g_strdup_printf("%s/virtio-mmio@" TARGET_FMT_plx, proxy_path,
+                               proxy_sbd->mmio[0].addr);
+    } else {
+        path = g_strdup_printf("virtio-mmio@" TARGET_FMT_plx,
+                               proxy_sbd->mmio[0].addr);
+    }
+    g_free(proxy_path);
+    return path;
+}
+
 static void virtio_mmio_bus_class_init(ObjectClass *klass, void *data)
 {
     BusClass *bus_class = BUS_CLASS(klass);
@@ -399,10 +509,12 @@ static void virtio_mmio_bus_class_init(ObjectClass *klass, void *data)
     k->notify = virtio_mmio_update_irq;
     k->save_config = virtio_mmio_save_config;
     k->load_config = virtio_mmio_load_config;
-    k->get_features = virtio_mmio_get_features;
-    k->device_plugged = virtio_mmio_device_plugged;
+    k->set_guest_notifiers = virtio_mmio_set_guest_notifiers;
+    k->ioeventfd_enabled = virtio_mmio_ioeventfd_enabled;
+    k->ioeventfd_assign = virtio_mmio_ioeventfd_assign;
     k->has_variable_vring_alignment = true;
     bus_class->max_dev = 1;
+    bus_class->get_dev_path = virtio_mmio_bus_get_dev_path;
 }
 
 static const TypeInfo virtio_mmio_bus_info = {

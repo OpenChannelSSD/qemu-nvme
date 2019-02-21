@@ -11,19 +11,78 @@
  *
  */
 
+#include "qemu/osdep.h"
 #include "hw/virtio/virtio.h"
-#include "hw/virtio/virtio-9p.h"
-#include "hw/i386/pc.h"
 #include "qemu/sockets.h"
 #include "virtio-9p.h"
 #include "fsdev/qemu-fsdev.h"
-#include "virtio-9p-xattr.h"
-#include "virtio-9p-coth.h"
+#include "coth.h"
 #include "hw/virtio/virtio-access.h"
+#include "qemu/iov.h"
 
-static uint32_t virtio_9p_get_features(VirtIODevice *vdev, uint32_t features)
+static void virtio_9p_push_and_notify(V9fsPDU *pdu)
 {
-    features |= 1 << VIRTIO_9P_MOUNT_TAG;
+    V9fsState *s = pdu->s;
+    V9fsVirtioState *v = container_of(s, V9fsVirtioState, state);
+    VirtQueueElement *elem = v->elems[pdu->idx];
+
+    /* push onto queue and notify */
+    virtqueue_push(v->vq, elem, pdu->size);
+    g_free(elem);
+    v->elems[pdu->idx] = NULL;
+
+    /* FIXME: we should batch these completions */
+    virtio_notify(VIRTIO_DEVICE(v), v->vq);
+}
+
+static void handle_9p_output(VirtIODevice *vdev, VirtQueue *vq)
+{
+    V9fsVirtioState *v = (V9fsVirtioState *)vdev;
+    V9fsState *s = &v->state;
+    V9fsPDU *pdu;
+    ssize_t len;
+    VirtQueueElement *elem;
+
+    while ((pdu = pdu_alloc(s))) {
+        P9MsgHeader out;
+
+        elem = virtqueue_pop(vq, sizeof(VirtQueueElement));
+        if (!elem) {
+            goto out_free_pdu;
+        }
+
+        if (iov_size(elem->in_sg, elem->in_num) < 7) {
+            virtio_error(vdev,
+                         "The guest sent a VirtFS request without space for "
+                         "the reply");
+            goto out_free_req;
+        }
+
+        len = iov_to_buf(elem->out_sg, elem->out_num, 0, &out, 7);
+        if (len != 7) {
+            virtio_error(vdev, "The guest sent a malformed VirtFS request: "
+                         "header size is %zd, should be 7", len);
+            goto out_free_req;
+        }
+
+        v->elems[pdu->idx] = elem;
+
+        pdu_submit(pdu, &out);
+    }
+
+    return;
+
+out_free_req:
+    virtqueue_detach_element(vq, elem, 0);
+    g_free(elem);
+out_free_pdu:
+    pdu_free(pdu);
+}
+
+static uint64_t virtio_9p_get_features(VirtIODevice *vdev, uint64_t features,
+                                       Error **errp)
+{
+    virtio_add_feature(&features, VIRTIO_9P_MOUNT_TAG);
     return features;
 }
 
@@ -31,116 +90,148 @@ static void virtio_9p_get_config(VirtIODevice *vdev, uint8_t *config)
 {
     int len;
     struct virtio_9p_config *cfg;
-    V9fsState *s = VIRTIO_9P(vdev);
+    V9fsVirtioState *v = VIRTIO_9P(vdev);
+    V9fsState *s = &v->state;
 
     len = strlen(s->tag);
     cfg = g_malloc0(sizeof(struct virtio_9p_config) + len);
     virtio_stw_p(vdev, &cfg->tag_len, len);
     /* We don't copy the terminating null to config space */
     memcpy(cfg->tag, s->tag, len);
-    memcpy(config, cfg, s->config_size);
+    memcpy(config, cfg, v->config_size);
     g_free(cfg);
 }
+
+static void virtio_9p_reset(VirtIODevice *vdev)
+{
+    V9fsVirtioState *v = (V9fsVirtioState *)vdev;
+
+    v9fs_reset(&v->state);
+}
+
+static ssize_t virtio_pdu_vmarshal(V9fsPDU *pdu, size_t offset,
+                                   const char *fmt, va_list ap)
+{
+    V9fsState *s = pdu->s;
+    V9fsVirtioState *v = container_of(s, V9fsVirtioState, state);
+    VirtQueueElement *elem = v->elems[pdu->idx];
+    ssize_t ret;
+
+    ret = v9fs_iov_vmarshal(elem->in_sg, elem->in_num, offset, 1, fmt, ap);
+    if (ret < 0) {
+        VirtIODevice *vdev = VIRTIO_DEVICE(v);
+
+        virtio_error(vdev, "Failed to encode VirtFS reply type %d",
+                     pdu->id + 1);
+    }
+    return ret;
+}
+
+static ssize_t virtio_pdu_vunmarshal(V9fsPDU *pdu, size_t offset,
+                                     const char *fmt, va_list ap)
+{
+    V9fsState *s = pdu->s;
+    V9fsVirtioState *v = container_of(s, V9fsVirtioState, state);
+    VirtQueueElement *elem = v->elems[pdu->idx];
+    ssize_t ret;
+
+    ret = v9fs_iov_vunmarshal(elem->out_sg, elem->out_num, offset, 1, fmt, ap);
+    if (ret < 0) {
+        VirtIODevice *vdev = VIRTIO_DEVICE(v);
+
+        virtio_error(vdev, "Failed to decode VirtFS request type %d", pdu->id);
+    }
+    return ret;
+}
+
+static void virtio_init_in_iov_from_pdu(V9fsPDU *pdu, struct iovec **piov,
+                                        unsigned int *pniov, size_t size)
+{
+    V9fsState *s = pdu->s;
+    V9fsVirtioState *v = container_of(s, V9fsVirtioState, state);
+    VirtQueueElement *elem = v->elems[pdu->idx];
+    size_t buf_size = iov_size(elem->in_sg, elem->in_num);
+
+    if (buf_size < size) {
+        VirtIODevice *vdev = VIRTIO_DEVICE(v);
+
+        virtio_error(vdev,
+                     "VirtFS reply type %d needs %zu bytes, buffer has %zu",
+                     pdu->id + 1, size, buf_size);
+    }
+
+    *piov = elem->in_sg;
+    *pniov = elem->in_num;
+}
+
+static void virtio_init_out_iov_from_pdu(V9fsPDU *pdu, struct iovec **piov,
+                                         unsigned int *pniov, size_t size)
+{
+    V9fsState *s = pdu->s;
+    V9fsVirtioState *v = container_of(s, V9fsVirtioState, state);
+    VirtQueueElement *elem = v->elems[pdu->idx];
+    size_t buf_size = iov_size(elem->out_sg, elem->out_num);
+
+    if (buf_size < size) {
+        VirtIODevice *vdev = VIRTIO_DEVICE(v);
+
+        virtio_error(vdev,
+                     "VirtFS request type %d needs %zu bytes, buffer has %zu",
+                     pdu->id, size, buf_size);
+    }
+
+    *piov = elem->out_sg;
+    *pniov = elem->out_num;
+}
+
+static const V9fsTransport virtio_9p_transport = {
+    .pdu_vmarshal = virtio_pdu_vmarshal,
+    .pdu_vunmarshal = virtio_pdu_vunmarshal,
+    .init_in_iov_from_pdu = virtio_init_in_iov_from_pdu,
+    .init_out_iov_from_pdu = virtio_init_out_iov_from_pdu,
+    .push_and_notify = virtio_9p_push_and_notify,
+};
 
 static void virtio_9p_device_realize(DeviceState *dev, Error **errp)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(dev);
-    V9fsState *s = VIRTIO_9P(dev);
-    int i, len;
-    struct stat stat;
-    FsDriverEntry *fse;
-    V9fsPath path;
+    V9fsVirtioState *v = VIRTIO_9P(dev);
+    V9fsState *s = &v->state;
 
-    virtio_init(vdev, "virtio-9p", VIRTIO_ID_9P,
-                sizeof(struct virtio_9p_config) + MAX_TAG_LEN);
-
-    /* initialize pdu allocator */
-    QLIST_INIT(&s->free_list);
-    QLIST_INIT(&s->active_list);
-    for (i = 0; i < (MAX_REQ - 1); i++) {
-        QLIST_INSERT_HEAD(&s->free_list, &s->pdus[i], next);
+    if (v9fs_device_realize_common(s, &virtio_9p_transport, errp)) {
+        return;
     }
 
-    s->vq = virtio_add_queue(vdev, MAX_REQ, handle_9p_output);
+    v->config_size = sizeof(struct virtio_9p_config) + strlen(s->fsconf.tag);
+    virtio_init(vdev, "virtio-9p", VIRTIO_ID_9P, v->config_size);
+    v->vq = virtio_add_queue(vdev, MAX_REQ, handle_9p_output);
+}
 
-    v9fs_path_init(&path);
+static void virtio_9p_device_unrealize(DeviceState *dev, Error **errp)
+{
+    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
+    V9fsVirtioState *v = VIRTIO_9P(dev);
+    V9fsState *s = &v->state;
 
-    fse = get_fsdev_fsentry(s->fsconf.fsdev_id);
-
-    if (!fse) {
-        /* We don't have a fsdev identified by fsdev_id */
-        error_setg(errp, "Virtio-9p device couldn't find fsdev with the "
-                   "id = %s",
-                   s->fsconf.fsdev_id ? s->fsconf.fsdev_id : "NULL");
-        goto out;
-    }
-
-    if (!s->fsconf.tag) {
-        /* we haven't specified a mount_tag */
-        error_setg(errp, "fsdev with id %s needs mount_tag arguments",
-                   s->fsconf.fsdev_id);
-        goto out;
-    }
-
-    s->ctx.export_flags = fse->export_flags;
-    s->ctx.fs_root = g_strdup(fse->path);
-    s->ctx.exops.get_st_gen = NULL;
-    len = strlen(s->fsconf.tag);
-    if (len > MAX_TAG_LEN - 1) {
-        error_setg(errp, "mount tag '%s' (%d bytes) is longer than "
-                   "maximum (%d bytes)", s->fsconf.tag, len, MAX_TAG_LEN - 1);
-        goto out;
-    }
-
-    s->tag = g_strdup(s->fsconf.tag);
-    s->ctx.uid = -1;
-
-    s->ops = fse->ops;
-    s->config_size = sizeof(struct virtio_9p_config) + len;
-    s->fid_list = NULL;
-    qemu_co_rwlock_init(&s->rename_lock);
-
-    if (s->ops->init(&s->ctx) < 0) {
-        error_setg(errp, "Virtio-9p Failed to initialize fs-driver with id:%s"
-                   " and export path:%s", s->fsconf.fsdev_id, s->ctx.fs_root);
-        goto out;
-    }
-    if (v9fs_init_worker_threads() < 0) {
-        error_setg(errp, "worker thread initialization failed");
-        goto out;
-    }
-
-    /*
-     * Check details of export path, We need to use fs driver
-     * call back to do that. Since we are in the init path, we don't
-     * use co-routines here.
-     */
-    if (s->ops->name_to_path(&s->ctx, NULL, "/", &path) < 0) {
-        error_setg(errp,
-                   "error in converting name to path %s", strerror(errno));
-        goto out;
-    }
-    if (s->ops->lstat(&s->ctx, &path, &stat)) {
-        error_setg(errp, "share path %s does not exist", fse->path);
-        goto out;
-    } else if (!S_ISDIR(stat.st_mode)) {
-        error_setg(errp, "share path %s is not a directory", fse->path);
-        goto out;
-    }
-    v9fs_path_free(&path);
-
-    return;
-out:
-    g_free(s->ctx.fs_root);
-    g_free(s->tag);
     virtio_cleanup(vdev);
-    v9fs_path_free(&path);
+    v9fs_device_unrealize_common(s, errp);
 }
 
 /* virtio-9p device */
 
+static const VMStateDescription vmstate_virtio_9p = {
+    .name = "virtio-9p",
+    .minimum_version_id = 1,
+    .version_id = 1,
+    .fields = (VMStateField[]) {
+        VMSTATE_VIRTIO_DEVICE,
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static Property virtio_9p_properties[] = {
-    DEFINE_VIRTIO_9P_PROPERTIES(V9fsState, fsconf),
+    DEFINE_PROP_STRING("mount_tag", V9fsVirtioState, state.fsconf.tag),
+    DEFINE_PROP_STRING("fsdev", V9fsVirtioState, state.fsconf.fsdev_id),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -150,16 +241,19 @@ static void virtio_9p_class_init(ObjectClass *klass, void *data)
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);
 
     dc->props = virtio_9p_properties;
+    dc->vmsd = &vmstate_virtio_9p;
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
     vdc->realize = virtio_9p_device_realize;
+    vdc->unrealize = virtio_9p_device_unrealize;
     vdc->get_features = virtio_9p_get_features;
     vdc->get_config = virtio_9p_get_config;
+    vdc->reset = virtio_9p_reset;
 }
 
 static const TypeInfo virtio_device_info = {
     .name = TYPE_VIRTIO_9P,
     .parent = TYPE_VIRTIO_DEVICE,
-    .instance_size = sizeof(V9fsState),
+    .instance_size = sizeof(V9fsVirtioState),
     .class_init = virtio_9p_class_init,
 };
 

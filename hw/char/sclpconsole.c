@@ -12,13 +12,14 @@
  *
  */
 
-#include <hw/qdev.h>
+#include "qemu/osdep.h"
+#include "hw/qdev.h"
 #include "qemu/thread.h"
 #include "qemu/error-report.h"
 
 #include "hw/s390x/sclp.h"
 #include "hw/s390x/event-facility.h"
-#include "sysemu/char.h"
+#include "chardev/char-fe.h"
 
 typedef struct ASCIIConsoleData {
     EventBufferHeader ebh;
@@ -30,13 +31,18 @@ typedef struct ASCIIConsoleData {
 
 typedef struct SCLPConsole {
     SCLPEvent event;
-    CharDriverState *chr;
+    CharBackend chr;
     uint8_t iov[SIZE_BUFFER_VT220];
     uint32_t iov_sclp;      /* offset in buf for SCLP read operation       */
     uint32_t iov_bs;        /* offset in buf for char layer read operation */
     uint32_t iov_data_len;  /* length of byte stream in buffer             */
     uint32_t iov_sclp_rest; /* length of byte stream not read via SCLP     */
+    bool notify;            /* qemu_notify_event() req'd if true           */
 } SCLPConsole;
+
+#define TYPE_SCLP_CONSOLE "sclpconsole"
+#define SCLP_CONSOLE(obj) \
+    OBJECT_CHECK(SCLPConsole, (obj), TYPE_SCLP_CONSOLE)
 
 /* character layer call-back functions */
 
@@ -44,8 +50,12 @@ typedef struct SCLPConsole {
 static int chr_can_read(void *opaque)
 {
     SCLPConsole *scon = opaque;
+    int avail = SIZE_BUFFER_VT220 - scon->iov_data_len;
 
-    return SIZE_BUFFER_VT220 - scon->iov_data_len;
+    if (avail == 0) {
+        scon->notify = true;
+    }
+    return avail;
 }
 
 /* Send data from a char device over to the guest */
@@ -73,12 +83,12 @@ static bool can_handle_event(uint8_t type)
     return type == SCLP_EVENT_ASCII_CONSOLE_DATA;
 }
 
-static unsigned int send_mask(void)
+static sccb_mask_t send_mask(void)
 {
     return SCLP_EVENT_MASK_MSG_ASCII;
 }
 
-static unsigned int receive_mask(void)
+static sccb_mask_t receive_mask(void)
 {
     return SCLP_EVENT_MASK_MSG_ASCII;
 }
@@ -89,7 +99,7 @@ static unsigned int receive_mask(void)
 static void get_console_data(SCLPEvent *event, uint8_t *buf, size_t *size,
                              int avail)
 {
-    SCLPConsole *cons = DO_UPCAST(SCLPConsole, event, event);
+    SCLPConsole *cons = SCLP_CONSOLE(event);
 
     /* first byte is hex 0 saying an ascii string follows */
     *buf++ = '\0';
@@ -112,6 +122,10 @@ static void get_console_data(SCLPEvent *event, uint8_t *buf, size_t *size,
         cons->iov_sclp_rest -= avail;
         cons->iov_sclp += avail;
         /* more data pending */
+    }
+    if (cons->notify) {
+        cons->notify = false;
+        qemu_notify_event();
     }
 }
 
@@ -147,14 +161,16 @@ static int read_event_data(SCLPEvent *event, EventBufferHeader *evt_buf_hdr,
 static ssize_t write_console_data(SCLPEvent *event, const uint8_t *buf,
                                   size_t len)
 {
-    SCLPConsole *scon = DO_UPCAST(SCLPConsole, event, event);
+    SCLPConsole *scon = SCLP_CONSOLE(event);
 
-    if (!scon->chr) {
+    if (!qemu_chr_fe_backend_connected(&scon->chr)) {
         /* If there's no backend, we can just say we consumed all data. */
         return len;
     }
 
-    return qemu_chr_fe_write_all(scon->chr, buf, len);
+    /* XXX this blocks entire thread. Rewrite to use
+     * qemu_chr_fe_write and background I/O callbacks */
+    return qemu_chr_fe_write_all(&scon->chr, buf, len);
 }
 
 static int write_event_data(SCLPEvent *event, EventBufferHeader *evt_buf_hdr)
@@ -204,17 +220,15 @@ static int console_init(SCLPEvent *event)
 {
     static bool console_available;
 
-    SCLPConsole *scon = DO_UPCAST(SCLPConsole, event, event);
+    SCLPConsole *scon = SCLP_CONSOLE(event);
 
     if (console_available) {
         error_report("Multiple VT220 operator consoles are not supported");
         return -1;
     }
     console_available = true;
-    if (scon->chr) {
-        qemu_chr_add_handlers(scon->chr, chr_can_read,
-                              chr_read, NULL, scon);
-    }
+    qemu_chr_fe_set_handlers(&scon->chr, chr_can_read,
+                             chr_read, NULL, NULL, scon, NULL, true);
 
     return 0;
 }
@@ -222,18 +236,14 @@ static int console_init(SCLPEvent *event)
 static void console_reset(DeviceState *dev)
 {
    SCLPEvent *event = SCLP_EVENT(dev);
-   SCLPConsole *scon = DO_UPCAST(SCLPConsole, event, event);
+   SCLPConsole *scon = SCLP_CONSOLE(event);
 
    event->event_pending = false;
    scon->iov_sclp = 0;
    scon->iov_bs = 0;
    scon->iov_data_len = 0;
    scon->iov_sclp_rest = 0;
-}
-
-static int console_exit(SCLPEvent *event)
-{
-    return 0;
+   scon->notify = false;
 }
 
 static Property console_properties[] = {
@@ -250,12 +260,12 @@ static void console_class_init(ObjectClass *klass, void *data)
     dc->reset = console_reset;
     dc->vmsd = &vmstate_sclpconsole;
     ec->init = console_init;
-    ec->exit = console_exit;
     ec->get_send_mask = send_mask;
     ec->get_receive_mask = receive_mask;
     ec->can_handle_event = can_handle_event;
     ec->read_event_data = read_event_data;
     ec->write_event_data = write_event_data;
+    set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
 }
 
 static const TypeInfo sclp_console_info = {

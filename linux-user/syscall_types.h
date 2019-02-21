@@ -14,6 +14,12 @@ STRUCT(serial_icounter_struct,
 STRUCT(sockaddr,
        TYPE_SHORT, MK_ARRAY(TYPE_CHAR, 14))
 
+STRUCT(timeval,
+       MK_ARRAY(TYPE_LONG, 2))
+
+STRUCT(timespec,
+       MK_ARRAY(TYPE_LONG, 2))
+
 STRUCT(rtentry,
        TYPE_ULONG, MK_STRUCT(STRUCT_sockaddr), MK_STRUCT(STRUCT_sockaddr), MK_STRUCT(STRUCT_sockaddr),
        TYPE_SHORT, TYPE_SHORT, TYPE_ULONG, TYPE_PTRVOID, TYPE_SHORT, TYPE_PTRVOID,
@@ -103,10 +109,11 @@ STRUCT(loop_info64,
        TYPE_ULONGLONG,           /* lo_inode */
        TYPE_ULONGLONG,           /* lo_rdevice */
        TYPE_ULONGLONG,           /* lo_offset */
-       TYPE_ULONG,               /* lo_number */
-       TYPE_ULONG,               /* lo_encrypt_type */
-       TYPE_ULONG,               /* lo_encrypt_key_size */
-       TYPE_ULONG,               /* lo_flags */
+       TYPE_ULONGLONG,           /* lo_sizelimit */
+       TYPE_INT,                 /* lo_number */
+       TYPE_INT,                 /* lo_encrypt_type */
+       TYPE_INT,                 /* lo_encrypt_key_size */
+       TYPE_INT,                 /* lo_flags */
        MK_ARRAY(TYPE_CHAR, 64),  /* lo_name */
        MK_ARRAY(TYPE_CHAR, 64),  /* lo_crypt_name */
        MK_ARRAY(TYPE_CHAR, 32),  /* lo_encrypt_key */
@@ -225,6 +232,12 @@ STRUCT(dm_target_versions,
 STRUCT(dm_target_msg,
        TYPE_ULONGLONG) /* sector */
 
+STRUCT(file_clone_range,
+       TYPE_LONGLONG, /* src_fd */
+       TYPE_ULONGLONG, /* src_offset */
+       TYPE_ULONGLONG, /* src_length */
+       TYPE_ULONGLONG) /* dest_offset */
+
 STRUCT(fiemap_extent,
        TYPE_ULONGLONG, /* fe_logical */
        TYPE_ULONGLONG, /* fe_physical */
@@ -253,3 +266,71 @@ STRUCT(blkpg_ioctl_arg,
        TYPE_INT, /* flags */
        TYPE_INT, /* datalen */
        TYPE_PTRVOID) /* data */
+
+#if defined(CONFIG_USBFS)
+/* usb device ioctls */
+STRUCT(usbdevfs_ctrltransfer,
+        TYPE_CHAR, /* bRequestType */
+        TYPE_CHAR, /* bRequest */
+        TYPE_SHORT, /* wValue */
+        TYPE_SHORT, /* wIndex */
+        TYPE_SHORT, /* wLength */
+        TYPE_INT, /* timeout */
+        TYPE_PTRVOID) /* data */
+
+STRUCT(usbdevfs_bulktransfer,
+        TYPE_INT, /* ep */
+        TYPE_INT, /* len */
+        TYPE_INT, /* timeout */
+        TYPE_PTRVOID) /* data */
+
+STRUCT(usbdevfs_setinterface,
+        TYPE_INT, /* interface */
+        TYPE_INT) /* altsetting */
+
+STRUCT(usbdevfs_disconnectsignal,
+        TYPE_INT, /* signr */
+        TYPE_PTRVOID) /* context */
+
+STRUCT(usbdevfs_getdriver,
+        TYPE_INT, /* interface */
+        MK_ARRAY(TYPE_CHAR, USBDEVFS_MAXDRIVERNAME + 1)) /* driver */
+
+STRUCT(usbdevfs_connectinfo,
+        TYPE_INT, /* devnum */
+        TYPE_CHAR) /* slow */
+
+STRUCT(usbdevfs_iso_packet_desc,
+        TYPE_INT, /* length */
+        TYPE_INT, /* actual_length */
+        TYPE_INT) /* status */
+
+STRUCT(usbdevfs_urb,
+        TYPE_CHAR, /* type */
+        TYPE_CHAR, /* endpoint */
+        TYPE_INT, /* status */
+        TYPE_INT, /* flags */
+        TYPE_PTRVOID, /* buffer */
+        TYPE_INT, /* buffer_length */
+        TYPE_INT, /* actual_length */
+        TYPE_INT, /* start_frame */
+        TYPE_INT, /* union number_of_packets stream_id */
+        TYPE_INT, /* error_count */
+        TYPE_INT, /* signr */
+        TYPE_PTRVOID, /* usercontext */
+        MK_ARRAY(MK_STRUCT(STRUCT_usbdevfs_iso_packet_desc), 0)) /* desc */
+
+STRUCT(usbdevfs_ioctl,
+        TYPE_INT, /* ifno */
+        TYPE_INT, /* ioctl_code */
+        TYPE_PTRVOID) /* data */
+
+STRUCT(usbdevfs_hub_portinfo,
+        TYPE_CHAR, /* nports */
+        MK_ARRAY(TYPE_CHAR, 127)) /* port */
+
+STRUCT(usbdevfs_disconnect_claim,
+        TYPE_INT, /* interface */
+        TYPE_INT, /* flags */
+        MK_ARRAY(TYPE_CHAR, USBDEVFS_MAXDRIVERNAME + 1)) /* driver */
+#endif /* CONFIG_USBFS */

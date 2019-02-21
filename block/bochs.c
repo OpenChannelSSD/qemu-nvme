@@ -22,9 +22,13 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "qemu-common.h"
 #include "block/block_int.h"
 #include "qemu/module.h"
+#include "qemu/bswap.h"
+#include "qemu/error-report.h"
 
 /**************************************************************/
 
@@ -81,14 +85,14 @@ static int bochs_probe(const uint8_t *buf, int buf_size, const char *filename)
     const struct bochs_header *bochs = (const void *)buf;
 
     if (buf_size < HEADER_SIZE)
-	return 0;
+        return 0;
 
     if (!strcmp(bochs->magic, HEADER_MAGIC) &&
-	!strcmp(bochs->type, REDOLOG_TYPE) &&
-	!strcmp(bochs->subtype, GROWING_TYPE) &&
-	((le32_to_cpu(bochs->version) == HEADER_VERSION) ||
-	(le32_to_cpu(bochs->version) == HEADER_V1)))
-	return 100;
+        !strcmp(bochs->type, REDOLOG_TYPE) &&
+        !strcmp(bochs->subtype, GROWING_TYPE) &&
+        ((le32_to_cpu(bochs->version) == HEADER_VERSION) ||
+        (le32_to_cpu(bochs->version) == HEADER_V1)))
+        return 100;
 
     return 0;
 }
@@ -101,7 +105,17 @@ static int bochs_open(BlockDriverState *bs, QDict *options, int flags,
     struct bochs_header bochs;
     int ret;
 
-    bs->read_only = 1; // no write support yet
+    /* No write support yet */
+    ret = bdrv_apply_auto_read_only(bs, NULL, errp);
+    if (ret < 0) {
+        return ret;
+    }
+
+    bs->file = bdrv_open_child(NULL, options, "file", bs, &child_file,
+                               false, errp);
+    if (!bs->file) {
+        return -EINVAL;
+    }
 
     ret = bdrv_pread(bs->file, 0, &bochs, sizeof(bochs));
     if (ret < 0) {
@@ -111,8 +125,8 @@ static int bochs_open(BlockDriverState *bs, QDict *options, int flags,
     if (strcmp(bochs.magic, HEADER_MAGIC) ||
         strcmp(bochs.type, REDOLOG_TYPE) ||
         strcmp(bochs.subtype, GROWING_TYPE) ||
-	((le32_to_cpu(bochs.version) != HEADER_VERSION) &&
-	(le32_to_cpu(bochs.version) != HEADER_V1))) {
+        ((le32_to_cpu(bochs.version) != HEADER_VERSION) &&
+        (le32_to_cpu(bochs.version) != HEADER_V1))) {
         error_setg(errp, "Image not in Bochs format");
         return -EINVAL;
     }
@@ -144,7 +158,7 @@ static int bochs_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     for (i = 0; i < s->catalog_size; i++)
-	le32_to_cpus(&s->catalog_bitmap[i]);
+        le32_to_cpus(&s->catalog_bitmap[i]);
 
     s->data_offset = le32_to_cpu(bochs.header) + (s->catalog_size * 4);
 
@@ -185,6 +199,11 @@ fail:
     return ret;
 }
 
+static void bochs_refresh_limits(BlockDriverState *bs, Error **errp)
+{
+    bs->bl.request_alignment = BDRV_SECTOR_SIZE; /* No sub-sector I/O */
+}
+
 static int64_t seek_to_sector(BlockDriverState *bs, int64_t sector_num)
 {
     BDRVBochsState *s = bs->opaque;
@@ -198,7 +217,7 @@ static int64_t seek_to_sector(BlockDriverState *bs, int64_t sector_num)
     extent_offset = (offset % s->extent_size) / 512;
 
     if (s->catalog_bitmap[extent_index] == 0xffffffff) {
-	return 0; /* not allocated */
+        return 0; /* not allocated */
     }
 
     bitmap_offset = s->data_offset +
@@ -213,44 +232,58 @@ static int64_t seek_to_sector(BlockDriverState *bs, int64_t sector_num)
     }
 
     if (!((bitmap_entry >> (extent_offset % 8)) & 1)) {
-	return 0; /* not allocated */
+        return 0; /* not allocated */
     }
 
     return bitmap_offset + (512 * (s->bitmap_blocks + extent_offset));
 }
 
-static int bochs_read(BlockDriverState *bs, int64_t sector_num,
-                    uint8_t *buf, int nb_sectors)
+static int coroutine_fn
+bochs_co_preadv(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
+                QEMUIOVector *qiov, int flags)
 {
+    BDRVBochsState *s = bs->opaque;
+    uint64_t sector_num = offset >> BDRV_SECTOR_BITS;
+    int nb_sectors = bytes >> BDRV_SECTOR_BITS;
+    uint64_t bytes_done = 0;
+    QEMUIOVector local_qiov;
     int ret;
+
+    assert((offset & (BDRV_SECTOR_SIZE - 1)) == 0);
+    assert((bytes & (BDRV_SECTOR_SIZE - 1)) == 0);
+
+    qemu_iovec_init(&local_qiov, qiov->niov);
+    qemu_co_mutex_lock(&s->lock);
 
     while (nb_sectors > 0) {
         int64_t block_offset = seek_to_sector(bs, sector_num);
         if (block_offset < 0) {
-            return block_offset;
-        } else if (block_offset > 0) {
-            ret = bdrv_pread(bs->file, block_offset, buf, 512);
+            ret = block_offset;
+            goto fail;
+        }
+
+        qemu_iovec_reset(&local_qiov);
+        qemu_iovec_concat(&local_qiov, qiov, bytes_done, 512);
+
+        if (block_offset > 0) {
+            ret = bdrv_co_preadv(bs->file, block_offset, 512,
+                                 &local_qiov, 0);
             if (ret < 0) {
-                return ret;
+                goto fail;
             }
         } else {
-            memset(buf, 0, 512);
+            qemu_iovec_memset(&local_qiov, 0, 0, 512);
         }
         nb_sectors--;
         sector_num++;
-        buf += 512;
+        bytes_done += 512;
     }
-    return 0;
-}
 
-static coroutine_fn int bochs_co_read(BlockDriverState *bs, int64_t sector_num,
-                                      uint8_t *buf, int nb_sectors)
-{
-    int ret;
-    BDRVBochsState *s = bs->opaque;
-    qemu_co_mutex_lock(&s->lock);
-    ret = bochs_read(bs, sector_num, buf, nb_sectors);
+    ret = 0;
+fail:
     qemu_co_mutex_unlock(&s->lock);
+    qemu_iovec_destroy(&local_qiov);
+
     return ret;
 }
 
@@ -265,7 +298,9 @@ static BlockDriver bdrv_bochs = {
     .instance_size	= sizeof(BDRVBochsState),
     .bdrv_probe		= bochs_probe,
     .bdrv_open		= bochs_open,
-    .bdrv_read          = bochs_co_read,
+    .bdrv_child_perm     = bdrv_format_default_perms,
+    .bdrv_refresh_limits = bochs_refresh_limits,
+    .bdrv_co_preadv = bochs_co_preadv,
     .bdrv_close		= bochs_close,
 };
 

@@ -38,9 +38,9 @@
  * terms and conditions of the copyright.
  */
 
-#include <slirp.h>
+#include "slirp.h"
 
-static const u_char  tcp_outflags[TCP_NSTATES] = {
+static const uint8_t  tcp_outflags[TCP_NSTATES] = {
 	TH_RST|TH_ACK, 0,      TH_SYN,        TH_SYN|TH_ACK,
 	TH_ACK,        TH_ACK, TH_FIN|TH_ACK, TH_FIN|TH_ACK,
 	TH_FIN|TH_ACK, TH_ACK, TH_ACK,
@@ -60,13 +60,15 @@ tcp_output(struct tcpcb *tp)
 	register long len, win;
 	int off, flags, error;
 	register struct mbuf *m;
-	register struct tcpiphdr *ti;
-	u_char opt[MAX_TCPOPTLEN];
+	register struct tcpiphdr *ti, tcpiph_save;
+	struct ip *ip;
+	struct ip6 *ip6;
+	uint8_t opt[MAX_TCPOPTLEN];
 	unsigned optlen, hdrlen;
 	int idle, sendalot;
 
 	DEBUG_CALL("tcp_output");
-	DEBUG_ARG("tp = %lx", (long )tp);
+	DEBUG_ARG("tp = %p", tp);
 
 	/*
 	 * Determine length of data that should be transmitted,
@@ -85,11 +87,11 @@ tcp_output(struct tcpcb *tp)
 again:
 	sendalot = 0;
 	off = tp->snd_nxt - tp->snd_una;
-	win = min(tp->snd_wnd, tp->snd_cwnd);
+        win = MIN(tp->snd_wnd, tp->snd_cwnd);
 
 	flags = tcp_outflags[tp->t_state];
 
-	DEBUG_MISC((dfd, " --- tcp_output flags = 0x%x\n",flags));
+	DEBUG_MISC(" --- tcp_output flags = 0x%x", flags);
 
 	/*
 	 * If in persist timeout with window of 0, send 1 byte.
@@ -124,7 +126,7 @@ again:
 		}
 	}
 
-	len = min(so->so_snd.sb_cc, win) - off;
+        len = MIN(so->so_snd.sb_cc, win) - off;
 
 	if (len < 0) {
 		/*
@@ -190,7 +192,7 @@ again:
 		 * taking into account that we are limited by
 		 * TCP_MAXWIN << tp->rcv_scale.
 		 */
-		long adv = min(win, (long)TCP_MAXWIN << tp->rcv_scale) -
+                long adv = MIN(win, (long)TCP_MAXWIN << tp->rcv_scale) -
 			(tp->rcv_adv - tp->rcv_nxt);
 
 		if (adv >= (long) (2 * tp->t_maxseg))
@@ -269,12 +271,12 @@ send:
 			opt[0] = TCPOPT_MAXSEG;
 			opt[1] = 4;
 			mss = htons((uint16_t) tcp_mss(tp, 0));
-			memcpy((caddr_t)(opt + 2), (caddr_t)&mss, sizeof(mss));
+			memcpy((char *)(opt + 2), (char *)&mss, sizeof(mss));
 			optlen = 4;
 		}
- 	}
+	}
 
- 	hdrlen += optlen;
+	hdrlen += optlen;
 
 	/*
 	 * Adjust data length if insertion of options will
@@ -299,7 +301,7 @@ send:
 		m->m_data += IF_MAXLINKHDR;
 		m->m_len = hdrlen;
 
-		sbcopy(&so->so_snd, off, (int) len, mtod(m, caddr_t) + hdrlen);
+		sbcopy(&so->so_snd, off, (int) len, mtod(m, char *) + hdrlen);
 		m->m_len += len;
 
 		/*
@@ -322,7 +324,7 @@ send:
 
 	ti = mtod(m, struct tcpiphdr *);
 
-	memcpy((caddr_t)ti, &tp->t_template, sizeof (struct tcpiphdr));
+	memcpy((char *)ti, &tp->t_template, sizeof (struct tcpiphdr));
 
 	/*
 	 * Fill in fields, remembering maximum advertised
@@ -351,7 +353,7 @@ send:
 		ti->ti_seq = htonl(tp->snd_max);
 	ti->ti_ack = htonl(tp->rcv_nxt);
 	if (optlen) {
-		memcpy((caddr_t)(ti + 1), (caddr_t)opt, optlen);
+		memcpy((char *)(ti + 1), (char *)opt, optlen);
 		ti->ti_off = (sizeof (struct tcphdr) + optlen) >> 2;
 	}
 	ti->ti_flags = flags;
@@ -446,16 +448,45 @@ send:
 	 * the template, but need a way to checksum without them.
 	 */
 	m->m_len = hdrlen + len; /* XXX Needed? m_len should be correct */
+	tcpiph_save = *mtod(m, struct tcpiphdr *);
 
-    {
+	switch (so->so_ffamily) {
+	case AF_INET:
+	    m->m_data += sizeof(struct tcpiphdr) - sizeof(struct tcphdr)
+	                                         - sizeof(struct ip);
+	    m->m_len  -= sizeof(struct tcpiphdr) - sizeof(struct tcphdr)
+	                                         - sizeof(struct ip);
+	    ip = mtod(m, struct ip *);
 
-	((struct ip *)ti)->ip_len = m->m_len;
+	    ip->ip_len = m->m_len;
+	    ip->ip_dst = tcpiph_save.ti_dst;
+	    ip->ip_src = tcpiph_save.ti_src;
+	    ip->ip_p = tcpiph_save.ti_pr;
 
-	((struct ip *)ti)->ip_ttl = IPDEFTTL;
-	((struct ip *)ti)->ip_tos = so->so_iptos;
+	    ip->ip_ttl = IPDEFTTL;
+	    ip->ip_tos = so->so_iptos;
+	    error = ip_output(so, m);
+	    break;
 
-	error = ip_output(so, m);
-    }
+	case AF_INET6:
+	    m->m_data += sizeof(struct tcpiphdr) - sizeof(struct tcphdr)
+	                                         - sizeof(struct ip6);
+	    m->m_len  -= sizeof(struct tcpiphdr) - sizeof(struct tcphdr)
+	                                         - sizeof(struct ip6);
+	    ip6 = mtod(m, struct ip6 *);
+
+	    ip6->ip_pl = tcpiph_save.ti_len;
+	    ip6->ip_dst = tcpiph_save.ti_dst6;
+	    ip6->ip_src = tcpiph_save.ti_src6;
+	    ip6->ip_nh = tcpiph_save.ti_nh6;
+
+	    error = ip6_output(so, m, 0);
+	    break;
+
+	default:
+	    g_assert_not_reached();
+	}
+
 	if (error) {
 out:
 		return (error);

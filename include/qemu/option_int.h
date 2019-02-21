@@ -23,8 +23,8 @@
  * THE SOFTWARE.
  */
 
-#ifndef QEMU_OPTIONS_INTERNAL_H
-#define QEMU_OPTIONS_INTERNAL_H
+#ifndef QEMU_OPTION_INT_H
+#define QEMU_OPTION_INT_H
 
 #include "qemu/option.h"
 #include "qemu/error-report.h"
@@ -47,7 +47,7 @@ struct QemuOpts {
     char *id;
     QemuOptsList *list;
     Location loc;
-    QTAILQ_HEAD(QemuOptHead, QemuOpt) head;
+    QTAILQ_HEAD(, QemuOpt) head;
     QTAILQ_ENTRY(QemuOpts) next;
 };
 

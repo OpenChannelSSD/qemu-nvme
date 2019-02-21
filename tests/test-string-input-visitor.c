@@ -4,31 +4,29 @@
  * Copyright (C) 2012 Red Hat Inc.
  *
  * Authors:
- *  Paolo Bonzini <pbonzini@redhat.com> (based on test-qmp-input-visitor)
+ *  Paolo Bonzini <pbonzini@redhat.com> (based on test-qobject-input-visitor)
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
  */
 
-#include <glib.h>
-#include <stdarg.h>
+#include "qemu/osdep.h"
 
 #include "qemu-common.h"
+#include "qapi/error.h"
 #include "qapi/string-input-visitor.h"
-#include "test-qapi-types.h"
 #include "test-qapi-visit.h"
-#include "qapi/qmp/types.h"
 
 typedef struct TestInputVisitorData {
-    StringInputVisitor *siv;
+    Visitor *v;
 } TestInputVisitorData;
 
 static void visitor_input_teardown(TestInputVisitorData *data,
                                    const void *unused)
 {
-    if (data->siv) {
-        string_input_visitor_cleanup(data->siv);
-        data->siv = NULL;
+    if (data->v) {
+        visit_free(data->v);
+        data->v = NULL;
     }
 }
 
@@ -39,15 +37,11 @@ static
 Visitor *visitor_input_test_init(TestInputVisitorData *data,
                                  const char *string)
 {
-    Visitor *v;
+    visitor_input_teardown(data, NULL);
 
-    data->siv = string_input_visitor_new(string);
-    g_assert(data->siv != NULL);
-
-    v = string_input_get_visitor(data->siv);
-    g_assert(v != NULL);
-
-    return v;
+    data->v = string_input_visitor_new(string);
+    g_assert(data->v);
+    return data->v;
 }
 
 static void test_visitor_in_int(TestInputVisitorData *data,
@@ -59,36 +53,275 @@ static void test_visitor_in_int(TestInputVisitorData *data,
 
     v = visitor_input_test_init(data, "-42");
 
-    visit_type_int(v, &res, NULL, &err);
+    visit_type_int(v, NULL, &res, &err);
     g_assert(!err);
     g_assert_cmpint(res, ==, value);
+
+    v = visitor_input_test_init(data, "not an int");
+
+    visit_type_int(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+
+    v = visitor_input_test_init(data, "");
+
+    visit_type_int(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+}
+
+static void check_ilist(Visitor *v, int64_t *expected, size_t n)
+{
+    int64List *res = NULL;
+    int64List *tail;
+    int i;
+
+    visit_type_int64List(v, NULL, &res, &error_abort);
+    tail = res;
+    for (i = 0; i < n; i++) {
+        g_assert(tail);
+        g_assert_cmpint(tail->value, ==, expected[i]);
+        tail = tail->next;
+    }
+    g_assert(!tail);
+
+    qapi_free_int64List(res);
+}
+
+static void check_ulist(Visitor *v, uint64_t *expected, size_t n)
+{
+    uint64List *res = NULL;
+    uint64List *tail;
+    int i;
+
+    visit_type_uint64List(v, NULL, &res, &error_abort);
+    tail = res;
+    for (i = 0; i < n; i++) {
+        g_assert(tail);
+        g_assert_cmpuint(tail->value, ==, expected[i]);
+        tail = tail->next;
+    }
+    g_assert(!tail);
+
+    qapi_free_uint64List(res);
 }
 
 static void test_visitor_in_intList(TestInputVisitorData *data,
                                     const void *unused)
 {
-    int64_t value[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 20};
-    int16List *res = NULL, *tmp;
+    int64_t expect1[] = { 1, 2, 0, 2, 3, 4, 20, 5, 6, 7,
+                          8, 9, 1, 2, 3, 4, 5, 6, 7, 8 };
+    int64_t expect2[] = { 32767, -32768, -32767 };
+    int64_t expect3[] = { INT64_MIN, INT64_MAX };
+    int64_t expect4[] = { 1 };
+    int64_t expect5[] = { INT64_MAX - 2,  INT64_MAX - 1, INT64_MAX };
+    Error *err = NULL;
+    int64List *res = NULL;
     Visitor *v;
-    int i = 0;
+    int64_t val;
+
+    /* Valid lists */
 
     v = visitor_input_test_init(data, "1,2,0,2-4,20,5-9,1-8");
+    check_ilist(v, expect1, ARRAY_SIZE(expect1));
 
-    visit_type_int16List(v, &res, NULL, &error_abort);
-    tmp = res;
-    while (i < sizeof(value) / sizeof(value[0])) {
-        g_assert(tmp);
-        g_assert_cmpint(tmp->value, ==, value[i++]);
-        tmp = tmp->next;
-    }
-    g_assert(!tmp);
+    v = visitor_input_test_init(data, "32767,-32768--32767");
+    check_ilist(v, expect2, ARRAY_SIZE(expect2));
 
-    tmp = res;
-    while (tmp) {
-        res = res->next;
-        g_free(tmp);
-        tmp = res;
-    }
+    v = visitor_input_test_init(data,
+                                "-9223372036854775808,9223372036854775807");
+    check_ilist(v, expect3, ARRAY_SIZE(expect3));
+
+    v = visitor_input_test_init(data, "1-1");
+    check_ilist(v, expect4, ARRAY_SIZE(expect4));
+
+    v = visitor_input_test_init(data,
+                                "9223372036854775805-9223372036854775807");
+    check_ilist(v, expect5, ARRAY_SIZE(expect5));
+
+    /* Value too large */
+
+    v = visitor_input_test_init(data, "9223372036854775808");
+    visit_type_int64List(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+    g_assert(!res);
+
+    /* Value too small */
+
+    v = visitor_input_test_init(data, "-9223372036854775809");
+    visit_type_int64List(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+    g_assert(!res);
+
+    /* Range not ascending */
+
+    v = visitor_input_test_init(data, "3-1");
+    visit_type_int64List(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+    g_assert(!res);
+
+    v = visitor_input_test_init(data, "9223372036854775807-0");
+    visit_type_int64List(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+    g_assert(!res);
+
+    /* Range too big (65536 is the limit against DOS attacks) */
+
+    v = visitor_input_test_init(data, "0-65536");
+    visit_type_int64List(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+    g_assert(!res);
+
+    /* Empty list */
+
+    v = visitor_input_test_init(data, "");
+    visit_type_int64List(v, NULL, &res, &error_abort);
+    g_assert(!res);
+
+    /* Not a list */
+
+    v = visitor_input_test_init(data, "not an int list");
+
+    visit_type_int64List(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+    g_assert(!res);
+
+    /* Unvisited list tail */
+
+    v = visitor_input_test_init(data, "0,2-3");
+
+    visit_start_list(v, NULL, NULL, 0, &error_abort);
+    visit_type_int64(v, NULL, &val, &error_abort);
+    g_assert_cmpint(val, ==, 0);
+    visit_type_int64(v, NULL, &val, &error_abort);
+    g_assert_cmpint(val, ==, 2);
+
+    visit_check_list(v, &err);
+    error_free_or_abort(&err);
+    visit_end_list(v, NULL);
+
+    /* Visit beyond end of list */
+
+    v = visitor_input_test_init(data, "0");
+
+    visit_start_list(v, NULL, NULL, 0, &error_abort);
+    visit_type_int64(v, NULL, &val, &err);
+    g_assert_cmpint(val, ==, 0);
+    visit_type_int64(v, NULL, &val, &err);
+    error_free_or_abort(&err);
+
+    visit_check_list(v, &error_abort);
+    visit_end_list(v, NULL);
+}
+
+static void test_visitor_in_uintList(TestInputVisitorData *data,
+                                     const void *unused)
+{
+    uint64_t expect1[] = { 1, 2, 0, 2, 3, 4, 20, 5, 6, 7,
+                           8, 9, 1, 2, 3, 4, 5, 6, 7, 8 };
+    uint64_t expect2[] = { 32767, -32768, -32767 };
+    uint64_t expect3[] = { INT64_MIN, INT64_MAX };
+    uint64_t expect4[] = { 1 };
+    uint64_t expect5[] = { UINT64_MAX };
+    uint64_t expect6[] = { UINT64_MAX - 2,  UINT64_MAX - 1, UINT64_MAX };
+    Error *err = NULL;
+    uint64List *res = NULL;
+    Visitor *v;
+    uint64_t val;
+
+    /* Valid lists */
+
+    v = visitor_input_test_init(data, "1,2,0,2-4,20,5-9,1-8");
+    check_ulist(v, expect1, ARRAY_SIZE(expect1));
+
+    v = visitor_input_test_init(data, "32767,-32768--32767");
+    check_ulist(v, expect2, ARRAY_SIZE(expect2));
+
+    v = visitor_input_test_init(data,
+                                "-9223372036854775808,9223372036854775807");
+    check_ulist(v, expect3, ARRAY_SIZE(expect3));
+
+    v = visitor_input_test_init(data, "1-1");
+    check_ulist(v, expect4, ARRAY_SIZE(expect4));
+
+    v = visitor_input_test_init(data, "18446744073709551615");
+    check_ulist(v, expect5, ARRAY_SIZE(expect5));
+
+    v = visitor_input_test_init(data,
+                                "18446744073709551613-18446744073709551615");
+    check_ulist(v, expect6, ARRAY_SIZE(expect6));
+
+    /* Value too large */
+
+    v = visitor_input_test_init(data, "18446744073709551616");
+    visit_type_uint64List(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+    g_assert(!res);
+
+    /* Value too small */
+
+    v = visitor_input_test_init(data, "-18446744073709551616");
+    visit_type_uint64List(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+    g_assert(!res);
+
+    /* Range not ascending */
+
+    v = visitor_input_test_init(data, "3-1");
+    visit_type_uint64List(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+    g_assert(!res);
+
+    v = visitor_input_test_init(data, "18446744073709551615-0");
+    visit_type_uint64List(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+    g_assert(!res);
+
+    /* Range too big (65536 is the limit against DOS attacks) */
+
+    v = visitor_input_test_init(data, "0-65536");
+    visit_type_uint64List(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+    g_assert(!res);
+
+    /* Empty list */
+
+    v = visitor_input_test_init(data, "");
+    visit_type_uint64List(v, NULL, &res, &error_abort);
+    g_assert(!res);
+
+    /* Not a list */
+
+    v = visitor_input_test_init(data, "not an uint list");
+
+    visit_type_uint64List(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+    g_assert(!res);
+
+    /* Unvisited list tail */
+
+    v = visitor_input_test_init(data, "0,2-3");
+
+    visit_start_list(v, NULL, NULL, 0, &error_abort);
+    visit_type_uint64(v, NULL, &val, &error_abort);
+    g_assert_cmpuint(val, ==, 0);
+    visit_type_uint64(v, NULL, &val, &error_abort);
+    g_assert_cmpuint(val, ==, 2);
+
+    visit_check_list(v, &err);
+    error_free_or_abort(&err);
+    visit_end_list(v, NULL);
+
+    /* Visit beyond end of list */
+
+    v = visitor_input_test_init(data, "0");
+
+    visit_start_list(v, NULL, NULL, 0, &error_abort);
+    visit_type_uint64(v, NULL, &val, &err);
+    g_assert_cmpuint(val, ==, 0);
+    visit_type_uint64(v, NULL, &val, &err);
+    error_free_or_abort(&err);
+
+    visit_check_list(v, &error_abort);
+    visit_end_list(v, NULL);
 }
 
 static void test_visitor_in_bool(TestInputVisitorData *data,
@@ -100,42 +333,37 @@ static void test_visitor_in_bool(TestInputVisitorData *data,
 
     v = visitor_input_test_init(data, "true");
 
-    visit_type_bool(v, &res, NULL, &err);
+    visit_type_bool(v, NULL, &res, &err);
     g_assert(!err);
     g_assert_cmpint(res, ==, true);
-    visitor_input_teardown(data, unused);
 
     v = visitor_input_test_init(data, "yes");
 
-    visit_type_bool(v, &res, NULL, &err);
+    visit_type_bool(v, NULL, &res, &err);
     g_assert(!err);
     g_assert_cmpint(res, ==, true);
-    visitor_input_teardown(data, unused);
 
     v = visitor_input_test_init(data, "on");
 
-    visit_type_bool(v, &res, NULL, &err);
+    visit_type_bool(v, NULL, &res, &err);
     g_assert(!err);
     g_assert_cmpint(res, ==, true);
-    visitor_input_teardown(data, unused);
 
     v = visitor_input_test_init(data, "false");
 
-    visit_type_bool(v, &res, NULL, &err);
+    visit_type_bool(v, NULL, &res, &err);
     g_assert(!err);
     g_assert_cmpint(res, ==, false);
-    visitor_input_teardown(data, unused);
 
     v = visitor_input_test_init(data, "no");
 
-    visit_type_bool(v, &res, NULL, &err);
+    visit_type_bool(v, NULL, &res, &err);
     g_assert(!err);
     g_assert_cmpint(res, ==, false);
-    visitor_input_teardown(data, unused);
 
     v = visitor_input_test_init(data, "off");
 
-    visit_type_bool(v, &res, NULL, &err);
+    visit_type_bool(v, NULL, &res, &err);
     g_assert(!err);
     g_assert_cmpint(res, ==, false);
 }
@@ -149,9 +377,22 @@ static void test_visitor_in_number(TestInputVisitorData *data,
 
     v = visitor_input_test_init(data, "3.14");
 
-    visit_type_number(v, &res, NULL, &err);
+    visit_type_number(v, NULL, &res, &err);
     g_assert(!err);
     g_assert_cmpfloat(res, ==, value);
+
+    /* NaN and infinity has to be rejected */
+
+    v = visitor_input_test_init(data, "NaN");
+
+    visit_type_number(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+
+    v = visitor_input_test_init(data, "inf");
+
+    visit_type_number(v, NULL, &res, &err);
+    error_free_or_abort(&err);
+
 }
 
 static void test_visitor_in_string(TestInputVisitorData *data,
@@ -163,7 +404,7 @@ static void test_visitor_in_string(TestInputVisitorData *data,
 
     v = visitor_input_test_init(data, value);
 
-    visit_type_str(v, &res, NULL, &err);
+    visit_type_str(v, NULL, &res, &err);
     g_assert(!err);
     g_assert_cmpstr(res, ==, value);
 
@@ -177,19 +418,15 @@ static void test_visitor_in_enum(TestInputVisitorData *data,
     Visitor *v;
     EnumOne i;
 
-    for (i = 0; EnumOne_lookup[i]; i++) {
+    for (i = 0; i < ENUM_ONE__MAX; i++) {
         EnumOne res = -1;
 
-        v = visitor_input_test_init(data, EnumOne_lookup[i]);
+        v = visitor_input_test_init(data, EnumOne_str(i));
 
-        visit_type_EnumOne(v, &res, NULL, &err);
+        visit_type_EnumOne(v, NULL, &res, &err);
         g_assert(!err);
         g_assert_cmpint(i, ==, res);
-
-        visitor_input_teardown(data, NULL);
     }
-
-    data->siv = NULL;
 }
 
 /* Try to crash the visitors */
@@ -220,30 +457,25 @@ static void test_visitor_in_fuzz(TestInputVisitorData *data,
         }
 
         v = visitor_input_test_init(data, buf);
-        visit_type_int(v, &ires, NULL, NULL);
-        visitor_input_teardown(data, NULL);
+        visit_type_int(v, NULL, &ires, NULL);
 
         v = visitor_input_test_init(data, buf);
-        visit_type_intList(v, &ilres, NULL, NULL);
-        visitor_input_teardown(data, NULL);
+        visit_type_intList(v, NULL, &ilres, NULL);
+        qapi_free_intList(ilres);
 
         v = visitor_input_test_init(data, buf);
-        visit_type_bool(v, &bres, NULL, NULL);
-        visitor_input_teardown(data, NULL);
+        visit_type_bool(v, NULL, &bres, NULL);
 
         v = visitor_input_test_init(data, buf);
-        visit_type_number(v, &nres, NULL, NULL);
-        visitor_input_teardown(data, NULL);
+        visit_type_number(v, NULL, &nres, NULL);
 
         v = visitor_input_test_init(data, buf);
         sres = NULL;
-        visit_type_str(v, &sres, NULL, NULL);
+        visit_type_str(v, NULL, &sres, NULL);
         g_free(sres);
-        visitor_input_teardown(data, NULL);
 
         v = visitor_input_test_init(data, buf);
-        visit_type_EnumOne(v, &eres, NULL, NULL);
-        visitor_input_teardown(data, NULL);
+        visit_type_EnumOne(v, NULL, &eres, NULL);
     }
 }
 
@@ -265,6 +497,8 @@ int main(int argc, char **argv)
                            &in_visitor_data, test_visitor_in_int);
     input_visitor_test_add("/string-visitor/input/intList",
                            &in_visitor_data, test_visitor_in_intList);
+    input_visitor_test_add("/string-visitor/input/uintList",
+                           &in_visitor_data, test_visitor_in_uintList);
     input_visitor_test_add("/string-visitor/input/bool",
                            &in_visitor_data, test_visitor_in_bool);
     input_visitor_test_add("/string-visitor/input/number",

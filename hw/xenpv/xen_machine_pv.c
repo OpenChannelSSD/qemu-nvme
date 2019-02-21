@@ -22,47 +22,41 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
+#include "qemu/error-report.h"
 #include "hw/hw.h"
 #include "hw/boards.h"
-#include "hw/xen/xen_backend.h"
-#include "xen_domainbuild.h"
+#include "hw/xen/xen-legacy-backend.h"
+#include "hw/xen/xen-bus.h"
 #include "sysemu/block-backend.h"
 
 static void xen_init_pv(MachineState *machine)
 {
-    const char *kernel_filename = machine->kernel_filename;
-    const char *kernel_cmdline = machine->kernel_cmdline;
-    const char *initrd_filename = machine->initrd_filename;
     DriveInfo *dinfo;
     int i;
 
     /* Initialize backend core & drivers */
     if (xen_be_init() != 0) {
-        fprintf(stderr, "%s: xen backend core setup failed\n", __FUNCTION__);
+        error_report("%s: xen backend core setup failed", __func__);
         exit(1);
     }
 
     switch (xen_mode) {
     case XEN_ATTACH:
-        /* nothing to do, xend handles everything */
-        break;
-    case XEN_CREATE:
-        if (xen_domain_build_pv(kernel_filename, initrd_filename,
-                                kernel_cmdline) < 0) {
-            fprintf(stderr, "xen pv domain creation failed\n");
-            exit(1);
-        }
+        /* nothing to do, libxl handles everything */
         break;
     case XEN_EMULATE:
-        fprintf(stderr, "xen emulation not implemented (yet)\n");
+        error_report("xen emulation not implemented (yet)");
+        exit(1);
+        break;
+    default:
+        error_report("unhandled xen_mode %d", xen_mode);
         exit(1);
         break;
     }
 
-    xen_be_register("console", &xen_console_ops);
-    xen_be_register("vkbd", &xen_kbdmouse_ops);
+    xen_be_register_common();
     xen_be_register("vfb", &xen_framebuffer_ops);
-    xen_be_register("qdisk", &xen_blkdev_ops);
     xen_be_register("qnic", &xen_netdev_ops);
 
     /* configure framebuffer */
@@ -86,24 +80,18 @@ static void xen_init_pv(MachineState *machine)
         xen_config_dev_nic(nd_table + i);
     }
 
+    xen_bus_init();
+
     /* config cleanup hook */
     atexit(xen_config_cleanup);
-
-    /* setup framebuffer */
-    xen_init_display(xen_domid);
 }
 
-static QEMUMachine xenpv_machine = {
-    .name = "xenpv",
-    .desc = "Xen Para-virtualized PC",
-    .init = xen_init_pv,
-    .max_cpus = 1,
-    .default_machine_opts = "accel=xen",
-};
-
-static void xenpv_machine_init(void)
+static void xenpv_machine_init(MachineClass *mc)
 {
-    qemu_register_machine(&xenpv_machine);
+    mc->desc = "Xen Para-virtualized PC";
+    mc->init = xen_init_pv;
+    mc->max_cpus = 1;
+    mc->default_machine_opts = "accel=xen";
 }
 
-machine_init(xenpv_machine_init);
+DEFINE_MACHINE("xenpv", xenpv_machine_init)

@@ -18,16 +18,17 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "qemu-common.h"
 #include "hw/hw.h"
 #include "hw/block/flash.h"
 #include "hw/irq.h"
 #include "sysemu/block-backend.h"
-#include "sysemu/blockdev.h"
 #include "exec/memory.h"
-#include "exec/address-spaces.h"
 #include "hw/sysbus.h"
 #include "qemu/error-report.h"
+#include "qemu/log.h"
 
 /* 11 for 2kB-page OneNAND ("2nd generation") and 10 for 1kB-page chips */
 #define PAGE_SHIFT	11
@@ -135,7 +136,7 @@ static void onenand_intr_update(OneNANDState *s)
     qemu_set_irq(s->intr, ((s->intstatus >> 15) ^ (~s->config[0] >> 6)) & 1);
 }
 
-static void onenand_pre_save(void *opaque)
+static int onenand_pre_save(void *opaque)
 {
     OneNANDState *s = opaque;
     if (s->current == s->otp) {
@@ -145,6 +146,8 @@ static void onenand_pre_save(void *opaque)
     } else {
         s->current_direction = 0;
     }
+
+    return 0;
 }
 
 static int onenand_post_load(void *opaque, int version_id)
@@ -222,7 +225,8 @@ static void onenand_reset(OneNANDState *s, int cold)
         /* Lock the whole flash */
         memset(s->blockwp, ONEN_LOCK_LOCKED, s->blocks);
 
-        if (s->blk_cur && blk_read(s->blk_cur, 0, s->boot[0], 8) < 0) {
+        if (s->blk_cur && blk_pread(s->blk_cur, 0, s->boot[0],
+                                    8 << BDRV_SECTOR_BITS) < 0) {
             hw_error("%s: Loading the BootRAM failed.\n", __func__);
         }
     }
@@ -238,8 +242,11 @@ static void onenand_system_reset(DeviceState *dev)
 static inline int onenand_load_main(OneNANDState *s, int sec, int secn,
                 void *dest)
 {
+    assert(UINT32_MAX >> BDRV_SECTOR_BITS > sec);
+    assert(UINT32_MAX >> BDRV_SECTOR_BITS > secn);
     if (s->blk_cur) {
-        return blk_read(s->blk_cur, sec, dest, secn) < 0;
+        return blk_pread(s->blk_cur, sec << BDRV_SECTOR_BITS, dest,
+                         secn << BDRV_SECTOR_BITS) < 0;
     } else if (sec + secn > s->secs_cur) {
         return 1;
     }
@@ -255,19 +262,22 @@ static inline int onenand_prog_main(OneNANDState *s, int sec, int secn,
     int result = 0;
 
     if (secn > 0) {
-        uint32_t size = (uint32_t)secn * 512;
+        uint32_t size = secn << BDRV_SECTOR_BITS;
+        uint32_t offset = sec << BDRV_SECTOR_BITS;
+        assert(UINT32_MAX >> BDRV_SECTOR_BITS > sec);
+        assert(UINT32_MAX >> BDRV_SECTOR_BITS > secn);
         const uint8_t *sp = (const uint8_t *)src;
         uint8_t *dp = 0;
         if (s->blk_cur) {
             dp = g_malloc(size);
-            if (!dp || blk_read(s->blk_cur, sec, dp, secn) < 0) {
+            if (!dp || blk_pread(s->blk_cur, offset, dp, size) < 0) {
                 result = 1;
             }
         } else {
             if (sec + secn > s->secs_cur) {
                 result = 1;
             } else {
-                dp = (uint8_t *)s->current + (sec << 9);
+                dp = (uint8_t *)s->current + offset;
             }
         }
         if (!result) {
@@ -276,7 +286,7 @@ static inline int onenand_prog_main(OneNANDState *s, int sec, int secn,
                 dp[i] &= sp[i];
             }
             if (s->blk_cur) {
-                result = blk_write(s->blk_cur, sec, dp, secn) < 0;
+                result = blk_pwrite(s->blk_cur, offset, dp, size, 0) < 0;
             }
         }
         if (dp && s->blk_cur) {
@@ -293,7 +303,8 @@ static inline int onenand_load_spare(OneNANDState *s, int sec, int secn,
     uint8_t buf[512];
 
     if (s->blk_cur) {
-        if (blk_read(s->blk_cur, s->secs_cur + (sec >> 5), buf, 1) < 0) {
+        uint32_t offset = (s->secs_cur + (sec >> 5)) << BDRV_SECTOR_BITS;
+        if (blk_pread(s->blk_cur, offset, buf, BDRV_SECTOR_SIZE) < 0) {
             return 1;
         }
         memcpy(dest, buf + ((sec & 31) << 4), secn << 4);
@@ -302,7 +313,7 @@ static inline int onenand_load_spare(OneNANDState *s, int sec, int secn,
     } else {
         memcpy(dest, s->current + (s->secs_cur << 9) + (sec << 4), secn << 4);
     }
- 
+
     return 0;
 }
 
@@ -313,10 +324,12 @@ static inline int onenand_prog_spare(OneNANDState *s, int sec, int secn,
     if (secn > 0) {
         const uint8_t *sp = (const uint8_t *)src;
         uint8_t *dp = 0, *dpp = 0;
+        uint32_t offset = (s->secs_cur + (sec >> 5)) << BDRV_SECTOR_BITS;
+        assert(UINT32_MAX >> BDRV_SECTOR_BITS > s->secs_cur + (sec >> 5));
         if (s->blk_cur) {
             dp = g_malloc(512);
             if (!dp
-                || blk_read(s->blk_cur, s->secs_cur + (sec >> 5), dp, 1) < 0) {
+                || blk_pread(s->blk_cur, offset, dp, BDRV_SECTOR_SIZE) < 0) {
                 result = 1;
             } else {
                 dpp = dp + ((sec & 31) << 4);
@@ -334,8 +347,8 @@ static inline int onenand_prog_spare(OneNANDState *s, int sec, int secn,
                 dpp[i] &= sp[i];
             }
             if (s->blk_cur) {
-                result = blk_write(s->blk_cur, s->secs_cur + (sec >> 5),
-                                   dp, 1) < 0;
+                result = blk_pwrite(s->blk_cur, offset, dp,
+                                    BDRV_SECTOR_SIZE, 0) < 0;
             }
         }
         g_free(dp);
@@ -346,27 +359,24 @@ static inline int onenand_prog_spare(OneNANDState *s, int sec, int secn,
 static inline int onenand_erase(OneNANDState *s, int sec, int num)
 {
     uint8_t *blankbuf, *tmpbuf;
+
     blankbuf = g_malloc(512);
-    if (!blankbuf) {
-        return 1;
-    }
     tmpbuf = g_malloc(512);
-    if (!tmpbuf) {
-        g_free(blankbuf);
-        return 1;
-    }
     memset(blankbuf, 0xff, 512);
     for (; num > 0; num--, sec++) {
         if (s->blk_cur) {
             int erasesec = s->secs_cur + (sec >> 5);
-            if (blk_write(s->blk_cur, sec, blankbuf, 1) < 0) {
+            if (blk_pwrite(s->blk_cur, sec << BDRV_SECTOR_BITS, blankbuf,
+                           BDRV_SECTOR_SIZE, 0) < 0) {
                 goto fail;
             }
-            if (blk_read(s->blk_cur, erasesec, tmpbuf, 1) < 0) {
+            if (blk_pread(s->blk_cur, erasesec << BDRV_SECTOR_BITS, tmpbuf,
+                          BDRV_SECTOR_SIZE) < 0) {
                 goto fail;
             }
             memcpy(tmpbuf + ((sec & 31) << 4), blankbuf, 1 << 4);
-            if (blk_write(s->blk_cur, erasesec, tmpbuf, 1) < 0) {
+            if (blk_pwrite(s->blk_cur, erasesec << BDRV_SECTOR_BITS, tmpbuf,
+                           BDRV_SECTOR_SIZE, 0) < 0) {
                 goto fail;
             }
         } else {
@@ -509,10 +519,6 @@ static void onenand_command(OneNANDState *s)
         s->intstatus |= ONEN_INT;
 
         for (b = 0; b < s->blocks; b ++) {
-            if (b >= s->blocks) {
-                s->status |= ONEN_ERR_CMD;
-                break;
-            }
             if (s->blockwp[b] == ONEN_LOCK_LOCKTIGHTEN)
                 break;
 
@@ -589,8 +595,8 @@ static void onenand_command(OneNANDState *s)
     default:
         s->status |= ONEN_ERR_CMD;
         s->intstatus |= ONEN_INT;
-        fprintf(stderr, "%s: unknown OneNAND command %x\n",
-                        __func__, s->command);
+        qemu_log_mask(LOG_GUEST_ERROR, "unknown OneNAND command %x\n",
+                      s->command);
     }
 
     onenand_intr_update(s);
@@ -603,7 +609,7 @@ static uint64_t onenand_read(void *opaque, hwaddr addr,
     int offset = addr >> s->shift;
 
     switch (offset) {
-    case 0x0000 ... 0xc000:
+    case 0x0000 ... 0xbffe:
         return lduw_le_p(s->boot[0] + addr);
 
     case 0xf000:	/* Manufacturer ID */
@@ -652,12 +658,13 @@ static uint64_t onenand_read(void *opaque, hwaddr addr,
     case 0xff02:	/* ECC Result of spare area data */
     case 0xff03:	/* ECC Result of main area data */
     case 0xff04:	/* ECC Result of spare area data */
-        hw_error("%s: imeplement ECC\n", __FUNCTION__);
+        qemu_log_mask(LOG_UNIMP,
+                      "onenand: ECC result registers unimplemented\n");
         return 0x0000;
     }
 
-    fprintf(stderr, "%s: unknown OneNAND register %x\n",
-                    __FUNCTION__, offset);
+    qemu_log_mask(LOG_GUEST_ERROR, "read of unknown OneNAND register 0x%x\n",
+                  offset);
     return 0;
 }
 
@@ -701,8 +708,9 @@ static void onenand_write(void *opaque, hwaddr addr,
             break;
 
         default:
-            fprintf(stderr, "%s: unknown OneNAND boot command %"PRIx64"\n",
-                            __FUNCTION__, value);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "unknown OneNAND boot command %" PRIx64 "\n",
+                          value);
         }
         break;
 
@@ -752,8 +760,9 @@ static void onenand_write(void *opaque, hwaddr addr,
         break;
 
     default:
-        fprintf(stderr, "%s: unknown OneNAND register %x\n",
-                        __FUNCTION__, offset);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "write to unknown OneNAND register 0x%x\n",
+                      offset);
     }
 }
 
@@ -763,12 +772,13 @@ static const MemoryRegionOps onenand_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
-static int onenand_initfn(SysBusDevice *sbd)
+static void onenand_realize(DeviceState *dev, Error **errp)
 {
-    DeviceState *dev = DEVICE(sbd);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     OneNANDState *s = ONE_NAND(dev);
     uint32_t size = 1 << (24 + ((s->id.dev >> 4) & 7));
     void *ram;
+    Error *local_err = NULL;
 
     s->base = (hwaddr)-1;
     s->rdy = NULL;
@@ -784,15 +794,21 @@ static int onenand_initfn(SysBusDevice *sbd)
                           0xff, size + (size >> 5));
     } else {
         if (blk_is_read_only(s->blk)) {
-            error_report("Can't use a read-only drive");
-            return -1;
+            error_setg(errp, "Can't use a read-only drive");
+            return;
+        }
+        blk_set_perm(s->blk, BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE,
+                     BLK_PERM_ALL, &local_err);
+        if (local_err) {
+            error_propagate(errp, local_err);
+            return;
         }
         s->blk_cur = s->blk;
     }
     s->otp = memset(g_malloc((64 + 2) << PAGE_SHIFT),
                     0xff, (64 + 2) << PAGE_SHIFT);
-    memory_region_init_ram(&s->ram, OBJECT(s), "onenand.ram",
-                           0xc000 << s->shift, &error_abort);
+    memory_region_init_ram_nomigrate(&s->ram, OBJECT(s), "onenand.ram",
+                           0xc000 << s->shift, &error_fatal);
     vmstate_register_ram_global(&s->ram);
     ram = memory_region_get_ram_ptr(&s->ram);
     s->boot[0] = ram + (0x0000 << s->shift);
@@ -810,7 +826,6 @@ static int onenand_initfn(SysBusDevice *sbd)
                      | ((s->id.dev & 0xff) << 8)
                      | (s->id.ver & 0xff),
                      &vmstate_onenand, s);
-    return 0;
 }
 
 static Property onenand_properties[] = {
@@ -825,9 +840,8 @@ static Property onenand_properties[] = {
 static void onenand_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
-    k->init = onenand_initfn;
+    dc->realize = onenand_realize;
     dc->reset = onenand_system_reset;
     dc->props = onenand_properties;
 }

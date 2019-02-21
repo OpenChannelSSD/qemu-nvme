@@ -10,11 +10,10 @@
  * See the COPYING file in the top-level directory.
  */
 
-#ifndef VSS_WIN32_H
-#define VSS_WIN32_H
+#ifndef VSS_COMMON_H
+#define VSS_COMMON_H
 
 #define __MIDL_user_allocate_free_DEFINED__
-#include "config-host.h"
 #include <windows.h>
 #include <shlwapi.h>
 
@@ -51,21 +50,12 @@
  * VSS headers must be installed from Microsoft VSS SDK 7.2 available at:
  * http://www.microsoft.com/en-us/download/details.aspx?id=23490
  */
-#include "inc/win2003/vss.h"
+#include <inc/win2003/vss.h>
+#include "vss-handles.h"
 
 /* Macros to convert char definitions to wchar */
 #define _L(a) L##a
 #define L(a) _L(a)
-
-/* Constants for QGA VSS Provider */
-
-#define QGA_PROVIDER_NAME "QEMU Guest Agent VSS Provider"
-#define QGA_PROVIDER_LNAME L(QGA_PROVIDER_NAME)
-#define QGA_PROVIDER_VERSION L(QEMU_VERSION)
-
-#define EVENT_NAME_FROZEN  "Global\\QGAVSSEvent-frozen"
-#define EVENT_NAME_THAW    "Global\\QGAVSSEvent-thaw"
-#define EVENT_NAME_TIMEOUT "Global\\QGAVSSEvent-timeout"
 
 const GUID g_gProviderId = { 0x3629d4ed, 0xee09, 0x4e0e,
     {0x9a, 0x5c, 0x6d, 0x8b, 0xa2, 0x87, 0x2a, 0xef} };

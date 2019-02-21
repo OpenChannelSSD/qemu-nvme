@@ -21,7 +21,13 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#include <slirp.h>
+#include "slirp.h"
+
+#if defined(_WIN32)
+/* Windows ntohl() returns an u_long value.
+ * Add a type cast to match the format strings. */
+# define ntohl(n) ((uint32_t)ntohl(n))
+#endif
 
 /* XXX: only DHCP is supported */
 
@@ -29,12 +35,7 @@
 
 static const uint8_t rfc1533_cookie[] = { RFC1533_COOKIE };
 
-#ifdef DEBUG
-#define DPRINTF(fmt, ...) \
-do if (slirp_debug & DBG_CALL) { fprintf(dfd, fmt, ##  __VA_ARGS__); fflush(dfd); } while (0)
-#else
-#define DPRINTF(fmt, ...) do{}while(0)
-#endif
+#define DPRINTF(fmt, ...) DEBUG_CALL(fmt, ##__VA_ARGS__)
 
 static BOOTPClient *get_new_addr(Slirp *slirp, struct in_addr *paddr,
                                  const uint8_t *macaddr)
@@ -116,6 +117,9 @@ static void dhcp_decode(const struct bootp_t *bp, int *pmsg_type,
             if (p >= p_end)
                 break;
             len = *p++;
+            if (p + len > p_end) {
+                break;
+            }
             DPRINTF("dhcp: tag=%d len=%d\n", tag, len);
 
             switch(tag) {
@@ -149,15 +153,17 @@ static void bootp_reply(Slirp *slirp, const struct bootp_t *bp)
     struct in_addr preq_addr;
     int dhcp_msg_type, val;
     uint8_t *q;
+    uint8_t *end;
     uint8_t client_ethaddr[ETH_ALEN];
 
     /* extract exact DHCP msg type */
     dhcp_decode(bp, &dhcp_msg_type, &preq_addr);
     DPRINTF("bootp packet op=%d msgtype=%d", bp->bp_op, dhcp_msg_type);
     if (preq_addr.s_addr != htonl(0L))
-        DPRINTF(" req_addr=%08x\n", ntohl(preq_addr.s_addr));
-    else
+        DPRINTF(" req_addr=%08" PRIx32 "\n", ntohl(preq_addr.s_addr));
+    else {
         DPRINTF("\n");
+    }
 
     if (dhcp_msg_type == 0)
         dhcp_msg_type = DHCPREQUEST; /* Force reply for old BOOTP clients */
@@ -230,11 +236,12 @@ static void bootp_reply(Slirp *slirp, const struct bootp_t *bp)
     rbp->bp_siaddr = saddr.sin_addr; /* Server IP address */
 
     q = rbp->bp_vend;
+    end = (uint8_t *)&rbp[1];
     memcpy(q, rfc1533_cookie, 4);
     q += 4;
 
     if (bc) {
-        DPRINTF("%s addr=%08x\n",
+        DPRINTF("%s addr=%08" PRIx32 "\n",
                 (dhcp_msg_type == DHCPDISCOVER) ? "offered" : "ack'ed",
                 ntohl(daddr.sin_addr.s_addr));
 
@@ -282,16 +289,46 @@ static void bootp_reply(Slirp *slirp, const struct bootp_t *bp)
 
         if (*slirp->client_hostname) {
             val = strlen(slirp->client_hostname);
-            *q++ = RFC1533_HOSTNAME;
-            *q++ = val;
-            memcpy(q, slirp->client_hostname, val);
-            q += val;
+            if (q + val + 2 >= end) {
+                g_warning("DHCP packet size exceeded, "
+                    "omitting host name option.");
+            } else {
+                *q++ = RFC1533_HOSTNAME;
+                *q++ = val;
+                memcpy(q, slirp->client_hostname, val);
+                q += val;
+            }
+        }
+
+        if (slirp->vdomainname) {
+            val = strlen(slirp->vdomainname);
+            if (q + val + 2 >= end) {
+                g_warning("DHCP packet size exceeded, "
+                    "omitting domain name option.");
+            } else {
+                *q++ = RFC1533_DOMAINNAME;
+                *q++ = val;
+                memcpy(q, slirp->vdomainname, val);
+                q += val;
+            }
+        }
+
+        if (slirp->tftp_server_name) {
+            val = strlen(slirp->tftp_server_name);
+            if (q + val + 2 >= end) {
+                g_warning("DHCP packet size exceeded, "
+                    "omitting tftp-server-name option.");
+            } else {
+                *q++ = RFC2132_TFTP_SERVER_NAME;
+                *q++ = val;
+                memcpy(q, slirp->tftp_server_name, val);
+                q += val;
+            }
         }
 
         if (slirp->vdnssearch) {
-            size_t spaceleft = sizeof(rbp->bp_vend) - (q - rbp->bp_vend);
             val = slirp->vdnssearch_len;
-            if (val + 1 > spaceleft) {
+            if (q + val >= end) {
                 g_warning("DHCP packet size exceeded, "
                     "omitting domain-search option.");
             } else {
@@ -302,7 +339,7 @@ static void bootp_reply(Slirp *slirp, const struct bootp_t *bp)
     } else {
         static const char nak_msg[] = "requested address not available";
 
-        DPRINTF("nak'ed addr=%08x\n", ntohl(preq_addr.s_addr));
+        DPRINTF("nak'ed addr=%08" PRIx32 "\n", ntohl(preq_addr.s_addr));
 
         *q++ = RFC2132_MSG_TYPE;
         *q++ = 1;
@@ -313,13 +350,14 @@ static void bootp_reply(Slirp *slirp, const struct bootp_t *bp)
         memcpy(q, nak_msg, sizeof(nak_msg) - 1);
         q += sizeof(nak_msg) - 1;
     }
+    assert(q < end);
     *q = RFC1533_END;
 
     daddr.sin_addr.s_addr = 0xffffffffu;
 
     m->m_len = sizeof(struct bootp_t) -
         sizeof(struct ip) - sizeof(struct udphdr);
-    udp_output2(NULL, m, &saddr, &daddr, IPTOS_LOWDELAY);
+    udp_output(NULL, m, &saddr, &daddr, IPTOS_LOWDELAY);
 }
 
 void bootp_input(struct mbuf *m)

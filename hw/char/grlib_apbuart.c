@@ -22,8 +22,9 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
-#include "sysemu/char.h"
+#include "chardev/char-fe.h"
 
 #include "trace.h"
 
@@ -77,7 +78,7 @@ typedef struct UART {
     MemoryRegion iomem;
     qemu_irq irq;
 
-    CharDriverState *chr;
+    CharBackend chr;
 
     /* registers */
     uint32_t status;
@@ -200,9 +201,12 @@ static void grlib_apbuart_write(void *opaque, hwaddr addr,
     case DATA_OFFSET:
     case DATA_OFFSET + 3:       /* When only one byte write */
         /* Transmit when character device available and transmitter enabled */
-        if ((uart->chr) && (uart->control & UART_TRANSMIT_ENABLE)) {
+        if (qemu_chr_fe_backend_connected(&uart->chr) &&
+            (uart->control & UART_TRANSMIT_ENABLE)) {
             c = value & 0xFF;
-            qemu_chr_fe_write(uart->chr, &c, 1);
+            /* XXX this blocks entire thread. Rewrite to use
+             * qemu_chr_fe_write and background I/O callbacks */
+            qemu_chr_fe_write_all(&uart->chr, &c, 1);
             /* Generate interrupt */
             if (uart->control & UART_TRANSMIT_INTERRUPT) {
                 qemu_irq_pulse(uart->irq);
@@ -235,24 +239,23 @@ static const MemoryRegionOps grlib_apbuart_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
-static int grlib_apbuart_init(SysBusDevice *dev)
+static void grlib_apbuart_realize(DeviceState *dev, Error **errp)
 {
     UART *uart = GRLIB_APB_UART(dev);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
 
-    qemu_chr_add_handlers(uart->chr,
-                          grlib_apbuart_can_receive,
-                          grlib_apbuart_receive,
-                          grlib_apbuart_event,
-                          uart);
+    qemu_chr_fe_set_handlers(&uart->chr,
+                             grlib_apbuart_can_receive,
+                             grlib_apbuart_receive,
+                             grlib_apbuart_event,
+                             NULL, uart, NULL, true);
 
-    sysbus_init_irq(dev, &uart->irq);
+    sysbus_init_irq(sbd, &uart->irq);
 
     memory_region_init_io(&uart->iomem, OBJECT(uart), &grlib_apbuart_ops, uart,
                           "uart", UART_REG_SIZE);
 
-    sysbus_init_mmio(dev, &uart->iomem);
-
-    return 0;
+    sysbus_init_mmio(sbd, &uart->iomem);
 }
 
 static void grlib_apbuart_reset(DeviceState *d)
@@ -276,9 +279,8 @@ static Property grlib_apbuart_properties[] = {
 static void grlib_apbuart_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
-    k->init = grlib_apbuart_init;
+    dc->realize = grlib_apbuart_realize;
     dc->reset = grlib_apbuart_reset;
     dc->props = grlib_apbuart_properties;
 }

@@ -19,7 +19,7 @@ You should have received a copy of the GNU General Public License
 along with this file; see the file COPYING.  If not, see
 <http://www.gnu.org/licenses/>. */
 
-#include <stdio.h>
+#include "qemu/osdep.h"
 #include "disas/bfd.h"
 
 /* MAX is redefined below, so remove any previous definition. */
@@ -521,7 +521,7 @@ static unsigned
 insert_bdisp(unsigned insn, int value, const char **errmsg)
 {
   if (errmsg != (const char **)NULL && (value & 3))
-    *errmsg = _("branch operand unaligned");
+    *errmsg = "branch operand unaligned";
   return insn | ((value / 4) & 0x1FFFFF);
 }
 
@@ -539,7 +539,7 @@ static unsigned
 insert_jhint(unsigned insn, int value, const char **errmsg)
 {
   if (errmsg != (const char **)NULL && (value & 3))
-    *errmsg = _("jump hint unaligned");
+    *errmsg = "jump hint unaligned";
   return insn | ((value / 4) & 0x3FFF);
 }
 
@@ -556,7 +556,7 @@ static unsigned
 insert_ev6hwjhint(unsigned insn, int value, const char **errmsg)
 {
   if (errmsg != (const char **)NULL && (value & 3))
-    *errmsg = _("jump hint unaligned");
+    *errmsg = "jump hint unaligned";
   return insn | ((value / 4) & 0x1FFF);
 }
 
@@ -672,7 +672,7 @@ extract_ev6hwjhint(unsigned insn, int *invalid ATTRIBUTE_UNUSED)
    OPCODE	is the instruction opcode.
 
    MASK		is the opcode mask; this is used to tell the disassembler
-            	which bits in the actual opcode must match OPCODE.
+		which bits in the actual opcode must match OPCODE.
 
    OPERANDS	is the list of operands.
 
@@ -699,10 +699,10 @@ extract_ev6hwjhint(unsigned insn, int *invalid ATTRIBUTE_UNUSED)
    And two annotations:
 
    EV56 BUT	opcodes that are officially introduced as of the ev56,
-   		but with defined results on previous implementations.
+		but with defined results on previous implementations.
 
    EV56 UNA	opcodes that were introduced as of the ev56 with
-   		presumably undefined results on previous implementations
+		presumably undefined results on previous implementations
 		that were not assigned to a particular extension.
 */
 
@@ -832,7 +832,7 @@ const struct alpha_opcode alpha_opcodes[] = {
   { "cmovgt",		OPR(0x11,0x66), BASE, ARG_OPR },
   { "cmovgt",		OPRL(0x11,0x66), BASE, ARG_OPRL },
   { "implver",		OPRL_(0x11,0x6C)|(31<<21)|(1<<13),
-    			0xFFFFFFE0, BASE, { RC } },		/* ev56 but */
+			0xFFFFFFE0, BASE, { RC } },		/* ev56 but */
 
   { "mskbl",		OPR(0x12,0x02), BASE, ARG_OPR },
   { "mskbl",		OPRL(0x12,0x02), BASE, ARG_OPRL },

@@ -1,7 +1,13 @@
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qemu/main-loop.h"
 
-void qemu_mutex_lock_iothread(void)
+bool qemu_mutex_iothread_locked(void)
+{
+    return true;
+}
+
+void qemu_mutex_lock_iothread_impl(const char *file, int line)
 {
 }
 

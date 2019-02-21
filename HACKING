@@ -1,9 +1,27 @@
 1. Preprocessor
 
+1.1. Variadic macros
+
 For variadic macros, stick with this C99-like syntax:
 
 #define DPRINTF(fmt, ...)                                       \
     do { printf("IRQ: " fmt, ## __VA_ARGS__); } while (0)
+
+1.2. Include directives
+
+Order include directives as follows:
+
+#include "qemu/osdep.h"  /* Always first... */
+#include <...>           /* then system headers... */
+#include "..."           /* and finally QEMU headers. */
+
+The "qemu/osdep.h" header contains preprocessor macros that affect the behavior
+of core system headers like <stdint.h>.  It must be the first include so that
+core system headers included by external libraries get the preprocessor macros
+that QEMU depends on.
+
+Do not include "qemu/osdep.h" from header files since the .c file will have
+already included it.
 
 2. C types
 
@@ -100,6 +118,15 @@ Please note that g_malloc will exit on allocation failure, so there
 is no need to test for failure (as you would have to with malloc).
 Calling g_malloc with a zero size is valid and will return NULL.
 
+Prefer g_new(T, n) instead of g_malloc(sizeof(T) * n) for the following
+reasons:
+
+  a. It catches multiplication overflowing size_t;
+  b. It returns T * instead of void *, letting compiler catch more type
+     errors.
+
+Declarations like T *v = g_malloc(sizeof(*v)) are acceptable, though.
+
 Memory allocated by qemu_memalign or qemu_blockalign must be freed with
 qemu_vfree, since breaking this will cause problems on Win32.
 
@@ -157,3 +184,62 @@ painful. These are:
  * you may assume that integers are 2s complement representation
  * you may assume that right shift of a signed integer duplicates
    the sign bit (ie it is an arithmetic shift, not a logical shift)
+
+In addition, QEMU assumes that the compiler does not use the latitude
+given in C99 and C11 to treat aspects of signed '<<' as undefined, as
+documented in the GNU Compiler Collection manual starting at version 4.0.
+
+7. Error handling and reporting
+
+7.1 Reporting errors to the human user
+
+Do not use printf(), fprintf() or monitor_printf().  Instead, use
+error_report() or error_vreport() from error-report.h.  This ensures the
+error is reported in the right place (current monitor or stderr), and in
+a uniform format.
+
+Use error_printf() & friends to print additional information.
+
+error_report() prints the current location.  In certain common cases
+like command line parsing, the current location is tracked
+automatically.  To manipulate it manually, use the loc_*() from
+error-report.h.
+
+7.2 Propagating errors
+
+An error can't always be reported to the user right where it's detected,
+but often needs to be propagated up the call chain to a place that can
+handle it.  This can be done in various ways.
+
+The most flexible one is Error objects.  See error.h for usage
+information.
+
+Use the simplest suitable method to communicate success / failure to
+callers.  Stick to common methods: non-negative on success / -1 on
+error, non-negative / -errno, non-null / null, or Error objects.
+
+Example: when a function returns a non-null pointer on success, and it
+can fail only in one way (as far as the caller is concerned), returning
+null on failure is just fine, and certainly simpler and a lot easier on
+the eyes than propagating an Error object through an Error ** parameter.
+
+Example: when a function's callers need to report details on failure
+only the function really knows, use Error **, and set suitable errors.
+
+Do not report an error to the user when you're also returning an error
+for somebody else to handle.  Leave the reporting to the place that
+consumes the error returned.
+
+7.3 Handling errors
+
+Calling exit() is fine when handling configuration errors during
+startup.  It's problematic during normal operation.  In particular,
+monitor commands should never exit().
+
+Do not call exit() or abort() to handle an error that can be triggered
+by the guest (e.g., some unimplemented corner case in guest code
+translation or device emulation).  Guests should not be able to
+terminate QEMU.
+
+Note that &error_fatal is just another way to exit(1), and &error_abort
+is just another way to abort().

@@ -24,8 +24,8 @@
  * GNU GPL, version 2 or (at your option) any later version.
  *
  */
+#include "qemu/osdep.h"
 #include "hw/hw.h"
-#include "hw/i386/pc.h"
 #include "hw/i2c/pm_smbus.h"
 #include "hw/pci/pci.h"
 #include "sysemu/sysemu.h"
@@ -34,12 +34,13 @@
 
 #include "hw/i386/ich9.h"
 
-#define TYPE_ICH9_SMB_DEVICE "ICH9 SMB"
 #define ICH9_SMB_DEVICE(obj) \
      OBJECT_CHECK(ICH9SMBState, (obj), TYPE_ICH9_SMB_DEVICE)
 
 typedef struct ICH9SMBState {
     PCIDevice dev;
+
+    bool irq_enabled;
 
     PMSMBus smb;
 } ICH9SMBState;
@@ -62,16 +63,20 @@ static void ich9_smbus_write_config(PCIDevice *d, uint32_t address,
     pci_default_write_config(d, address, val, len);
     if (range_covers_byte(address, len, ICH9_SMB_HOSTC)) {
         uint8_t hostc = s->dev.config[ICH9_SMB_HOSTC];
-        if ((hostc & ICH9_SMB_HOSTC_HST_EN) &&
-            !(hostc & ICH9_SMB_HOSTC_I2C_EN)) {
+        if (hostc & ICH9_SMB_HOSTC_HST_EN) {
             memory_region_set_enabled(&s->smb.io, true);
         } else {
             memory_region_set_enabled(&s->smb.io, false);
         }
+        s->smb.i2c_enable = (hostc & ICH9_SMB_HOSTC_I2C_EN) != 0;
+        if (hostc & ICH9_SMB_HOSTC_SSRESET) {
+            s->smb.reset(&s->smb);
+            s->dev.config[ICH9_SMB_HOSTC] &= ~ICH9_SMB_HOSTC_SSRESET;
+        }
     }
 }
 
-static int ich9_smbus_initfn(PCIDevice *d)
+static void ich9_smbus_realize(PCIDevice *d, Error **errp)
 {
     ICH9SMBState *s = ICH9_SMB_DEVICE(d);
 
@@ -81,10 +86,9 @@ static int ich9_smbus_initfn(PCIDevice *d)
     pci_set_byte(d->config + ICH9_SMB_HOSTC, 0);
     /* TODO bar0, bar1: 64bit BAR support*/
 
-    pm_smbus_init(&d->qdev, &s->smb);
+    pm_smbus_init(&d->qdev, &s->smb, false);
     pci_register_bar(d, ICH9_SMB_SMB_BASE_BAR, PCI_BASE_ADDRESS_SPACE_IO,
                      &s->smb.io);
-    return 0;
 }
 
 static void ich9_smb_class_init(ObjectClass *klass, void *data)
@@ -98,13 +102,25 @@ static void ich9_smb_class_init(ObjectClass *klass, void *data)
     k->class_id = PCI_CLASS_SERIAL_SMBUS;
     dc->vmsd = &vmstate_ich9_smbus;
     dc->desc = "ICH9 SMBUS Bridge";
-    k->init = ich9_smbus_initfn;
+    k->realize = ich9_smbus_realize;
     k->config_write = ich9_smbus_write_config;
     /*
      * Reason: part of ICH9 southbridge, needs to be wired up by
      * pc_q35_init()
      */
-    dc->cannot_instantiate_with_device_add_yet = true;
+    dc->user_creatable = false;
+}
+
+static void ich9_smb_set_irq(PMSMBus *pmsmb, bool enabled)
+{
+    ICH9SMBState *s = pmsmb->opaque;
+
+    if (enabled == s->irq_enabled) {
+        return;
+    }
+
+    s->irq_enabled = enabled;
+    pci_set_irq(&s->dev, enabled);
 }
 
 I2CBus *ich9_smb_init(PCIBus *bus, int devfn, uint32_t smb_io_base)
@@ -112,6 +128,8 @@ I2CBus *ich9_smb_init(PCIBus *bus, int devfn, uint32_t smb_io_base)
     PCIDevice *d =
         pci_create_simple_multifunction(bus, devfn, true, TYPE_ICH9_SMB_DEVICE);
     ICH9SMBState *s = ICH9_SMB_DEVICE(d);
+    s->smb.set_irq = ich9_smb_set_irq;
+    s->smb.opaque = s;
     return s->smb.smbus;
 }
 
@@ -120,6 +138,10 @@ static const TypeInfo ich9_smb_info = {
     .parent = TYPE_PCI_DEVICE,
     .instance_size = sizeof(ICH9SMBState),
     .class_init = ich9_smb_class_init,
+    .interfaces = (InterfaceInfo[]) {
+        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { },
+    },
 };
 
 static void ich9_smb_register(void)

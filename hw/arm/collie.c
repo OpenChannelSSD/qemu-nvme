@@ -8,6 +8,7 @@
  * Contributions after 2012-01-13 are licensed under the terms of the
  * GNU GPL, version 2 or (at your option) any later version.
  */
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "hw/boards.h"
@@ -15,8 +16,8 @@
 #include "strongarm.h"
 #include "hw/arm/arm.h"
 #include "hw/block/flash.h"
-#include "sysemu/block-backend.h"
 #include "exec/address-spaces.h"
+#include "cpu.h"
 
 static struct arm_boot_info collie_binfo = {
     .loader_start = SA_SDCS0,
@@ -25,7 +26,6 @@ static struct arm_boot_info collie_binfo = {
 
 static void collie_init(MachineState *machine)
 {
-    const char *cpu_model = machine->cpu_model;
     const char *kernel_filename = machine->kernel_filename;
     const char *kernel_cmdline = machine->kernel_cmdline;
     const char *initrd_filename = machine->initrd_filename;
@@ -33,11 +33,7 @@ static void collie_init(MachineState *machine)
     DriveInfo *dinfo;
     MemoryRegion *sysmem = get_system_memory();
 
-    if (!cpu_model) {
-        cpu_model = "sa1110";
-    }
-
-    s = sa1110_init(sysmem, collie_binfo.ram_size, cpu_model);
+    s = sa1110_init(sysmem, collie_binfo.ram_size, machine->cpu_type);
 
     dinfo = drive_get(IF_PFLASH, 0, 0);
     pflash_cfi01_register(SA_CS0, NULL, "collie.fl1", 0x02000000,
@@ -58,15 +54,12 @@ static void collie_init(MachineState *machine)
     arm_load_kernel(s->cpu, &collie_binfo);
 }
 
-static QEMUMachine collie_machine = {
-    .name = "collie",
-    .desc = "Collie PDA (SA-1110)",
-    .init = collie_init,
-};
-
-static void collie_machine_init(void)
+static void collie_machine_init(MachineClass *mc)
 {
-    qemu_register_machine(&collie_machine);
+    mc->desc = "Sharp SL-5500 (Collie) PDA (SA-1110)";
+    mc->init = collie_init;
+    mc->ignore_memory_transaction_failures = true;
+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("sa1110");
 }
 
-machine_init(collie_machine_init)
+DEFINE_MACHINE("collie", collie_machine_init)

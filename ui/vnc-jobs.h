@@ -34,13 +34,10 @@
 VncJob *vnc_job_new(VncState *vs);
 int vnc_job_add_rect(VncJob *job, int x, int y, int w, int h);
 void vnc_job_push(VncJob *job);
-bool vnc_has_job(VncState *vs);
-void vnc_jobs_clear(VncState *vs);
 void vnc_jobs_join(VncState *vs);
 
 void vnc_jobs_consume_buffer(VncState *vs);
 void vnc_start_worker_thread(void);
-void vnc_stop_worker_thread(void);
 
 /* Locks */
 static inline int vnc_trylock_display(VncDisplay *vd)

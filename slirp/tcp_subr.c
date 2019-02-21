@@ -38,7 +38,7 @@
  * terms and conditions of the copyright.
  */
 
-#include <slirp.h>
+#include "slirp.h"
 
 /* patchable/settable parameters for tcp */
 /* Don't do rfc1323 performance enhancements */
@@ -75,13 +75,30 @@ tcp_template(struct tcpcb *tp)
 	register struct tcpiphdr *n = &tp->t_template;
 
 	n->ti_mbuf = NULL;
-	n->ti_x1 = 0;
-	n->ti_pr = IPPROTO_TCP;
-	n->ti_len = htons(sizeof (struct tcpiphdr) - sizeof (struct ip));
-	n->ti_src = so->so_faddr;
-	n->ti_dst = so->so_laddr;
-	n->ti_sport = so->so_fport;
-	n->ti_dport = so->so_lport;
+	memset(&n->ti, 0, sizeof(n->ti));
+	n->ti_x0 = 0;
+	switch (so->so_ffamily) {
+	case AF_INET:
+	    n->ti_pr = IPPROTO_TCP;
+	    n->ti_len = htons(sizeof(struct tcphdr));
+	    n->ti_src = so->so_faddr;
+	    n->ti_dst = so->so_laddr;
+	    n->ti_sport = so->so_fport;
+	    n->ti_dport = so->so_lport;
+	    break;
+
+	case AF_INET6:
+	    n->ti_nh6 = IPPROTO_TCP;
+	    n->ti_len = htons(sizeof(struct tcphdr));
+	    n->ti_src6 = so->so_faddr6;
+	    n->ti_dst6 = so->so_laddr6;
+	    n->ti_sport = so->so_fport6;
+	    n->ti_dport = so->so_lport6;
+	    break;
+
+	default:
+	    g_assert_not_reached();
+	}
 
 	n->ti_seq = 0;
 	n->ti_ack = 0;
@@ -108,7 +125,7 @@ tcp_template(struct tcpcb *tp)
  */
 void
 tcp_respond(struct tcpcb *tp, struct tcpiphdr *ti, struct mbuf *m,
-            tcp_seq ack, tcp_seq seq, int flags)
+            tcp_seq ack, tcp_seq seq, int flags, unsigned short af)
 {
 	register int tlen;
 	int win = 0;
@@ -130,27 +147,47 @@ tcp_respond(struct tcpcb *tp, struct tcpiphdr *ti, struct mbuf *m,
 		m->m_data += IF_MAXLINKHDR;
 		*mtod(m, struct tcpiphdr *) = *ti;
 		ti = mtod(m, struct tcpiphdr *);
+		switch (af) {
+		case AF_INET:
+		    ti->ti.ti_i4.ih_x1 = 0;
+		    break;
+		case AF_INET6:
+		    ti->ti.ti_i6.ih_x1 = 0;
+		    break;
+		default:
+		    g_assert_not_reached();
+		}
 		flags = TH_ACK;
 	} else {
 		/*
 		 * ti points into m so the next line is just making
 		 * the mbuf point to ti
 		 */
-		m->m_data = (caddr_t)ti;
+		m->m_data = (char *)ti;
 
 		m->m_len = sizeof (struct tcpiphdr);
 		tlen = 0;
 #define xchg(a,b,type) { type t; t=a; a=b; b=t; }
-		xchg(ti->ti_dst.s_addr, ti->ti_src.s_addr, uint32_t);
-		xchg(ti->ti_dport, ti->ti_sport, uint16_t);
+		switch (af) {
+		case AF_INET:
+		    xchg(ti->ti_dst.s_addr, ti->ti_src.s_addr, uint32_t);
+		    xchg(ti->ti_dport, ti->ti_sport, uint16_t);
+		    break;
+		case AF_INET6:
+		    xchg(ti->ti_dst6, ti->ti_src6, struct in6_addr);
+		    xchg(ti->ti_dport, ti->ti_sport, uint16_t);
+		    break;
+		default:
+		    g_assert_not_reached();
+		}
 #undef xchg
 	}
-	ti->ti_len = htons((u_short)(sizeof (struct tcphdr) + tlen));
+	ti->ti_len = htons((uint16_t)(sizeof (struct tcphdr) + tlen));
 	tlen += sizeof (struct tcpiphdr);
 	m->m_len = tlen;
 
-        ti->ti_mbuf = NULL;
-	ti->ti_x1 = 0;
+	ti->ti_mbuf = NULL;
+	ti->ti_x0 = 0;
 	ti->ti_seq = htonl(seq);
 	ti->ti_ack = htonl(ack);
 	ti->ti_x2 = 0;
@@ -163,14 +200,49 @@ tcp_respond(struct tcpcb *tp, struct tcpiphdr *ti, struct mbuf *m,
 	ti->ti_urp = 0;
 	ti->ti_sum = 0;
 	ti->ti_sum = cksum(m, tlen);
-	((struct ip *)ti)->ip_len = tlen;
 
-	if(flags & TH_RST)
-	  ((struct ip *)ti)->ip_ttl = MAXTTL;
-	else
-	  ((struct ip *)ti)->ip_ttl = IPDEFTTL;
+	struct tcpiphdr tcpiph_save = *(mtod(m, struct tcpiphdr *));
+	struct ip *ip;
+	struct ip6 *ip6;
 
-	(void) ip_output((struct socket *)0, m);
+	switch (af) {
+	case AF_INET:
+	    m->m_data += sizeof(struct tcpiphdr) - sizeof(struct tcphdr)
+	                                         - sizeof(struct ip);
+	    m->m_len  -= sizeof(struct tcpiphdr) - sizeof(struct tcphdr)
+	                                         - sizeof(struct ip);
+	    ip = mtod(m, struct ip *);
+	    ip->ip_len = m->m_len;
+	    ip->ip_dst = tcpiph_save.ti_dst;
+	    ip->ip_src = tcpiph_save.ti_src;
+	    ip->ip_p = tcpiph_save.ti_pr;
+
+	    if (flags & TH_RST) {
+	        ip->ip_ttl = MAXTTL;
+	    } else {
+	        ip->ip_ttl = IPDEFTTL;
+	    }
+
+	    ip_output(NULL, m);
+	    break;
+
+	case AF_INET6:
+	    m->m_data += sizeof(struct tcpiphdr) - sizeof(struct tcphdr)
+	                                         - sizeof(struct ip6);
+	    m->m_len  -= sizeof(struct tcpiphdr) - sizeof(struct tcphdr)
+	                                         - sizeof(struct ip6);
+	    ip6 = mtod(m, struct ip6 *);
+	    ip6->ip_pl = tcpiph_save.ti_len;
+	    ip6->ip_dst = tcpiph_save.ti_dst6;
+	    ip6->ip_src = tcpiph_save.ti_src6;
+	    ip6->ip_nh = tcpiph_save.ti_nh6;
+
+	    ip6_output(NULL, m, 0);
+	    break;
+
+	default:
+	    g_assert_not_reached();
+	}
 }
 
 /*
@@ -189,7 +261,7 @@ tcp_newtcpcb(struct socket *so)
 
 	memset((char *) tp, 0, sizeof(struct tcpcb));
 	tp->seg_next = tp->seg_prev = (struct tcpiphdr*)tp;
-	tp->t_maxseg = TCP_MSS;
+	tp->t_maxseg = (so->so_ffamily == AF_INET) ? TCP_MSS : TCP6_MSS;
 
 	tp->t_flags = TCP_DO_RFC1323 ? (TF_REQ_SCALE|TF_REQ_TSTMP) : 0;
 	tp->t_socket = so;
@@ -224,7 +296,7 @@ tcp_newtcpcb(struct socket *so)
 struct tcpcb *tcp_drop(struct tcpcb *tp, int err)
 {
 	DEBUG_CALL("tcp_drop");
-	DEBUG_ARG("tp = %lx", (long)tp);
+	DEBUG_ARG("tp = %p", tp);
 	DEBUG_ARG("errno = %d", errno);
 
 	if (TCPS_HAVERCVDSYN(tp->t_state)) {
@@ -249,7 +321,7 @@ tcp_close(struct tcpcb *tp)
 	register struct mbuf *m;
 
 	DEBUG_CALL("tcp_close");
-	DEBUG_ARG("tp = %lx", (long )tp);
+	DEBUG_ARG("tp = %p", tp);
 
 	/* free the reassembly queue, if any */
 	t = tcpfrag_list_first(tp);
@@ -264,7 +336,8 @@ tcp_close(struct tcpcb *tp)
 	/* clobber input socket cache if we're closing the cached connection */
 	if (so == slirp->tcp_last_so)
 		slirp->tcp_last_so = &slirp->tcb;
-	closesocket(so->s);
+	so->slirp->cb->unregister_poll_fd(so->s, so->slirp->opaque);
+	slirp_closesocket(so->s);
 	sbfree(&so->so_rcv);
 	sbfree(&so->so_snd);
 	sofree(so);
@@ -290,7 +363,11 @@ tcp_sockclosed(struct tcpcb *tp)
 {
 
 	DEBUG_CALL("tcp_sockclosed");
-	DEBUG_ARG("tp = %lx", (long)tp);
+	DEBUG_ARG("tp = %p", tp);
+
+	if (!tp) {
+		return;
+	}
 
 	switch (tp->t_state) {
 
@@ -310,8 +387,7 @@ tcp_sockclosed(struct tcpcb *tp)
 		tp->t_state = TCPS_LAST_ACK;
 		break;
 	}
-	if (tp)
-		tcp_output(tp);
+	tcp_output(tp);
 }
 
 /*
@@ -324,42 +400,32 @@ tcp_sockclosed(struct tcpcb *tp)
  * nonblocking.  Connect returns after the SYN is sent, and does
  * not wait for ACK+SYN.
  */
-int tcp_fconnect(struct socket *so)
+int tcp_fconnect(struct socket *so, unsigned short af)
 {
-  Slirp *slirp = so->slirp;
   int ret=0;
 
   DEBUG_CALL("tcp_fconnect");
-  DEBUG_ARG("so = %lx", (long )so);
+  DEBUG_ARG("so = %p", so);
 
-  if( (ret = so->s = qemu_socket(AF_INET,SOCK_STREAM,0)) >= 0) {
+  ret = so->s = slirp_socket(af, SOCK_STREAM, 0);
+  if (ret >= 0) {
     int opt, s=so->s;
-    struct sockaddr_in addr;
+    struct sockaddr_storage addr;
 
-    qemu_set_nonblock(s);
-    socket_set_fast_reuse(s);
+    slirp_set_nonblock(s);
+    so->slirp->cb->register_poll_fd(so->s, so->slirp->opaque);
+    slirp_socket_set_fast_reuse(s);
     opt = 1;
-    qemu_setsockopt(s, SOL_SOCKET, SO_OOBINLINE, &opt, sizeof(opt));
+    slirp_setsockopt(s, SOL_SOCKET, SO_OOBINLINE, &opt, sizeof(opt));
+    opt = 1;
+    slirp_setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 
-    addr.sin_family = AF_INET;
-    if ((so->so_faddr.s_addr & slirp->vnetwork_mask.s_addr) ==
-        slirp->vnetwork_addr.s_addr) {
-      /* It's an alias */
-      if (so->so_faddr.s_addr == slirp->vnameserver_addr.s_addr) {
-	if (get_dns_addr(&addr.sin_addr) < 0)
-	  addr.sin_addr = loopback_addr;
-      } else {
-	addr.sin_addr = loopback_addr;
-      }
-    } else
-      addr.sin_addr = so->so_faddr;
-    addr.sin_port = so->so_fport;
+    addr = so->fhost.ss;
+    DEBUG_CALL(" connect()ing");
+    sotranslate_out(so, &addr);
 
-    DEBUG_MISC((dfd, " connect()ing, addr.sin_port=%d, "
-		"addr.sin_addr.s_addr=%.16s\n",
-		ntohs(addr.sin_port), inet_ntoa(addr.sin_addr)));
     /* We don't care what port we get */
-    ret = connect(s,(struct sockaddr *)&addr,sizeof (addr));
+    ret = connect(s, (struct sockaddr *)&addr, sockaddr_size(&addr));
 
     /*
      * If it's not in progress, it failed, so we just return 0,
@@ -387,13 +453,13 @@ void tcp_connect(struct socket *inso)
 {
     Slirp *slirp = inso->slirp;
     struct socket *so;
-    struct sockaddr_in addr;
-    socklen_t addrlen = sizeof(struct sockaddr_in);
+    struct sockaddr_storage addr;
+    socklen_t addrlen = sizeof(struct sockaddr_storage);
     struct tcpcb *tp;
     int s, opt;
 
     DEBUG_CALL("tcp_connect");
-    DEBUG_ARG("inso = %lx", (long)inso);
+    DEBUG_ARG("inso = %p", inso);
 
     /*
      * If it's an SS_ACCEPTONCE socket, no need to socreate()
@@ -404,17 +470,12 @@ void tcp_connect(struct socket *inso)
         so = inso;
     } else {
         so = socreate(slirp);
-        if (so == NULL) {
-            /* If it failed, get rid of the pending connection */
-            closesocket(accept(inso->s, (struct sockaddr *)&addr, &addrlen));
-            return;
-        }
         if (tcp_attach(so) < 0) {
-            free(so); /* NOT sofree */
+            g_free(so); /* NOT sofree */
             return;
         }
-        so->so_laddr = inso->so_laddr;
-        so->so_lport = inso->so_lport;
+        so->lhost = inso->lhost;
+        so->so_ffamily = inso->so_ffamily;
     }
 
     tcp_mss(sototcpcb(so), 0);
@@ -424,25 +485,21 @@ void tcp_connect(struct socket *inso)
         tcp_close(sototcpcb(so)); /* This will sofree() as well */
         return;
     }
-    qemu_set_nonblock(s);
-    socket_set_fast_reuse(s);
+    slirp_set_nonblock(s);
+    so->slirp->cb->register_poll_fd(so->s, so->slirp->opaque);
+    slirp_socket_set_fast_reuse(s);
     opt = 1;
-    qemu_setsockopt(s, SOL_SOCKET, SO_OOBINLINE, &opt, sizeof(int));
-    socket_set_nodelay(s);
+    slirp_setsockopt(s, SOL_SOCKET, SO_OOBINLINE, &opt, sizeof(int));
+    slirp_socket_set_nodelay(s);
 
-    so->so_fport = addr.sin_port;
-    so->so_faddr = addr.sin_addr;
-    /* Translate connections from localhost to the real hostname */
-    if (so->so_faddr.s_addr == 0 ||
-        (so->so_faddr.s_addr & loopback_mask) ==
-        (loopback_addr.s_addr & loopback_mask)) {
-        so->so_faddr = slirp->vhost_addr;
-    }
+    so->fhost.ss = addr;
+    sotranslate_accept(so);
 
     /* Close the accept() socket, set right state */
     if (inso->so_state & SS_FACCEPTONCE) {
         /* If we only accept once, close the accept() socket */
-        closesocket(so->s);
+        so->slirp->cb->unregister_poll_fd(so->s, so->slirp->opaque);
+        slirp_closesocket(so->s);
 
         /* Don't select it yet, even though we have an FD */
         /* if it's not FACCEPTONCE, it's already NOFDREF */
@@ -487,7 +544,6 @@ static const struct tos_t tcptos[] = {
 	  {0, 23, IPTOS_LOWDELAY, 0},	/* telnet */
 	  {0, 80, IPTOS_THROUGHPUT, 0},	/* WWW */
 	  {0, 513, IPTOS_LOWDELAY, EMU_RLOGIN|EMU_NOCONNECT},	/* rlogin */
-	  {0, 514, IPTOS_LOWDELAY, EMU_RSH|EMU_NOCONNECT},	/* shell */
 	  {0, 544, IPTOS_LOWDELAY, EMU_KSH},		/* kshell */
 	  {0, 543, IPTOS_LOWDELAY, 0},	/* klogin */
 	  {0, 6667, IPTOS_THROUGHPUT, EMU_IRC},	/* IRC */
@@ -557,15 +613,15 @@ int
 tcp_emu(struct socket *so, struct mbuf *m)
 {
 	Slirp *slirp = so->slirp;
-	u_int n1, n2, n3, n4, n5, n6;
+	unsigned n1, n2, n3, n4, n5, n6;
         char buff[257];
 	uint32_t laddr;
-	u_int lport;
+	unsigned lport;
 	char *bptr;
 
 	DEBUG_CALL("tcp_emu");
-	DEBUG_ARG("so = %lx", (long)so);
-	DEBUG_ARG("m = %lx", (long)m);
+	DEBUG_ARG("so = %p", so);
+	DEBUG_ARG("m = %p", m);
 
 	switch(so->so_emu) {
 		int x, i;
@@ -580,6 +636,11 @@ tcp_emu(struct socket *so, struct mbuf *m)
 			struct sockaddr_in addr;
 			socklen_t addrlen = sizeof(struct sockaddr_in);
 			struct sbuf *so_rcv = &so->so_rcv;
+
+			if (m->m_len > so_rcv->sb_datalen
+					- (so_rcv->sb_wptr - so_rcv->sb_data)) {
+			    return 1;
+			}
 
 			memcpy(so_rcv->sb_wptr, m->m_data, m->m_len);
 			so_rcv->sb_wptr += m->m_len;
@@ -792,7 +853,7 @@ tcp_emu(struct socket *so, struct mbuf *m)
 
 		bptr = m->m_data;
 		while (bptr < m->m_data + m->m_len) {
-			u_short p;
+			uint16_t p;
 			static int ra = 0;
 			char ra_tbl[4];
 
@@ -848,8 +909,8 @@ tcp_emu(struct socket *so, struct mbuf *m)
 				/* This is the field containing the port
 				 * number that RA-player is listening to.
 				 */
-				lport = (((u_char*)bptr)[0] << 8)
-				+ ((u_char *)bptr)[1];
+				lport = (((uint8_t*)bptr)[0] << 8)
+				+ ((uint8_t *)bptr)[1];
 				if (lport < 6970)
 				   lport += 256;   /* don't know why */
 				if (lport < 6970 || lport > 7170)
@@ -867,8 +928,8 @@ tcp_emu(struct socket *so, struct mbuf *m)
 				}
 				if (p == 7071)
 				   p = 0;
-				*(u_char *)bptr++ = (p >> 8) & 0xff;
-                                *(u_char *)bptr = p & 0xff;
+				*(uint8_t *)bptr++ = (p >> 8) & 0xff;
+                                *(uint8_t *)bptr = p & 0xff;
 				ra = 0;
 				return 1;   /* port redirected, we're done */
 				break;
@@ -896,25 +957,23 @@ int tcp_ctl(struct socket *so)
 {
     Slirp *slirp = so->slirp;
     struct sbuf *sb = &so->so_snd;
-    struct ex_list *ex_ptr;
-    int do_pty;
+    struct gfwd_list *ex_ptr;
 
     DEBUG_CALL("tcp_ctl");
-    DEBUG_ARG("so = %lx", (long )so);
+    DEBUG_ARG("so = %p", so);
 
     if (so->so_faddr.s_addr != slirp->vhost_addr.s_addr) {
         /* Check if it's pty_exec */
-        for (ex_ptr = slirp->exec_list; ex_ptr; ex_ptr = ex_ptr->ex_next) {
+        for (ex_ptr = slirp->guestfwd_list; ex_ptr; ex_ptr = ex_ptr->ex_next) {
             if (ex_ptr->ex_fport == so->so_fport &&
                 so->so_faddr.s_addr == ex_ptr->ex_addr.s_addr) {
-                if (ex_ptr->ex_pty == 3) {
+                if (ex_ptr->write_cb) {
                     so->s = -1;
-                    so->extra = (void *)ex_ptr->ex_exec;
+                    so->guestfwd = ex_ptr;
                     return 1;
                 }
-                do_pty = ex_ptr->ex_pty;
-                DEBUG_MISC((dfd, " executing %s\n", ex_ptr->ex_exec));
-                return fork_exec(so, ex_ptr->ex_exec, do_pty);
+                DEBUG_MISC(" executing %s", ex_ptr->ex_exec);
+                return fork_exec(so, ex_ptr->ex_exec);
             }
         }
     }

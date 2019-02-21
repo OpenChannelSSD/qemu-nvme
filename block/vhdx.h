@@ -226,7 +226,8 @@ typedef struct QEMU_PACKED VHDXLogDataSector {
 #define PAYLOAD_BLOCK_NOT_PRESENT       0
 #define PAYLOAD_BLOCK_UNDEFINED         1
 #define PAYLOAD_BLOCK_ZERO              2
-#define PAYLOAD_BLOCK_UNMAPPED          5
+#define PAYLOAD_BLOCK_UNMAPPED          3
+#define PAYLOAD_BLOCK_UNMAPPED_v095     5
 #define PAYLOAD_BLOCK_FULLY_PRESENT     6
 #define PAYLOAD_BLOCK_PARTIALLY_PRESENT 7
 
@@ -397,7 +398,7 @@ typedef struct BDRVVHDXState {
 
     bool log_replayed_on_open;
 
-    QLIST_HEAD(VHDXRegionHead, VHDXRegionEntry) regions;
+    QLIST_HEAD(, VHDXRegionEntry) regions;
 } BDRVVHDXState;
 
 void vhdx_guid_generate(MSGUID *guid);
@@ -419,16 +420,16 @@ int vhdx_log_write_and_flush(BlockDriverState *bs, BDRVVHDXState *s,
 
 static inline void leguid_to_cpus(MSGUID *guid)
 {
-    le32_to_cpus(&guid->data1);
-    le16_to_cpus(&guid->data2);
-    le16_to_cpus(&guid->data3);
+    guid->data1 = le32_to_cpu(guid->data1);
+    guid->data2 = le16_to_cpu(guid->data2);
+    guid->data3 = le16_to_cpu(guid->data3);
 }
 
 static inline void cpu_to_leguids(MSGUID *guid)
 {
-    cpu_to_le32s(&guid->data1);
-    cpu_to_le16s(&guid->data2);
-    cpu_to_le16s(&guid->data3);
+    guid->data1 = cpu_to_le32(guid->data1);
+    guid->data2 = cpu_to_le16(guid->data2);
+    guid->data3 = cpu_to_le16(guid->data3);
 }
 
 void vhdx_header_le_import(VHDXHeader *h);
