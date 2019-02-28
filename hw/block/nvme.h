@@ -198,8 +198,8 @@ typedef struct NvmeParams {
     DEFINE_PROP_UINT16("oacs", _state, _props.oacs, NVME_OACS_FORMAT), \
     DEFINE_PROP_UINT16("oncs", _state, _props.oncs, NVME_ONCS_DSM), \
     DEFINE_PROP_UINT8("dialect", _state, _props.dialect, 0x1), \
-    DEFINE_PROP_UINT16("vid", _state, _props.vid, LNVM_VID), \
-    DEFINE_PROP_UINT16("did", _state, _props.did, LNVM_DID)
+    DEFINE_PROP_UINT16("vid", _state, _props.vid, PCI_VENDOR_ID_INTEL), \
+    DEFINE_PROP_UINT16("did", _state, _props.did, 0x5845)
 
 typedef struct NvmeDialect {
     void *state;

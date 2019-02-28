@@ -1327,12 +1327,15 @@ static void nvme_rw_cb(void *opaque, int ret)
     NvmeCQueue *cq = n->cq[sq->cqid];
     NvmeNamespace *ns = req->ns;
 
+    trace_nvme_rw_cb(req->cqe.cid);
+
     QTAILQ_REMOVE(&req->blk_req_tailq_head, blk_req, blk_req_tailq);
 
     if (!ret) {
         block_acct_done(blk_get_stats(n->conf.blk), &blk_req->acct);
 
-        if (req->is_write && blk_req->blk_offset < ns->blk.meta) {
+        if (n->params.dialect == NVME_DIALECT_OCSSD20 &&
+            req->is_write && blk_req->blk_offset < ns->blk.meta) {
             req->status = lnvm_advance_wp(n, blk_req->slba, blk_req->nlb, req);
         }
     } else {
@@ -1341,7 +1344,7 @@ static void nvme_rw_cb(void *opaque, int ret)
     }
 
     if (QTAILQ_EMPTY(&req->blk_req_tailq_head)) {
-        if (req->is_write) {
+        if (n->params.dialect == NVME_DIALECT_OCSSD20 && req->is_write) {
             if (lnvm_commit_chunk_info(n, ns)) {
                 req->status = NVME_INTERNAL_DEV_ERROR | NVME_DNR;
             }
@@ -4105,6 +4108,14 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
     return 0;
 }
 
+static void lnvm_init_ctrl(NvmeCtrl *n)
+{
+    NvmeIdCtrl *id = &n->id_ctrl;
+
+    strpadcpy((char *)id->mn, sizeof(id->mn), "QEMU NVMe OCSSD Ctrl", ' ');
+    strpadcpy((char *)id->fr, sizeof(id->fr), "2.0", ' ');
+}
+
 static void nvme_init_ctrl(NvmeCtrl *n)
 {
     NvmeIdCtrl *id = &n->id_ctrl;
@@ -4122,8 +4133,8 @@ static void nvme_init_ctrl(NvmeCtrl *n)
 
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
-    strpadcpy((char *)id->mn, sizeof(id->mn), "QEMU NVMe OCSSD Ctrl", ' ');
-    strpadcpy((char *)id->fr, sizeof(id->fr), "2.0", ' ');
+    strpadcpy((char *)id->mn, sizeof(id->mn), "QEMU NVMe Ctrl", ' ');
+    strpadcpy((char *)id->fr, sizeof(id->fr), "1.0", ' ');
     strpadcpy((char *)id->sn, sizeof(id->sn), params->serial, ' ');
     id->rab = 6;
     id->ieee[0] = 0x00;
@@ -4189,6 +4200,20 @@ static void nvme_init_ctrl(NvmeCtrl *n)
 
     n->bar.intmc = n->bar.intms = 0;
     n->temperature = NVME_TEMPERATURE;
+
+    switch (n->params.dialect) {
+    case NVME_DIALECT_OCSSD20:
+        lnvm_init_ctrl(n);
+
+        break;
+    }
+}
+
+static void lnvm_init_pci(NvmeCtrl *n, PCIDevice *pci_dev)
+{
+    uint8_t *pci_conf = pci_dev->config;
+    pci_config_set_vendor_id(pci_conf, LNVM_VID);
+    pci_config_set_device_id(pci_conf, LNVM_DID);
 }
 
 static void nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev)
@@ -4232,6 +4257,13 @@ static void nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev)
         pci_register_bar(pci_dev, NVME_CMBLOC_BIR(n->bar.cmbloc),
             PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64 |
             PCI_BASE_ADDRESS_MEM_PREFETCH, &n->ctrl_mem);
+    }
+
+    switch (n->params.dialect) {
+    case NVME_DIALECT_OCSSD20:
+        lnvm_init_pci(n, pci_dev);
+
+        break;
     }
 }
 
@@ -4390,8 +4422,8 @@ static void nvme_class_init(ObjectClass *oc, void *data)
     pc->realize = nvme_realize;
     pc->exit = nvme_exit;
     pc->class_id = PCI_CLASS_STORAGE_EXPRESS;
-    pc->vendor_id = 0x1d1d;
-    pc->device_id = 0x1f1f;
+    pc->vendor_id = PCI_VENDOR_ID_INTEL;
+    pc->device_id = 0x5845;
     pc->revision = 2;
 
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
