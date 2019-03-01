@@ -13,7 +13,17 @@
 #include "hw/block/block.h"
 #include "hw/pci/pci.h"
 
-#include "lightnvm.h"
+#define NVME_NS_PREDEF_BLK_OFFSET(n, ns) ((ns)->blk.begin)
+
+#define NVME_ID_NS_LBADS(ns)                                                  \
+    ((ns)->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX((ns)->id_ns.flbas)].lbads)
+
+#define NVME_ID_NS_LBADS_BYTES(ns) (1 << NVME_ID_NS_LBADS(ns))
+
+#define NVME_ID_NS_MS(ns)                                                     \
+    le16_to_cpu(                                                              \
+        ((ns)->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX((ns)->id_ns.flbas)].ms)      \
+    )
 
 typedef struct NvmeAsyncEvent {
     QSIMPLEQ_ENTRY(NvmeAsyncEvent) entry;
@@ -131,6 +141,36 @@ typedef struct NvmeNamespace {
 #define NVME(obj) \
         OBJECT_CHECK(NvmeCtrl, (obj), TYPE_NVME)
 
+typedef struct LnvmParams {
+    /* qemu configurable device characteristics */
+    uint32_t sec_size;
+    uint32_t mccap;
+    uint16_t num_grp;
+    uint16_t num_lun;
+    uint32_t num_chk;
+    uint32_t num_sec;
+    uint32_t ws_min;
+    uint32_t ws_opt;
+    uint32_t mw_cunits;
+
+    uint8_t debug;
+    uint8_t early_reset;
+    uint8_t	sgl_lbal;
+
+    char *chunkstate_fname;
+    char *resetfail_fname;
+    char *writefail_fname;
+
+    /* derived values */
+    uint32_t chks_per_lun;
+    uint32_t chks_per_grp;
+    uint32_t chks_total;
+    uint32_t secs_per_chk;
+    uint32_t secs_per_lun;
+    uint32_t secs_per_grp;
+    uint32_t secs_total;
+} LnvmParams;
+
 typedef struct NvmeParams {
     char     *serial;
     uint32_t num_namespaces;
@@ -201,6 +241,22 @@ typedef struct NvmeParams {
     DEFINE_PROP_UINT16("vid", _state, _props.vid, PCI_VENDOR_ID_INTEL), \
     DEFINE_PROP_UINT16("did", _state, _props.did, 0x5845)
 
+#define DEFINE_LNVM_PROPERTIES(_state, _props) \
+    DEFINE_PROP_UINT32("lmccap", _state, _props.mccap, 0x0), \
+    DEFINE_PROP_UINT32("lws_min", _state, _props.ws_min, 4), \
+    DEFINE_PROP_UINT32("lws_opt", _state, _props.ws_opt, 8), \
+    DEFINE_PROP_UINT32("lmw_cunits", _state, _props.mw_cunits, 32), \
+    DEFINE_PROP_UINT16("lnum_grp", _state, _props.num_grp, 1), \
+    DEFINE_PROP_UINT16("lnum_pu", _state, _props.num_lun, 1), \
+    DEFINE_PROP_UINT32("lnum_sec", _state, _props.num_sec, 4096), \
+    DEFINE_PROP_UINT32("lsec_size", _state, _props.sec_size, 4096), \
+    DEFINE_PROP_STRING("lresetfail", _state, _props.resetfail_fname), \
+    DEFINE_PROP_STRING("lwritefail", _state, _props.writefail_fname), \
+    DEFINE_PROP_STRING("lchunkstate", _state, _props.chunkstate_fname), \
+    DEFINE_PROP_UINT8("ldebug", _state, _props.debug, 0), \
+    DEFINE_PROP_UINT8("learly_reset", _state, _props.early_reset, 1), \
+    DEFINE_PROP_UINT8("lsgl_lbal", _state, _props.sgl_lbal, 0)
+
 typedef struct NvmeDialect {
     void *state;
 
@@ -208,6 +264,8 @@ typedef struct NvmeDialect {
     uint64_t (*blk_idx)(struct NvmeCtrl *, uint64_t);
     uint16_t (*admin_cmd)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
     uint16_t (*io_cmd)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
+    uint16_t (*get_log)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
+    uint16_t (*set_log)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
 } NvmeDialect;
 
 typedef struct NvmeCtrl {
@@ -262,5 +320,32 @@ typedef struct NvmeDifTuple {
     uint16_t app_tag;
     uint32_t ref_tag;
 } NvmeDifTuple;
+
+typedef uint16_t (*NvmeBlockSetupFn)(NvmeCtrl *n, QEMUSGList *qsg,
+    uint64_t blk_offset, uint32_t unit_len, NvmeRequest *req);
+
+void nvme_addr_write(NvmeCtrl *n, hwaddr addr, void *buf, int size);
+void nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size);
+
+uint16_t nvme_dma_write(NvmeCtrl *n, uint8_t *ptr, uint32_t len, NvmeCmd *cmd,
+    NvmeRequest *req);
+uint16_t nvme_dma_read(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
+    NvmeCmd *cmd, NvmeRequest *req);
+uint16_t nvme_dma_read_sgl(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
+    NvmeSglDescriptor sgl, NvmeRequest *req);
+
+uint16_t nvme_blk_map(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req,
+    NvmeBlockSetupFn blk_setup);
+uint16_t nvme_blk_submit_io(NvmeCtrl *n, NvmeRequest *req);
+NvmeBlockBackendRequest *nvme_blk_req_new(NvmeCtrl *n, NvmeRequest *req);
+
+void nvme_set_error_page(NvmeCtrl *n, uint16_t sqid, uint16_t cid,
+    uint16_t status, uint16_t location, uint64_t lba, uint32_t nsid);
+
+uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+
+void nvme_discard_cb(void *opaque, int ret);
+
+uint64_t nvme_ns_calc_blks(NvmeCtrl *n, NvmeNamespace *ns);
 
 #endif /* HW_NVME_H */

@@ -303,7 +303,6 @@ enum NvmeAdminCommands {
 
      /* vendor specific */
     NVME_ADM_CMD_SET_DB_MEMORY  = 0xC0,
-    NVME_ADM_CMD_SET_LOG_PAGE   = 0xC1,
 };
 
 enum NvmeIoCommands {

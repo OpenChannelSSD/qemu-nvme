@@ -9,6 +9,7 @@
 
 enum LnvmAdminCommands {
     LNVM_ADM_CMD_IDENTIFY       = 0xe2,
+    LNVM_ADM_CMD_SET_LOG_PAGE   = 0xc1,
 };
 
 enum LnvmIoCommands {
