@@ -1261,6 +1261,8 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
     req->ns = &n->namespaces[nsid - 1];
 
+    trace_nvme_io_cmd(req->cqe.cid, nsid, cmd->opcode);
+
     switch (cmd->opcode) {
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
@@ -1779,6 +1781,8 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 
     len = (((numdu << 16) | numdl) + 1) << 2;
 
+    trace_nvme_get_log(req->cqe.cid, lid);
+
     switch (lid) {
     case NVME_LOG_ERROR_INFO:
         return nvme_error_log_info(n, cmd, len, req);
@@ -1791,6 +1795,7 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             return n->dialect.get_log(n, cmd, req);
         }
 
+        trace_nvme_err_invalid_log_page(req->cqe.cid, lid);
         return NVME_INVALID_LOG_ID | NVME_DNR;
     }
 }
@@ -2057,6 +2062,8 @@ static uint16_t nvme_set_db_memory(NvmeCtrl *n, const NvmeCmd *cmd)
 
 static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
+    trace_nvme_admin_cmd(req->cqe.cid, cmd->opcode);
+
     switch (cmd->opcode) {
     case NVME_ADM_CMD_DELETE_SQ:
         return nvme_del_sq(n, cmd);

@@ -1016,6 +1016,8 @@ static uint16_t lnvm_get_log(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     case LNVM_CHUNK_INFO:
         return lnvm_chunk_info(n, cmd, len, off, req);
     default:
+
+        trace_nvme_err_invalid_log_page(req->cqe.cid, lid);
         return NVME_INVALID_LOG_ID | NVME_DNR;
     }
 }
