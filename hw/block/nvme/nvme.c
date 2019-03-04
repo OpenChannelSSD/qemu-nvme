@@ -2796,7 +2796,7 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     id->acl = params->acl;
     id->aerl = params->aerl;
     id->frmw = 7 << 1 | 1;
-    id->lpa = 0 << 0;
+    id->lpa = 1 << 2;
     id->elpe = params->elpe;
     id->npss = 0;
     id->sqes = (params->max_sqes << 4) | 0x6;
