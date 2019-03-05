@@ -19,8 +19,8 @@
 #define LNVM_NS_LOGPAGE_CHUNK_INFO_BLK_OFFSET(ns)                             \
     ((ns)->blk.begin + 2 * NVME_ID_NS_LBADS_BYTES(ns))
 
-#define LNVM_NS_LOGPAGE_CHUNK_INFO(ln, ns)                                    \
-    (ln)->chunk_info[(ns)->id - 1]
+/*#define LNVM_NS_LOGPAGE_CHUNK_INFO(ln, ns)                                    \
+    (ln)->chunk_info[(ns)->id - 1]*/
 
 #define LNVM_LBA_GET_SECTR(ln, lba)                                           \
     ((lba & (ln)->lbaf.sec_mask)                                              \
@@ -72,10 +72,16 @@ typedef struct LnvmMetaBlock {
 typedef struct LnvmCtrl {
     LnvmIdCtrl id_ctrl;
     LnvmAddrF  lbaf;
-
-    /* chunk info log pages indexed by namespaces */
-    LnvmCS (*chunk_info)[LNVM_CHUNK_INFO_LOGPAGE_SIZE / sizeof(LnvmCS)];
 } LnvmCtrl;
+
+typedef struct LnvmNamespace {
+    /* reset and write fail error probabilities indexed by namespace */
+    uint8_t *resetfail;
+    uint8_t *writefail;
+
+    /* chunk info log page */
+    LnvmCS chunk_info[LNVM_CHUNK_INFO_LOGPAGE_SIZE / sizeof(LnvmCS)];
+} LnvmNamespace;
 
 static inline int nvme_rw_is_write(NvmeRequest *req)
 {
@@ -134,5 +140,6 @@ uint16_t lnvm_chunk_set_free(NvmeCtrl *n, NvmeNamespace *ns, uint64_t lba,
 void lnvm_init_ctrl(NvmeCtrl *n);
 void lnvm_init_pci(NvmeCtrl *n, PCIDevice *pci_dev);
 int lnvm_init(NvmeCtrl *n, Error **errp);
+void lnvm_free_namespace(NvmeCtrl *n, NvmeNamespace *ns);
 
 #endif /* HW_LIGHTNVM_H */

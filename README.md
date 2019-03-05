@@ -67,8 +67,25 @@ drives do. The second, `lsgl_lbal` is disabled by default and governs how the
 `0x2`). By default `LBAL` will be not be interpreted as an SGL in any case.
 Enabling this option may be useful for NVMe over Fabrics.
 
+### Error Injection
 
-## Kernel
+The `lresetfail` and `lwritefail` QEMU parameters can be used to do
+probabilistic error injection. The parameters points to text files.
+
+Write error injection is done per sector.
+
+```
+grp=0 pu=3 chk=0 sec=53 writefail_prob=100
+```
+
+Reset error injection is done per chunk, so exclude the `sec` parameter.
+
+```
+grp=0 pu=3 chk=5 resetfail_prob=100
+grp=0 pu=3 chk=6 resetfail_prob=20
+```
+
+## Guest Kernel
 
 You probably want to make sure the following options are enabled in the kernel
 you are going to use.

@@ -2769,9 +2769,15 @@ static int nvme_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
     return 0;
 }
 
-static void nvme_free_namespace(NvmeNamespace *ns) {
-    g_free(ns->resetfail);
-    g_free(ns->writefail);
+static void nvme_free_namespace(NvmeCtrl *n, NvmeNamespace *ns) {
+    switch (n->params.dialect) {
+    case NVME_DIALECT_OCSSD20:
+        lnvm_free_namespace(n, ns);
+
+        break;
+    }
+
+    g_free(ns->state);
 }
 
 static void nvme_init_ctrl(NvmeCtrl *n)
@@ -2997,7 +3003,7 @@ static void nvme_exit(PCIDevice *pci_dev)
 
 
     for (int i = 0; i < n->params.num_namespaces; i++) {
-        nvme_free_namespace(&n->namespaces[i]);
+        nvme_free_namespace(n, &n->namespaces[i]);
     }
 
     nvme_clear_ctrl(n);

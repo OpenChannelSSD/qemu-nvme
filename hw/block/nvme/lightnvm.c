@@ -46,12 +46,13 @@ static void lnvm_trace_lba(NvmeCtrl *n, uint64_t lba, NvmeRequest *req)
 
 uint16_t lnvm_commit_chunk_info(NvmeCtrl *n, NvmeNamespace *ns)
 {
-    LnvmCtrl *ln = n->dialect.state;
+    LnvmNamespace *lns = ns->state;
+
     BlockBackend *blk = n->conf.blk;
     int written, nbytes = LNVM_CHUNK_INFO_LOGPAGE_SIZE;
 
     written = blk_pwrite(blk, LNVM_NS_LOGPAGE_CHUNK_INFO_BLK_OFFSET(ns),
-        LNVM_NS_LOGPAGE_CHUNK_INFO(ln, ns), nbytes, 0);
+        lns->chunk_info, nbytes, 0);
 
     if (written != nbytes) {
         return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
@@ -62,24 +63,23 @@ uint16_t lnvm_commit_chunk_info(NvmeCtrl *n, NvmeNamespace *ns)
 
 static uint16_t lnvm_load_chunk_info(NvmeCtrl *n, NvmeNamespace *ns)
 {
-    LnvmCtrl *ln = n->dialect.state;
+    LnvmNamespace *lns = ns->state;
     BlockBackend *blk = n->conf.blk;
 
     blk_pread(blk, LNVM_NS_LOGPAGE_CHUNK_INFO_BLK_OFFSET(ns),
-        LNVM_NS_LOGPAGE_CHUNK_INFO(ln, ns), LNVM_CHUNK_INFO_LOGPAGE_SIZE);
+        lns->chunk_info, LNVM_CHUNK_INFO_LOGPAGE_SIZE);
 
     return NVME_SUCCESS;
 }
 
 LnvmCS *lnvm_chunk_get_state(NvmeCtrl *n, NvmeNamespace *ns, uint64_t lba)
 {
-    LnvmCtrl *ln = n->dialect.state;
+    LnvmNamespace *lns = ns->state;
     if (!lnvm_lba_valid(n, lba)) {
         return NULL;
     }
 
-    return LNVM_NS_LOGPAGE_CHUNK_INFO(ln, ns) +
-        lnvm_lba_to_chunk_index(n, lba);
+    return &lns->chunk_info[lnvm_lba_to_chunk_index(n, lba)];
 }
 
 uint16_t lnvm_advance_wp(NvmeCtrl *n, uint64_t lba, uint16_t nlb,
@@ -178,12 +178,13 @@ static void lnvm_inject_write_err(NvmeCtrl *n, NvmeRequest *req)
 {
     LnvmParams *params = &n->params.lnvm;
     NvmeNamespace *ns = req->ns;
+    LnvmNamespace *lns = ns->state;
     int req_fail = 0;
 
-    if (ns && ns->writefail && req->is_write && req->slba) {
+    if (lns && lns->writefail && req->is_write && req->slba) {
         for (int i = 0; i < req->nlb; i++) {
             uint64_t lba = ((uint64_t *) req->slba)[i];
-            uint8_t err_prob = ns->writefail[n->dialect.blk_idx(n, lba)];
+            uint8_t err_prob = lns->writefail[n->dialect.blk_idx(n, lba)];
 
             LnvmCS *chunk_meta = lnvm_chunk_get_state(n, ns, lba);
 
@@ -205,7 +206,7 @@ static void lnvm_inject_write_err(NvmeCtrl *n, NvmeRequest *req)
                 }
 
                 /* Fail the next erase */
-                ns->resetfail[lnvm_lba_to_chunk_index(n, lba)] = 100;
+                lns->resetfail[lnvm_lba_to_chunk_index(n, lba)] = 100;
 
                 if (params->debug) {
                     lnvm_trace_lba(n, lba, req);
@@ -412,6 +413,7 @@ uint16_t lnvm_chunk_set_free(NvmeCtrl *n, NvmeNamespace *ns, uint64_t lba,
     hwaddr mptr, NvmeRequest *req)
 {
     LnvmParams *params = &n->params.lnvm;
+    LnvmNamespace *lns = ns->state;
 
     LnvmCS *chunk_meta;
     uint32_t resetfail_prob = 0;
@@ -422,8 +424,8 @@ uint16_t lnvm_chunk_set_free(NvmeCtrl *n, NvmeNamespace *ns, uint64_t lba,
         return LNVM_INVALID_RESET | NVME_DNR;
     }
 
-    if (ns->resetfail) {
-        resetfail_prob = ns->resetfail[lnvm_lba_to_chunk_index(n, lba)];
+    if (lns->resetfail) {
+        resetfail_prob = lns->resetfail[lnvm_lba_to_chunk_index(n, lba)];
     }
 
     if (resetfail_prob) {
@@ -615,7 +617,7 @@ static int get_state_id(char *state)
 
 static int update_chunk(NvmeCtrl *n, NvmeNamespace *ns, char *chunkinfo)
 {
-    LnvmCtrl *ln = n->dialect.state;
+    LnvmNamespace *lns = ns->state;
     LnvmCS *chunk_meta;
     unsigned int grp, lun, chk, wp, wi;
     char status[16] = {0};
@@ -654,7 +656,7 @@ static int update_chunk(NvmeCtrl *n, NvmeNamespace *ns, char *chunkinfo)
         return 1;
     }
 
-    chunk_meta = LNVM_NS_LOGPAGE_CHUNK_INFO(ln, ns) + i;
+    chunk_meta = &lns->chunk_info[i];
     chunk_meta->state = state_id;
     chunk_meta->wear_index = wi;
     chunk_meta->wp = wp;
@@ -676,6 +678,7 @@ static int update_chunk(NvmeCtrl *n, NvmeNamespace *ns, char *chunkinfo)
 
 static int set_resetfail_chunk(NvmeCtrl *n, NvmeNamespace *ns, char *chunkinfo)
 {
+    LnvmNamespace *lns = ns->state;
     unsigned int ch, lun, chk, resetfail_prob;
     int i;
 
@@ -696,7 +699,7 @@ static int set_resetfail_chunk(NvmeCtrl *n, NvmeNamespace *ns, char *chunkinfo)
         return 1;
     }
 
-    ns->resetfail[i] = resetfail_prob;
+    lns->resetfail[i] = resetfail_prob;
 
     return 0;
 }
@@ -705,6 +708,7 @@ static int set_writefail_sector(NvmeCtrl *n, NvmeNamespace *ns, char *secinfo)
 {
     LnvmCtrl *ln = n->dialect.state;
     LnvmParams *params = &n->params.lnvm;
+    LnvmNamespace *lns = ns->state;
     unsigned int ch, lun, chk, sec, writefail_prob;
     uint64_t lba;
 
@@ -729,7 +733,7 @@ static int set_writefail_sector(NvmeCtrl *n, NvmeNamespace *ns, char *secinfo)
     }
 
     lba = LNVM_LBA(ln, ch, lun, chk, sec);
-    ns->writefail[lnvm_lba_to_sector_index(n, lba)] = writefail_prob;
+    lns->writefail[lnvm_lba_to_sector_index(n, lba)] = writefail_prob;
 
     return 0;
 }
@@ -959,9 +963,9 @@ static uint16_t lnvm_erase(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 static uint16_t lnvm_chunk_info(NvmeCtrl *n, NvmeCmd *cmd,
     uint32_t buf_len, uint64_t off, NvmeRequest *req)
 {
-    LnvmCtrl *ln = n->dialect.state;
     LnvmParams *params = &n->params.lnvm;
     NvmeNamespace *ns;
+    LnvmNamespace *lns;
     uint8_t *log_page;
     uint32_t log_len, trans_len, nsid;
     uint16_t ret;
@@ -973,10 +977,12 @@ static uint16_t lnvm_chunk_info(NvmeCtrl *n, NvmeCmd *cmd,
 
     ns = &n->namespaces[nsid - 1];
 
+    lns = ns->state;
+
     log_len = params->chks_total * sizeof(LnvmCS);
     trans_len = MIN(log_len, buf_len);
 
-    log_page = (uint8_t *) LNVM_NS_LOGPAGE_CHUNK_INFO(ln, ns) + off;
+    log_page = (uint8_t *) lns->chunk_info + off;
 
     if (cmd->opcode == NVME_ADM_CMD_GET_LOG_PAGE) {
         return nvme_dma_read(n, log_page, trans_len, cmd, req);
@@ -1074,6 +1080,14 @@ static uint16_t lnvm_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     }
 }
 
+void lnvm_free_namespace(NvmeCtrl *n, NvmeNamespace *ns)
+{
+    LnvmNamespace *lns = ns->state;
+
+    g_free(lns->writefail);
+    g_free(lns->resetfail);
+}
+
 static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     LnvmCtrl *ln = n->dialect.state;
@@ -1086,10 +1100,12 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
     NvmeIdNs *id_ns = &ns->id_ns;
 
     LnvmAddrF *lbaf = &ln->lbaf;
+    LnvmNamespace *lns = ns->state;
 
     uint64_t nchks;
 
     ns->ctrl = n;
+    lns = ns->state = g_malloc0(sizeof(LnvmNamespace));
 
     /* recalculate number of blocks to account for the predefined block, the
        lightnvm meta data block and the chunk info log page */
@@ -1178,7 +1194,7 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
     blk_pread(n->conf.blk, LNVM_NS_LNVM_METADATA_BLK_OFFSET(ns), &metablk,
         sizeof(metablk));
     if (metablk.magic != LNVM_MAGIC) {
-        LnvmCS *cs = LNVM_NS_LOGPAGE_CHUNK_INFO(ln, ns);
+        LnvmCS *cs = lns->chunk_info;
 
         for (int i = 0; i < params->chks_total; i++) {
             cs[i].state = LNVM_CHUNK_FREE;
@@ -1217,10 +1233,10 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
         }
     }
 
-    ns->resetfail = NULL;
+    lns->resetfail = NULL;
     if (params->resetfail_fname) {
-        ns->resetfail = g_malloc0_n(params->chks_total, sizeof(*ns->resetfail));
-        if (!ns->resetfail) {
+        lns->resetfail = g_malloc0_n(params->chks_total, sizeof(*lns->resetfail));
+        if (!lns->resetfail) {
             error_setg(errp, "nvme: could not allocate memory");
             return 1;
         }
@@ -1230,10 +1246,10 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
         }
     }
 
-    ns->writefail = NULL;
+    lns->writefail = NULL;
     if (params->writefail_fname) {
-        ns->writefail = g_malloc0_n(ns->ns_blks, sizeof(*ns->writefail));
-        if (!ns->writefail) {
+        lns->writefail = g_malloc0_n(ns->ns_blks, sizeof(*lns->writefail));
+        if (!lns->writefail) {
             error_setg(errp, "nvme: could not allocate memory");
             return 1;
         }
@@ -1246,9 +1262,9 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
             * sure to allocate the resetfailure buffer if it has not been
             * already
             */
-        if (!ns->resetfail) {
-            ns->resetfail = g_malloc0_n(params->chks_total,
-                sizeof(*ns->resetfail));
+        if (!lns->resetfail) {
+            lns->resetfail = g_malloc0_n(params->chks_total,
+                sizeof(*lns->resetfail));
         }
     }
 
@@ -1257,11 +1273,6 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
 
 static int lnvm_init_namespaces(NvmeCtrl *n, Error **errp)
 {
-
-    LnvmCtrl *ln = n->dialect.state;
-    ln->chunk_info = g_malloc0_n(n->params.num_namespaces,
-        sizeof(*ln->chunk_info));
-
     for (int i = 0; i < n->params.num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
 

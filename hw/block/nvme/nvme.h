@@ -133,8 +133,8 @@ typedef struct NvmeNamespace {
         uint64_t meta;
     } blk;
 
-    uint8_t         *resetfail;
-    uint8_t         *writefail;
+    /* any dialect additional state */
+    void *state;
 } NvmeNamespace;
 
 #define TYPE_NVME "nvme"
@@ -265,7 +265,6 @@ typedef struct NvmeDialect {
     uint16_t (*admin_cmd)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
     uint16_t (*io_cmd)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
     uint16_t (*get_log)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
-    uint16_t (*set_log)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
 } NvmeDialect;
 
 typedef struct NvmeCtrl {
