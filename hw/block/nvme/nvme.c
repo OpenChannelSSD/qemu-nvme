@@ -874,8 +874,8 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
             n->cqe_size);
     }
 
-    if (sq->sqid) { /* only for I/O commands */
-        lnvm_post_cqe(n, req);
+    if (n->dialect.post_cqe) {
+        n->dialect.post_cqe(n, req);
     }
 
     cqe->status = cpu_to_le16((req->status << 1) | cq->phase);

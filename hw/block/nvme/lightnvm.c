@@ -247,13 +247,15 @@ static void lnvm_inject_write_err(NvmeCtrl *n, NvmeRequest *req)
 
 void lnvm_post_cqe(NvmeCtrl *n, NvmeRequest *req)
 {
-    /* Do post-completion processing depending on the type of command. This is
-     * used primarily to inject different types of errors.
-     */
-    switch (req->cmd_opcode) {
-    case NVME_CMD_WRITE:
-    case LNVM_CMD_VECT_WRITE:
-         lnvm_inject_write_err(n, req);
+    NvmeSQueue *sq = req->sq;
+
+    if (sq->sqid) { /* only for I/O commands */
+        switch (req->cmd_opcode) {
+        case LNVM_CMD_VECT_WRITE:
+            lnvm_inject_write_err(n, req);
+
+            g_free((void *) req->slba);
+        }
     }
 }
 
@@ -1325,6 +1327,7 @@ int lnvm_init(NvmeCtrl *n, Error **errp)
         .io_cmd           = lnvm_io_cmd,
         .get_log          = lnvm_get_log,
         .blk_req_epilogue = lnvm_blk_req_epilogue,
+        .post_cqe         = lnvm_post_cqe,
     };
 
     if (lnvm_init_namespaces(n, errp)) {

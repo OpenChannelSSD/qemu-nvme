@@ -268,6 +268,7 @@ typedef struct NvmeDialect {
 
     uint16_t (*blk_req_epilogue)(struct NvmeCtrl *, NvmeNamespace *,
         NvmeBlockBackendRequest *, NvmeRequest *);
+    void (*post_cqe)(struct NvmeCtrl *, NvmeRequest *);
 } NvmeDialect;
 
 typedef struct NvmeCtrl {
