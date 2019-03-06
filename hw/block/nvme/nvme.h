@@ -265,6 +265,9 @@ typedef struct NvmeDialect {
     uint16_t (*admin_cmd)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
     uint16_t (*io_cmd)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
     uint16_t (*get_log)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
+
+    uint16_t (*blk_req_epilogue)(struct NvmeCtrl *, NvmeNamespace *,
+        NvmeBlockBackendRequest *, NvmeRequest *);
 } NvmeDialect;
 
 typedef struct NvmeCtrl {
@@ -346,5 +349,7 @@ uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 void nvme_discard_cb(void *opaque, int ret);
 
 uint64_t nvme_ns_calc_blks(NvmeCtrl *n, NvmeNamespace *ns);
+
+void nvme_rw_cb(void *opaque, int ret);
 
 #endif /* HW_NVME_H */

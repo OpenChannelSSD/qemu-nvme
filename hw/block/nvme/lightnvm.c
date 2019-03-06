@@ -114,6 +114,35 @@ uint16_t lnvm_advance_wp(NvmeCtrl *n, uint64_t lba, uint16_t nlb,
         chunk_meta->state = LNVM_CHUNK_CLOSED;
     }
 
+    /* fire of an aio to update the chunk state */
+    NvmeBlockBackendRequest *blk_req = g_malloc0(sizeof(*blk_req));
+    blk_req->req = req;
+
+    qemu_iovec_init(&blk_req->iov, 1);
+    qemu_iovec_add(&blk_req->iov, chunk_meta, sizeof(LnvmCS));
+
+    blk_req->blk_offset = LNVM_NS_LOGPAGE_CHUNK_INFO_BLK_OFFSET(req->ns) +
+        lnvm_lba_to_chunk_index(n, lba) * sizeof(LnvmCS);
+
+    QTAILQ_INSERT_TAIL(&req->blk_req_tailq_head, blk_req, blk_req_tailq);
+
+    block_acct_start(blk_get_stats(n->conf.blk), &blk_req->acct,
+        blk_req->iov.size, BLOCK_ACCT_WRITE);
+
+    blk_req->aiocb = blk_aio_pwritev(n->conf.blk, blk_req->blk_offset,
+        &blk_req->iov, 0, nvme_rw_cb, blk_req);
+
+    return NVME_SUCCESS;
+}
+
+static uint16_t lnvm_blk_req_epilogue(NvmeCtrl *n, NvmeNamespace *ns,
+    NvmeBlockBackendRequest *blk_req, NvmeRequest *req)
+{
+    if (req->is_write && blk_req->blk_offset >= ns->blk.data &&
+        blk_req->blk_offset < ns->blk.meta) {
+        return lnvm_advance_wp(n, blk_req->slba, blk_req->nlb, req);
+    }
+
     return NVME_SUCCESS;
 }
 
@@ -1288,13 +1317,14 @@ int lnvm_init(NvmeCtrl *n, Error **errp)
 {
     LnvmCtrl *ln = g_malloc0(sizeof(*ln));
     n->dialect = (NvmeDialect) {
-        .state        = ln,
+        .state = ln,
 
-        .blk_idx      = lnvm_lba_to_sector_index,
-        .rw_check_req = lnvm_rw_check_req,
-        .admin_cmd    = lnvm_admin_cmd,
-        .io_cmd       = lnvm_io_cmd,
-        .get_log      = lnvm_get_log
+        .blk_idx          = lnvm_lba_to_sector_index,
+        .rw_check_req     = lnvm_rw_check_req,
+        .admin_cmd        = lnvm_admin_cmd,
+        .io_cmd           = lnvm_io_cmd,
+        .get_log          = lnvm_get_log,
+        .blk_req_epilogue = lnvm_blk_req_epilogue,
     };
 
     if (lnvm_init_namespaces(n, errp)) {
