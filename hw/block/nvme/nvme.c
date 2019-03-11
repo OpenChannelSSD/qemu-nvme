@@ -545,7 +545,7 @@ static uint16_t nvme_blk_setup(NvmeCtrl *n, QEMUSGList *qsg,
     size_t curr_offset = 0;
     int curr_sge = 0;
 
-    uint64_t soffset = n->dialect.blk_idx(n, req->slba);
+    uint64_t soffset = n->dialect.blk_idx(n, ns, req->slba);
 
     if (NULL == (blk_req = nvme_blk_req_new(n, req))) {
         return NVME_INTERNAL_DEV_ERROR;
@@ -1177,8 +1177,8 @@ void nvme_discard_cb(void *opaque, int ret)
 
 static uint16_t nvme_dsm(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
-    LnvmCtrl *ln = n->dialect.state;
     NvmeNamespace *ns = req->ns;
+    LnvmNamespace *lns = ns->state;
     NvmeDsmCmd *dsm = (NvmeDsmCmd *)cmd;
 
     if (dsm->attributes & NVME_DSMGMT_AD) {
@@ -1195,7 +1195,6 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             return err;
         }
 
-
         for (int i = 0; i < nr; i++) {
             uint64_t sectr_idx, slba;
             uint16_t nlb, err;
@@ -1204,13 +1203,13 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             NvmeBlockBackendRequest *blk_req = nvme_blk_req_new(n, req);
 
             slba = le64_to_cpu(range[i].slba);
-            if (LNVM_LBA_GET_SECTR(ln, slba)) {
+            if (LNVM_LBA_GET_SECTR(lns, slba)) {
                 nvme_set_error_page(n, req->sq->sqid, req->cqe.cid,
                     NVME_INVALID_FIELD, 0, slba, ns->id);
                 return NVME_INVALID_FIELD | NVME_DNR;
             }
 
-            sectr_idx = n->dialect.blk_idx(n, slba);
+            sectr_idx = n->dialect.blk_idx(n, ns, slba);
             nlb = le32_to_cpu(range[i].nlb);
 
             if (NULL == (cs = lnvm_chunk_get_state(n, ns, slba))) {
@@ -2762,15 +2761,16 @@ static int nvme_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
     blk_pwrite(n->conf.blk, NVME_NS_PREDEF_BLK_OFFSET(n, ns), pbuf,
         NVME_ID_NS_LBADS_BYTES(ns), 0);
 
+    if (n->dialect.init_namespace) {
+        return n->dialect.init_namespace(n, ns, errp);
+    }
+
     return 0;
 }
 
 static void nvme_free_namespace(NvmeCtrl *n, NvmeNamespace *ns) {
-    switch (n->params.dialect) {
-    case NVME_DIALECT_OCSSD20:
-        lnvm_free_namespace(n, ns);
-
-        break;
+    if (n->dialect.free_namespace) {
+        n->dialect.free_namespace(n, ns);
     }
 
     g_free(ns->state);
@@ -2781,11 +2781,6 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     NvmeIdCtrl *id = &n->id_ctrl;
     NvmeParams *params = &n->params;
     uint8_t *pci_conf = n->parent_obj.config;
-
-    n->dialect = (NvmeDialect) {
-        .blk_idx      = nvme_lba_to_sector_index,
-        .rw_check_req = nvme_rw_check_req,
-    };
 
     n->sgls = 0x80001;
 
@@ -2859,11 +2854,8 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     n->bar.intmc = n->bar.intms = 0;
     n->temperature = NVME_TEMPERATURE;
 
-    switch (n->params.dialect) {
-    case NVME_DIALECT_OCSSD20:
-        lnvm_init_ctrl(n);
-
-        break;
+    if (n->dialect.init_ctrl) {
+        n->dialect.init_ctrl(n);
     }
 }
 
@@ -2910,11 +2902,8 @@ static void nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev)
             PCI_BASE_ADDRESS_MEM_PREFETCH, &n->ctrl_mem);
     }
 
-    switch (n->params.dialect) {
-    case NVME_DIALECT_OCSSD20:
-        lnvm_init_pci(n, pci_dev);
-
-        break;
+    if (n->dialect.init_pci) {
+        n->dialect.init_pci(n, pci_dev);
     }
 }
 
@@ -2966,6 +2955,7 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
     n->start_time = time(NULL);
     n->reg_size = pow2ceil(0x1004 + 2 * (n->params.num_queues + 1) * 4);
 
+    // set aside an equal amount of space for each namespace
     n->ns_size = bs_size / (uint64_t) n->params.num_namespaces;
 
     n->sq = g_new0(NvmeSQueue *, n->params.num_queues);
@@ -2976,27 +2966,32 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
     n->features.int_vector_config = g_malloc0_n(n->params.num_queues,
         sizeof(*n->features.int_vector_config));
 
+    switch (n->params.dialect) {
+    case NVME_DIALECT_OCSSD20:
+        if (lnvm_realize(n, errp)) {
+            return;
+        }
+
+        break;
+
+    default:
+        n->dialect = (NvmeDialect) {
+            .blk_idx      = nvme_lba_to_sector_index,
+            .rw_check_req = nvme_rw_check_req,
+        };
+    }
+
     nvme_init_pci(n, pci_dev);
     nvme_init_ctrl(n);
 
     if (nvme_init_namespaces(n, errp)) {
         return;
     }
-
-    switch (n->params.dialect) {
-    case NVME_DIALECT_OCSSD20:
-        if (lnvm_init(n, errp)) {
-            return;
-        }
-
-        break;
-    }
 }
 
 static void nvme_exit(PCIDevice *pci_dev)
 {
     NvmeCtrl *n = NVME(pci_dev);
-
 
     for (int i = 0; i < n->params.num_namespaces; i++) {
         nvme_free_namespace(n, &n->namespaces[i]);

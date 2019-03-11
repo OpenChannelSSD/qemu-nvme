@@ -160,15 +160,6 @@ typedef struct LnvmParams {
     char *chunkstate_fname;
     char *resetfail_fname;
     char *writefail_fname;
-
-    /* derived values */
-    uint32_t chks_per_lun;
-    uint32_t chks_per_grp;
-    uint32_t chks_total;
-    uint32_t secs_per_chk;
-    uint32_t secs_per_lun;
-    uint32_t secs_per_grp;
-    uint32_t secs_total;
 } LnvmParams;
 
 typedef struct NvmeParams {
@@ -260,8 +251,13 @@ typedef struct NvmeParams {
 typedef struct NvmeDialect {
     void *state;
 
+    void (*init_ctrl)(struct NvmeCtrl *);
+    void (*init_pci)(struct NvmeCtrl *, PCIDevice *);
+    int (*init_namespace)(struct NvmeCtrl *, NvmeNamespace *, Error **);
+    void (*free_namespace)(struct NvmeCtrl *, NvmeNamespace *);
+
     uint16_t (*rw_check_req)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
-    uint64_t (*blk_idx)(struct NvmeCtrl *, uint64_t);
+    uint64_t (*blk_idx)(struct NvmeCtrl *, NvmeNamespace *, uint64_t);
     uint16_t (*admin_cmd)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
     uint16_t (*io_cmd)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
     uint16_t (*get_log)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
