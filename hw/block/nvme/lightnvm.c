@@ -1134,7 +1134,7 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
     LnvmAddrF *lbaf;
     LnvmNamespace *lns;
 
-    uint64_t nchks;
+    uint64_t max_chks, nchks;
 
     ns->ctrl = n;
     lns = ns->state = g_malloc0(sizeof(LnvmNamespace));
@@ -1155,11 +1155,21 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
         params->chunkinfo_size;
     ns->blk.meta = ns->blk.data + NVME_ID_NS_LBADS_BYTES(ns) * ns->ns_blks;
 
-    nchks = ns->ns_blks / params->num_sec;
+    max_chks = ns->ns_blks / params->num_sec;
+    nchks = params->num_chk ?
+        params->num_chk * (params->num_lun * params->num_grp) :
+        max_chks;
+
+    if (nchks > max_chks) {
+        error_setg(errp, "too many chunks (%ld); "
+            "underlying block device can accomodate at most %ld chunks",
+            nchks, max_chks);
+    }
 
     if (nchks > (params->chunkinfo_size / sizeof(LnvmCS))) {
-        error_setg(errp, "too many chunks (%ld); max is %ld", nchks,
-            params->chunkinfo_size / sizeof(LnvmCS));
+        error_setg(errp, "too many chunks (%ld); "
+            "chunk info log page can accomodate at most %ld chunks",
+            nchks, params->chunkinfo_size / sizeof(LnvmCS));
         return 1;
     }
 
@@ -1172,7 +1182,9 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
 
     lns->id_ctrl.mccap = cpu_to_le32(params->mccap);
 
-    params->num_chk = nchks / (params->num_lun * params->num_grp);
+    if (!params->num_chk) {
+        params->num_chk = nchks / (params->num_lun * params->num_grp);
+    }
 
     id_geo->num_grp = cpu_to_le16(params->num_grp);
     id_geo->num_lun = cpu_to_le16(params->num_lun);

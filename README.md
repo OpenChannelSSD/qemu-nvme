@@ -40,10 +40,11 @@ To add the OCSSD NVMe device, extend the QEMU arguments with something like:
         lchunkstate=data/chunktable.txt
 ```
 
-**NOTE** Only the number of group, parallel units per group and sectors per
-chunk are configured. The number of chunks per parallel unit is inferred from
+**NOTE** If only the number of group, parallel units per group and sectors per
+chunk are configured, the number of chunks per parallel unit is inferred from
 those values to fill out the backend file (with reserved space for internal and
-external metadata).
+external metadata). If the `lnum_chk` parameter is used and exact geometry will
+be set up and QEMU will make sure the backing block device can accomodate it.
 
 The block device maintains an on-device Chunk Info Log Page. When the device is
 brought up any state will be restored. The restored chunk states may be

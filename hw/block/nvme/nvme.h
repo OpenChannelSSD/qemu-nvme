@@ -241,6 +241,7 @@ typedef struct NvmeParams {
     DEFINE_PROP_UINT16("lnum_grp", _state, _props.num_grp, 1), \
     DEFINE_PROP_UINT16("lnum_pu", _state, _props.num_lun, 1), \
     DEFINE_PROP_UINT32("lnum_sec", _state, _props.num_sec, 4096), \
+    DEFINE_PROP_UINT32("lnum_chk", _state, _props.num_chk, 0), \
     DEFINE_PROP_UINT32("lsec_size", _state, _props.sec_size, 4096), \
     DEFINE_PROP_STRING("lresetfail", _state, _props.resetfail_fname), \
     DEFINE_PROP_STRING("lwritefail", _state, _props.writefail_fname), \

@@ -70,6 +70,8 @@
  *                          Default:1
  *  lnum_pu=<int>         : Number of parallel units per group, Default:1
  *  lnum_sec=<int>        : Number of sectors per chunk, Default:4096
+ *  lnum_chk=<int>        : Number of chunks per parallel unit.
+ *                          Default:0 (deduce from size of underlying device)
  *  lsec_size=<int>       : Sector size, Default:4096
  *  lws_min=<int>         : Mininum write size for device in sectors,
  *                          Default:4
@@ -80,6 +82,8 @@
  *  lchunkstate=<file>    : Load state table from file destination (Provide
  *                          path to file. If no file is provided a state table
  *                          will be generated.
+ *  lchunkinfo_size       : Size of the chunk info log page.
+ *                          Default:4194304 (4 MB)
  *  lresetfail=<file>     : Reset fail injection configuration file.
  *  lwritefail=<file>     : Write fail injection configuration file.
  *  ldebug                : Enable LightNVM debugging, Default:0 (disabled)
