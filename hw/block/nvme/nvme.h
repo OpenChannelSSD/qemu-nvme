@@ -152,6 +152,7 @@ typedef struct LnvmParams {
     uint32_t ws_min;
     uint32_t ws_opt;
     uint32_t mw_cunits;
+    uint64_t chunkinfo_size;
 
     uint8_t debug;
     uint8_t early_reset;
@@ -244,6 +245,7 @@ typedef struct NvmeParams {
     DEFINE_PROP_STRING("lresetfail", _state, _props.resetfail_fname), \
     DEFINE_PROP_STRING("lwritefail", _state, _props.writefail_fname), \
     DEFINE_PROP_STRING("lchunkstate", _state, _props.chunkstate_fname), \
+    DEFINE_PROP_UINT64("lchunkinfo_size", _state, _props.chunkinfo_size, 4 << 20), \
     DEFINE_PROP_UINT8("ldebug", _state, _props.debug, 0), \
     DEFINE_PROP_UINT8("learly_reset", _state, _props.early_reset, 1), \
     DEFINE_PROP_UINT8("lsgl_lbal", _state, _props.sgl_lbal, 0)

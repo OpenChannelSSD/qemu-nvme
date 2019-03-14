@@ -10,7 +10,6 @@
 #include "block/lightnvm.h"
 
 #define LNVM_CMD_MAX_LBAS 64
-#define LNVM_CHUNK_INFO_LOGPAGE_SIZE (4 << 20)
 #define LNVM_MAGIC (LNVM_DID << 16 | LNVM_VID)
 
 #define LNVM_NS_LNVM_METADATA_BLK_OFFSET(ns)                                  \
@@ -86,7 +85,7 @@ typedef struct LnvmNamespace {
     uint32_t secs_total;
 
     /* chunk info log page */
-    LnvmCS chunk_info[LNVM_CHUNK_INFO_LOGPAGE_SIZE / sizeof(LnvmCS)];
+    LnvmCS *chunk_info;
 } LnvmNamespace;
 
 static inline int nvme_rw_is_write(NvmeRequest *req)

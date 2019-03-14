@@ -47,9 +47,10 @@ static void lnvm_trace_lba(NvmeCtrl *n, NvmeNamespace *ns, uint64_t lba, NvmeReq
 uint16_t lnvm_commit_chunk_info(NvmeCtrl *n, NvmeNamespace *ns)
 {
     LnvmNamespace *lns = ns->state;
+    LnvmParams *params = &n->params.lnvm;
 
     BlockBackend *blk = n->conf.blk;
-    int written, nbytes = LNVM_CHUNK_INFO_LOGPAGE_SIZE;
+    int written, nbytes = params->chunkinfo_size;
 
     written = blk_pwrite(blk, LNVM_NS_LOGPAGE_CHUNK_INFO_BLK_OFFSET(ns),
         lns->chunk_info, nbytes, 0);
@@ -64,10 +65,11 @@ uint16_t lnvm_commit_chunk_info(NvmeCtrl *n, NvmeNamespace *ns)
 static uint16_t lnvm_load_chunk_info(NvmeCtrl *n, NvmeNamespace *ns)
 {
     LnvmNamespace *lns = ns->state;
+    LnvmParams *params = &n->params.lnvm;
     BlockBackend *blk = n->conf.blk;
 
     blk_pread(blk, LNVM_NS_LOGPAGE_CHUNK_INFO_BLK_OFFSET(ns),
-        lns->chunk_info, LNVM_CHUNK_INFO_LOGPAGE_SIZE);
+        lns->chunk_info, params->chunkinfo_size);
 
     return NVME_SUCCESS;
 }
@@ -1136,6 +1138,7 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
 
     ns->ctrl = n;
     lns = ns->state = g_malloc0(sizeof(LnvmNamespace));
+    lns->chunk_info = g_malloc0(params->chunkinfo_size);
 
     lbaf = &lns->lbaf;
     id_ctrl = &lns->id_ctrl;
@@ -1146,17 +1149,17 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
     /* recalculate number of blocks to account for the predefined block, the
        lightnvm meta data block and the chunk info log page */
     ns->ns_blks = nvme_ns_calc_blks(n, ns) -
-        (2 + LNVM_CHUNK_INFO_LOGPAGE_SIZE / NVME_ID_NS_LBADS_BYTES(ns));
+        (2 + params->chunkinfo_size / NVME_ID_NS_LBADS_BYTES(ns));
 
     ns->blk.data = ns->blk.begin + (2 * NVME_ID_NS_LBADS_BYTES(ns)) +
-        LNVM_CHUNK_INFO_LOGPAGE_SIZE;
+        params->chunkinfo_size;
     ns->blk.meta = ns->blk.data + NVME_ID_NS_LBADS_BYTES(ns) * ns->ns_blks;
 
     nchks = ns->ns_blks / params->num_sec;
 
-    if (nchks > (LNVM_CHUNK_INFO_LOGPAGE_SIZE / sizeof(LnvmCS))) {
+    if (nchks > (params->chunkinfo_size / sizeof(LnvmCS))) {
         error_setg(errp, "too many chunks (%ld); max is %ld", nchks,
-            LNVM_CHUNK_INFO_LOGPAGE_SIZE / sizeof(LnvmCS));
+            params->chunkinfo_size / sizeof(LnvmCS));
         return 1;
     }
 
