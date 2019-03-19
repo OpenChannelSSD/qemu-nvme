@@ -5147,7 +5147,7 @@ void bdrv_img_create(const char *filename, const char *fmt,
         }
     } /* (backing_file && !(flags & BDRV_O_NO_BACKING)) */
 
-    if (size == -1) {
+    if (size == -1 && !drv->no_size_required) {
         error_setg(errp, "Image creation needs a size parameter");
         goto out;
     }

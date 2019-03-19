@@ -1,4 +1,4 @@
-block-obj-y += raw-format.o vmdk.o vpc.o
+block-obj-y += raw-format.o vmdk.o vpc.o ocssd.o
 block-obj-$(CONFIG_QCOW1) += qcow.o
 block-obj-$(CONFIG_VDI) += vdi.o
 block-obj-$(CONFIG_CLOOP) += cloop.o

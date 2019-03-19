@@ -7,6 +7,8 @@
 #define LNVM_VID 0x1d1d
 #define LNVM_DID 0x1f1f
 
+#define LNVM_MAGIC ('L' << 24 | 'N' << 16 | 'V' << 8 | 'M')
+
 enum LnvmAdminCommands {
     LNVM_ADM_CMD_IDENTIFY       = 0xe2,
     LNVM_ADM_CMD_SET_LOG_PAGE   = 0xc1,
@@ -132,7 +134,17 @@ typedef struct LnvmIdLBAF {
     uint8_t rsvd[4];
 } LnvmIdLBAF;
 
-typedef struct LnvmIdCtrl {
+typedef struct LnvmHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t num_namespaces;
+    uint32_t rsvd;
+    uint64_t sector_size;
+    uint32_t md_size;
+    uint64_t ns_size;
+} LnvmHeader;
+
+typedef struct LnvmNamespaceGeometry {
     struct {
         uint8_t major;
         uint8_t minor;
@@ -147,7 +159,7 @@ typedef struct LnvmIdCtrl {
     LnvmIdWrt  wrt;
     LnvmIdPerf perf;
     uint8_t    rsvd4[3840];
-} LnvmIdCtrl;
+} LnvmNamespaceGeometry;
 
 enum LnvmParamsMccap {
     LNVM_PARAMS_MCCAP_MULTIPLE_RESETS = 0x1 << 1,
@@ -168,7 +180,7 @@ static inline void _lnvm_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(LnvmIdPerf) != 64);
     QEMU_BUILD_BUG_ON(sizeof(LnvmRwCmd)  != 64);
     QEMU_BUILD_BUG_ON(sizeof(LnvmDmCmd)  != 64);
-    QEMU_BUILD_BUG_ON(sizeof(LnvmIdCtrl) != 4096);
+    QEMU_BUILD_BUG_ON(sizeof(LnvmNamespaceGeometry) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(LnvmCS)     != 32);
 }
 

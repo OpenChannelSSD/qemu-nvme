@@ -10,37 +10,30 @@
 #include "block/lightnvm.h"
 
 #define LNVM_CMD_MAX_LBAS 64
-#define LNVM_MAGIC (LNVM_DID << 16 | LNVM_VID)
-
-#define LNVM_NS_LNVM_METADATA_BLK_OFFSET(ns)                                  \
-    ((ns)->blk.begin + NVME_ID_NS_LBADS_BYTES(ns))
 
 #define LNVM_NS_LOGPAGE_CHUNK_INFO_BLK_OFFSET(ns)                             \
-    ((ns)->blk.begin + 2 * NVME_ID_NS_LBADS_BYTES(ns))
+    ((ns)->blk.begin + sizeof(LnvmNamespaceGeometry))
 
-/*#define LNVM_NS_LOGPAGE_CHUNK_INFO(ln, ns)                                    \
-    (ln)->chunk_info[(ns)->id - 1]*/
+#define LNVM_LBA_GET_SECTR(lbaf, lba) \
+    ((lba & (lbaf)->sec_mask) \
+        >> (lbaf)->sec_offset)
 
-#define LNVM_LBA_GET_SECTR(lns, lba)                                           \
-    ((lba & (lns)->lbaf.sec_mask)                                              \
-        >> (lns)->lbaf.sec_offset)
+#define LNVM_LBA_GET_CHUNK(lbaf, lba) \
+    ((lba & (lbaf)->chk_mask) \
+        >> (lbaf)->chk_offset)
 
-#define LNVM_LBA_GET_CHUNK(lns, lba)                                           \
-    ((lba & (lns)->lbaf.chk_mask)                                              \
-        >> (lns)->lbaf.chk_offset)
+#define LNVM_LBA_GET_PUNIT(lbaf, lba) \
+    ((lba & (lbaf)->lun_mask) \
+        >> (lbaf)->lun_offset)
 
-#define LNVM_LBA_GET_PUNIT(lns, lba)                                           \
-    ((lba & (lns)->lbaf.lun_mask)                                              \
-        >> (lns)->lbaf.lun_offset)
+#define LNVM_LBA_GET_GROUP(lbaf, lba) \
+    (lba >> (lbaf)->grp_offset)
 
-#define LNVM_LBA_GET_GROUP(lns, lba)                                           \
-    (lba >> (lns)->lbaf.grp_offset)
-
-#define LNVM_LBA(lns, group, punit, chunk, sectr)                              \
-    (sectr << (lns)->lbaf.sec_offset                                           \
-        | chunk << (lns)->lbaf.chk_offset                                      \
-        | punit << (lns)->lbaf.lun_offset                                      \
-        | group << (lns)->lbaf.grp_offset)
+#define LNVM_LBA(lbaf, group, punit, chunk, sectr) \
+    (sectr << (lbaf)->sec_offset \
+        | chunk << (lbaf)->chk_offset \
+        | punit << (lbaf)->lun_offset \
+        | group << (lbaf)->grp_offset)
 
 #define LNVM_GROUP_FROM_CHUNK_INDEX(lns, idx)                             \
     (idx / (lns)->chks_per_grp)
@@ -62,21 +55,19 @@
 #define LNVM_LBA_FORMAT_TEMPLATE \
     "lba 0xffffffffffffffff pugrp 255 punit 255 chunk 65535 sectr 4294967295"
 
-typedef struct LnvmMetaBlock {
-    /* magic is set to (LNVM_DID << 16 | LNVM_VID) if the device as been
-       initialized */
-    uint32_t magic;
-} LnvmMetaBlock;
+typedef struct LnvmCtrl {
+    LnvmHeader blk_hdr;
+} LnvmCtrl;
 
 typedef struct LnvmNamespace {
-    LnvmIdCtrl id_ctrl;
+    LnvmNamespaceGeometry id_ctrl;
     LnvmAddrF  lbaf;
 
     /* reset and write fail error probabilities indexed by namespace */
     uint8_t *resetfail;
     uint8_t *writefail;
 
-    uint32_t chks_per_lun;
+    /* derived values (for convenience) */
     uint32_t chks_per_grp;
     uint32_t chks_total;
     uint32_t secs_per_chk;
@@ -85,6 +76,7 @@ typedef struct LnvmNamespace {
     uint32_t secs_total;
 
     /* chunk info log page */
+    uint64_t chunkinfo_size;
     LnvmCS *chunk_info;
 } LnvmNamespace;
 
@@ -107,33 +99,37 @@ static inline uint64_t nvme_lba_to_sector_index(NvmeCtrl *n, NvmeNamespace *ns,
 static inline int lnvm_lba_valid(NvmeCtrl *n, NvmeNamespace *ns, uint64_t lba)
 {
     LnvmNamespace *lns = ns->state;
-    LnvmParams *params = &n->params.lnvm;
+    LnvmIdGeo *geo = &lns->id_ctrl.geo;
+    LnvmAddrF *addrf = &lns->lbaf;
 
-    return LNVM_LBA_GET_SECTR(lns, lba) < lns->secs_total &&
-        LNVM_LBA_GET_CHUNK(lns, lba) < lns->chks_per_lun &&
-        LNVM_LBA_GET_PUNIT(lns, lba) < params->num_lun &&
-        LNVM_LBA_GET_GROUP(lns, lba) < params->num_grp;
+    return LNVM_LBA_GET_SECTR(addrf, lba) < geo->clba &&
+        LNVM_LBA_GET_CHUNK(addrf, lba) < geo->num_chk &&
+        LNVM_LBA_GET_PUNIT(addrf, lba) < geo->num_lun &&
+        LNVM_LBA_GET_GROUP(addrf, lba) < geo->num_grp;
 }
 
 static inline uint64_t lnvm_lba_to_chunk_index(NvmeCtrl *n, NvmeNamespace *ns,
     uint64_t lba)
 {
     LnvmNamespace *lns = ns->state;
+    LnvmIdGeo *geo = &lns->id_ctrl.geo;
+    LnvmAddrF *addrf = &lns->lbaf;
 
-    return LNVM_LBA_GET_CHUNK(lns, lba) +
-        LNVM_LBA_GET_PUNIT(lns, lba) * lns->chks_per_lun +
-        LNVM_LBA_GET_GROUP(lns, lba) * lns->chks_per_grp;
+    return LNVM_LBA_GET_CHUNK(addrf, lba) +
+        LNVM_LBA_GET_PUNIT(addrf, lba) * geo->num_chk +
+        LNVM_LBA_GET_GROUP(addrf, lba) * lns->chks_per_grp;
 }
 
 static inline uint64_t lnvm_lba_to_sector_index(NvmeCtrl *n, NvmeNamespace *ns,
     uint64_t lba)
 {
     LnvmNamespace *lns = ns->state;
+    LnvmAddrF *addrf = &lns->lbaf;
 
-    return LNVM_LBA_GET_SECTR(lns, lba) +
-        LNVM_LBA_GET_CHUNK(lns, lba) * lns->secs_per_chk +
-        LNVM_LBA_GET_PUNIT(lns, lba) * lns->secs_per_lun +
-        LNVM_LBA_GET_GROUP(lns, lba) * lns->secs_per_grp;
+    return LNVM_LBA_GET_SECTR(addrf, lba) +
+        LNVM_LBA_GET_CHUNK(addrf, lba) * lns->secs_per_chk +
+        LNVM_LBA_GET_PUNIT(addrf, lba) * lns->secs_per_lun +
+        LNVM_LBA_GET_GROUP(addrf, lba) * lns->secs_per_grp;
 }
 
 void lnvm_post_cqe(NvmeCtrl *n, NvmeRequest *req);

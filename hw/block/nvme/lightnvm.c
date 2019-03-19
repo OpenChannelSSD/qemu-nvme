@@ -9,15 +9,16 @@
 static int lnvm_lba_str(char *buf, NvmeCtrl *n, NvmeNamespace *ns, uint64_t lba)
 {
     LnvmNamespace *lns = ns->state;
+    LnvmAddrF *addrf = &lns->lbaf;
 
     uint8_t pugrp, punit;
     uint16_t chunk;
     uint32_t sectr;
 
-    pugrp = LNVM_LBA_GET_GROUP(lns, lba);
-    punit = LNVM_LBA_GET_PUNIT(lns, lba);
-    chunk = LNVM_LBA_GET_CHUNK(lns, lba);
-    sectr = LNVM_LBA_GET_SECTR(lns, lba);
+    pugrp = LNVM_LBA_GET_GROUP(addrf, lba);
+    punit = LNVM_LBA_GET_PUNIT(addrf, lba);
+    chunk = LNVM_LBA_GET_CHUNK(addrf, lba);
+    sectr = LNVM_LBA_GET_SECTR(addrf, lba);
 
     return sprintf(buf, "lba 0x%016"PRIx64" pugrp %"PRIu8" punit %"PRIu8
         " chunk %"PRIu16" sectr %"PRIu32, lba, pugrp, punit, chunk, sectr);
@@ -47,10 +48,9 @@ static void lnvm_trace_lba(NvmeCtrl *n, NvmeNamespace *ns, uint64_t lba, NvmeReq
 uint16_t lnvm_commit_chunk_info(NvmeCtrl *n, NvmeNamespace *ns)
 {
     LnvmNamespace *lns = ns->state;
-    LnvmParams *params = &n->params.lnvm;
 
     BlockBackend *blk = n->conf.blk;
-    int written, nbytes = params->chunkinfo_size;
+    int written, nbytes = lns->chunkinfo_size;
 
     written = blk_pwrite(blk, LNVM_NS_LOGPAGE_CHUNK_INFO_BLK_OFFSET(ns),
         lns->chunk_info, nbytes, 0);
@@ -65,11 +65,11 @@ uint16_t lnvm_commit_chunk_info(NvmeCtrl *n, NvmeNamespace *ns)
 static uint16_t lnvm_load_chunk_info(NvmeCtrl *n, NvmeNamespace *ns)
 {
     LnvmNamespace *lns = ns->state;
-    LnvmParams *params = &n->params.lnvm;
     BlockBackend *blk = n->conf.blk;
 
-    blk_pread(blk, LNVM_NS_LOGPAGE_CHUNK_INFO_BLK_OFFSET(ns),
-        lns->chunk_info, params->chunkinfo_size);
+    uint64_t offset = LNVM_NS_LOGPAGE_CHUNK_INFO_BLK_OFFSET(ns);
+    blk_pread(blk, offset,
+        lns->chunk_info, lns->chunkinfo_size);
 
     return NVME_SUCCESS;
 }
@@ -326,10 +326,11 @@ static uint16_t lnvm_rw_check_write_req(NvmeCtrl *n, NvmeCmd *cmd,
 {
     NvmeNamespace *ns = req->ns;
     LnvmNamespace *lns = ns->state;
+    LnvmAddrF *addrf = &lns->lbaf;
 
     uint64_t lba = ((uint64_t *) req->slba)[0];
-    uint16_t chunk = LNVM_LBA_GET_CHUNK(lns, lba);
-    uint32_t sectr = LNVM_LBA_GET_SECTR(lns, lba);
+    uint16_t chunk = LNVM_LBA_GET_CHUNK(addrf, lba);
+    uint32_t sectr = LNVM_LBA_GET_SECTR(addrf, lba);
     uint16_t ws = 1;
 
     for (uint16_t i = 1; i < req->nlb; i++) {
@@ -337,7 +338,7 @@ static uint16_t lnvm_rw_check_write_req(NvmeCtrl *n, NvmeCmd *cmd,
 
         /* it is assumed that LBAs for different chunks are laid out
            contiguously and sorted with increasing addresses. */
-        if (chunk != (next = LNVM_LBA_GET_CHUNK(lns, ((uint64_t *) req->slba)[i]))) {
+        if (chunk != (next = LNVM_LBA_GET_CHUNK(addrf, ((uint64_t *) req->slba)[i]))) {
             uint16_t err = lnvm_rw_check_chunk_write(n, cmd, lba, ws, req);
             if (err) {
                 return err;
@@ -345,13 +346,13 @@ static uint16_t lnvm_rw_check_write_req(NvmeCtrl *n, NvmeCmd *cmd,
 
             lba = ((uint64_t *) req->slba)[i];
             chunk = next;
-            sectr = LNVM_LBA_GET_SECTR(lns, ((uint64_t *) req->slba)[i]);
+            sectr = LNVM_LBA_GET_SECTR(addrf, ((uint64_t *) req->slba)[i]);
             ws = 1;
 
             continue;
         }
 
-        if (++sectr != LNVM_LBA_GET_SECTR(lns, ((uint64_t *) req->slba)[i])) {
+        if (++sectr != LNVM_LBA_GET_SECTR(addrf, ((uint64_t *) req->slba)[i])) {
             return LNVM_OUT_OF_ORDER_WRITE | NVME_DNR;
         }
 
@@ -366,6 +367,7 @@ static uint16_t lnvm_rw_check_chunk_read(NvmeCtrl *n, NvmeCmd *cmd,
 {
     NvmeNamespace *ns = req->ns;
     LnvmNamespace *lns = ns->state;
+    LnvmAddrF *addrf = &lns->lbaf;
     LnvmParams *params = &n->params.lnvm;
 
     uint64_t sectr, mw_cunits, wp;
@@ -377,7 +379,7 @@ static uint16_t lnvm_rw_check_chunk_read(NvmeCtrl *n, NvmeCmd *cmd,
         return NVME_DULB;
     }
 
-    sectr = LNVM_LBA_GET_SECTR(lns, lba);
+    sectr = LNVM_LBA_GET_SECTR(addrf, lba);
     mw_cunits = params->mw_cunits;
     wp = cnk->wp;
     state = cnk->state;
@@ -497,7 +499,7 @@ uint16_t lnvm_chunk_set_free(NvmeCtrl *n, NvmeNamespace *ns, uint64_t lba,
         chunk_meta->wp = 0;
 
         if (mptr) {
-            nvme_addr_write(ns->ctrl, mptr, chunk_meta, sizeof(*chunk_meta));
+            nvme_addr_write(n, mptr, chunk_meta, sizeof(*chunk_meta));
         }
 
         if (lnvm_commit_chunk_info(n, ns)) {
@@ -612,21 +614,22 @@ static int get_ch_lun_chk(char *chunkinfo, unsigned int *grp,
 static int get_chunk_meta_index(NvmeCtrl *n, NvmeNamespace *ns,
     unsigned int grp, unsigned int lun, unsigned int chk)
 {
-    LnvmParams *params = &n->params.lnvm;
+    LnvmNamespace *lns = ns->state;
+    LnvmIdGeo *geo = &lns->id_ctrl.geo;
 
-    if (chk >= params->num_chk) {
+    if (chk >= geo->num_chk) {
         return -1;
     }
 
-    if (lun >= params->num_lun) {
+    if (lun >= geo->num_lun) {
         return -1;
     }
 
-    if (grp >= params->num_grp) {
+    if (grp >= geo->num_grp) {
         return -1;
     }
 
-    return params->num_chk * (grp * params->num_lun + lun) + chk;
+    return geo->num_chk * (grp * geo->num_lun + lun) + chk;
 }
 
 static int get_state_id(char *state)
@@ -741,8 +744,9 @@ static int set_resetfail_chunk(NvmeCtrl *n, NvmeNamespace *ns, char *chunkinfo)
 
 static int set_writefail_sector(NvmeCtrl *n, NvmeNamespace *ns, char *secinfo)
 {
-    LnvmParams *params = &n->params.lnvm;
     LnvmNamespace *lns = ns->state;
+    LnvmAddrF *addrf = &lns->lbaf;
+    LnvmIdGeo *geo = &lns->id_ctrl.geo;
     unsigned int ch, lun, chk, sec, writefail_prob;
     uint64_t lba;
 
@@ -754,7 +758,7 @@ static int set_writefail_sector(NvmeCtrl *n, NvmeNamespace *ns, char *secinfo)
         return 1;
     }
 
-    if (sec >= params->num_sec) {
+    if (sec >= geo->clba) {
         return 1;
     }
 
@@ -766,7 +770,7 @@ static int set_writefail_sector(NvmeCtrl *n, NvmeNamespace *ns, char *secinfo)
         return 1;
     }
 
-    lba = LNVM_LBA(lns, ch, lun, chk, sec);
+    lba = LNVM_LBA(addrf, ch, lun, chk, sec);
     lns->writefail[lnvm_lba_to_sector_index(n, ns, lba)] = writefail_prob;
 
     return 0;
@@ -945,7 +949,7 @@ static uint16_t lnvm_identify(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     ns = &n->namespaces[nsid - 1];
 
     return nvme_dma_read(n, (uint8_t *) &((LnvmNamespace *)ns->state)->id_ctrl,
-        sizeof(LnvmIdCtrl), cmd, req);
+        sizeof(LnvmNamespaceGeometry), cmd, req);
 }
 
 static uint16_t lnvm_erase(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
@@ -1125,56 +1129,55 @@ void lnvm_free_namespace(NvmeCtrl *n, NvmeNamespace *ns)
 
 static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
 {
+    LnvmCtrl *ln = n->dialect.state;
     NvmeIdNs *id_ns = &ns->id_ns;
     LnvmParams *params = &n->params.lnvm;
-    LnvmIdCtrl *id_ctrl;
+    BlockBackend *blk = n->conf.blk;
+    LnvmNamespaceGeometry *id_ctrl;
     LnvmIdGeo *id_geo;
-    LnvmIdWrt *id_wrt;
-    LnvmIdPerf *id_perf;
     LnvmAddrF *lbaf;
     LnvmNamespace *lns;
 
-    uint64_t max_chks, nchks;
+    int ret;
 
-    ns->ctrl = n;
+    nvme_ns_init_identify(n, id_ns);
+
     lns = ns->state = g_malloc0(sizeof(LnvmNamespace));
-    lns->chunk_info = g_malloc0(params->chunkinfo_size);
 
     lbaf = &lns->lbaf;
     id_ctrl = &lns->id_ctrl;
     id_geo = &lns->id_ctrl.geo;
-    id_wrt = &lns->id_ctrl.wrt;
-    id_perf = &lns->id_ctrl.perf;
 
-    /* recalculate number of blocks to account for the predefined block, the
-       lightnvm meta data block and the chunk info log page */
+    ret = blk_pread(blk, ns->blk.begin, id_ctrl, sizeof(LnvmNamespaceGeometry));
+    if (ret < 0) {
+        error_setg(errp, "could not read namespace header");
+        return ret;
+    }
+
+    params->mccap = id_ctrl->mccap;
+    params->ws_min = id_ctrl->wrt.ws_min;
+    params->ws_opt = id_ctrl->wrt.ws_opt;
+    params->mw_cunits = id_ctrl->wrt.mw_cunits;
+
+    id_ns->lbaf[0].lbads = 63 - clz64(ln->blk_hdr.sector_size);
+    id_ns->lbaf[0].ms = ln->blk_hdr.md_size;
+    id_ns->nlbaf = 0;
+    id_ns->flbas = 0;
+
+    uint64_t chks_total = id_ctrl->geo.num_grp * id_ctrl->geo.num_lun * id_ctrl->geo.num_chk;
+    lns->chunkinfo_size = QEMU_ALIGN_UP(chks_total * sizeof(LnvmCS), ln->blk_hdr.sector_size);
+    lns->chunk_info = g_malloc0(lns->chunkinfo_size);
+
     ns->ns_blks = nvme_ns_calc_blks(n, ns) -
-        (2 + params->chunkinfo_size / NVME_ID_NS_LBADS_BYTES(ns));
+        (2 + lns->chunkinfo_size / NVME_ID_NS_LBADS_BYTES(ns));
 
+    ns->blk.predef = ns->blk.begin + sizeof(LnvmNamespaceGeometry) +
+        lns->chunkinfo_size + NVME_ID_NS_LBADS_BYTES(ns);
     ns->blk.data = ns->blk.begin + (2 * NVME_ID_NS_LBADS_BYTES(ns)) +
-        params->chunkinfo_size;
+        lns->chunkinfo_size;
     ns->blk.meta = ns->blk.data + NVME_ID_NS_LBADS_BYTES(ns) * ns->ns_blks;
 
-    max_chks = ns->ns_blks / params->num_sec;
-    nchks = params->num_chk ?
-        params->num_chk * (params->num_lun * params->num_grp) :
-        max_chks;
-
-    if (nchks > max_chks) {
-        error_setg(errp, "too many chunks (%ld); "
-            "underlying block device can accomodate at most %ld chunks",
-            nchks, max_chks);
-    }
-
-    if (nchks > (params->chunkinfo_size / sizeof(LnvmCS))) {
-        error_setg(errp, "too many chunks (%ld); "
-            "chunk info log page can accomodate at most %ld chunks",
-            nchks, params->chunkinfo_size / sizeof(LnvmCS));
-        return 1;
-    }
-
-    lns->id_ctrl.ver.major = 0x2;
-    lns->id_ctrl.ver.minor = 0x0;
+    nvme_ns_init_predef(n, ns);
 
     if (params->early_reset) {
         params->mccap |= LNVM_PARAMS_MCCAP_EARLY_RESET;
@@ -1182,40 +1185,13 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
 
     lns->id_ctrl.mccap = cpu_to_le32(params->mccap);
 
-    if (!params->num_chk) {
-        params->num_chk = nchks / (params->num_lun * params->num_grp);
-    }
-
-    id_geo->num_grp = cpu_to_le16(params->num_grp);
-    id_geo->num_lun = cpu_to_le16(params->num_lun);
-    id_geo->num_chk = cpu_to_le32(params->num_chk);
-    id_geo->clba = cpu_to_le32(params->num_sec);
-
-    id_wrt->ws_min = cpu_to_le32(params->ws_min);
-    id_wrt->ws_opt = cpu_to_le32(params->ws_opt);
-    id_wrt->mw_cunits = cpu_to_le32(params->mw_cunits);
-
-    id_perf->trdt = cpu_to_le32(70000);
-    id_perf->trdm = cpu_to_le32(100000);
-    id_perf->tprt = cpu_to_le32(1900000);
-    id_perf->tprm = cpu_to_le32(3500000);
-    id_perf->tbet = cpu_to_le32(3000000);
-    id_perf->tbem = cpu_to_le32(3000000);
-
     /* calculated values */
-    lns->chks_per_lun = params->num_chk;
-    lns->chks_per_grp = lns->chks_per_lun * params->num_lun;
-    lns->chks_total   = lns->chks_per_grp * params->num_grp;
-    lns->secs_per_chk = params->num_sec;
-    lns->secs_per_lun = lns->secs_per_chk * params->num_chk;
-    lns->secs_per_grp = lns->secs_per_lun * params->num_lun;
-    lns->secs_total   = lns->secs_per_grp * params->num_sec;
-
-    /* calculate optimal LBAF */
-    id_ctrl->lbaf.sec_len = 32 - clz32(params->num_sec - 1);
-    id_ctrl->lbaf.chk_len = 32 - clz32(params->num_chk - 1);
-    id_ctrl->lbaf.lun_len = 32 - clz32(params->num_lun - 1);
-    id_ctrl->lbaf.grp_len = 32 - clz32(params->num_grp - 1);
+    lns->chks_per_grp = id_geo->num_chk * id_geo->num_lun;
+    lns->chks_total   = lns->chks_per_grp * id_geo->num_grp;
+    lns->secs_per_chk = id_geo->clba;
+    lns->secs_per_lun = lns->secs_per_chk * id_geo->num_chk;
+    lns->secs_per_grp = lns->secs_per_lun * id_geo->num_lun;
+    lns->secs_total   = lns->secs_per_grp * id_geo->clba;
 
     /* Address format: GRP | LUN | CHK | SEC */
     lbaf->sec_offset = 0;
@@ -1240,36 +1216,9 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
         1ULL << (id_ctrl->lbaf.sec_len + id_ctrl->lbaf.chk_len +
         id_ctrl->lbaf.lun_len + id_ctrl->lbaf.grp_len);
 
-    /* initialize the chunk info log page if needed */
-    LnvmMetaBlock metablk;
-    blk_pread(n->conf.blk, LNVM_NS_LNVM_METADATA_BLK_OFFSET(ns), &metablk,
-        sizeof(metablk));
-    if (metablk.magic != LNVM_MAGIC) {
-        LnvmCS *cs = lns->chunk_info;
-
-        for (int i = 0; i < lns->chks_total; i++) {
-            cs[i].state = LNVM_CHUNK_FREE;
-            cs[i].type = LNVM_CHUNK_TYPE_SEQ;
-            cs[i].wear_index = 0;
-            cs[i].slba = LNVM_LBA_FROM_CHUNK_INDEX(lns, i);
-            cs[i].cnlb = params->num_sec;
-            cs[i].wp = 0;
-        }
-
-        if (lnvm_commit_chunk_info(n, ns)) {
-            error_setg(errp, "nvme: could not commit chunk info");
-            return 1;
-        }
-
-        /* write magic to meta block to mark initialization */
-        metablk.magic = LNVM_MAGIC;
-        blk_pwrite(n->conf.blk, LNVM_NS_LNVM_METADATA_BLK_OFFSET(ns), &metablk,
-            sizeof(metablk), 0);
-    } else {
-        if (lnvm_load_chunk_info(n, ns)) {
-            error_setg(errp, "nvme: could not load chunk info");
-            return 1;
-        }
+    if (lnvm_load_chunk_info(n, ns)) {
+        error_setg(errp, "nvme: could not load chunk info");
+        return 1;
     }
 
     /* overwrite chunk states if indicated by parameters */
@@ -1322,12 +1271,43 @@ static int lnvm_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
     return 0;
 }
 
+static int lnvm_init_namespaces(NvmeCtrl *n, Error **errp)
+{
+    LnvmCtrl *ln = n->dialect.state;
+    BlockBackend *blk = n->conf.blk;
+    int ret;
+
+    ret = blk_pread(blk, 0, &ln->blk_hdr, sizeof(LnvmHeader));
+    if (ret < 0) {
+        error_setg(errp, "nvme: could not read block format header");
+        return ret;
+    }
+
+    g_free(n->namespaces);
+    n->namespaces = g_new0(NvmeNamespace, ln->blk_hdr.num_namespaces);
+
+    for (int i = 0; i < ln->blk_hdr.num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
+        ns->id = i + 1;
+        ns->blk.begin = ln->blk_hdr.sector_size + i * ln->blk_hdr.ns_size;
+
+        if (lnvm_init_namespace(n, ns, errp)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 int lnvm_realize(NvmeCtrl *n, Error **errp)
 {
+    LnvmCtrl *ln = g_malloc0(sizeof(LnvmCtrl));
     n->dialect = (NvmeDialect) {
+        .state            = ln,
+
         .init_ctrl        = lnvm_init_ctrl,
         .init_pci         = lnvm_init_pci,
-        .init_namespace   = lnvm_init_namespace,
+        .init_namespaces  = lnvm_init_namespaces,
 
         .free_namespace   = lnvm_free_namespace,
 

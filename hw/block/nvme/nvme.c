@@ -66,13 +66,6 @@
  *
  *  lmccap=<int>          : Media and Controller Capabilities (MCCAP),
  *                          Default:0
- *  lnum_grp=<int>        : Number of controller groups per namespace,
- *                          Default:1
- *  lnum_pu=<int>         : Number of parallel units per group, Default:1
- *  lnum_sec=<int>        : Number of sectors per chunk, Default:4096
- *  lnum_chk=<int>        : Number of chunks per parallel unit.
- *                          Default:0 (deduce from size of underlying device)
- *  lsec_size=<int>       : Sector size, Default:4096
  *  lws_min=<int>         : Mininum write size for device in sectors,
  *                          Default:4
  *  lws_opt=<int>         : Optimal write size for device in sectors,
@@ -1183,6 +1176,7 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     NvmeNamespace *ns = req->ns;
     LnvmNamespace *lns = ns->state;
+    LnvmAddrF *addrf = &lns->lbaf;
     NvmeDsmCmd *dsm = (NvmeDsmCmd *)cmd;
 
     if (dsm->attributes & NVME_DSMGMT_AD) {
@@ -1207,7 +1201,7 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
             NvmeBlockBackendRequest *blk_req = nvme_blk_req_new(n, req);
 
             slba = le64_to_cpu(range[i].slba);
-            if (LNVM_LBA_GET_SECTR(lns, slba)) {
+            if (LNVM_LBA_GET_SECTR(addrf, slba)) {
                 nvme_set_error_page(n, req->sq->sqid, req->cqe.cid,
                     NVME_INVALID_FIELD, 0, slba, ns->id);
                 return NVME_INVALID_FIELD | NVME_DNR;
@@ -1877,8 +1871,9 @@ uint64_t nvme_ns_calc_blks(NvmeCtrl *n, NvmeNamespace *ns)
     return n->ns_size / ((1 << NVME_ID_NS_LBADS(ns)) + NVME_ID_NS_MS(ns));
 }
 
-static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
-    uint8_t meta_loc, uint8_t pil, uint8_t pi, uint8_t sec_erase)
+static uint16_t nvme_format_namespace(NvmeCtrl *n, NvmeNamespace *ns,
+    uint8_t lba_idx, uint8_t meta_loc, uint8_t pil, uint8_t pi,
+    uint8_t sec_erase)
 {
     uint16_t ms = le16_to_cpu(ns->id_ns.lbaf[lba_idx].ms);
 
@@ -1905,7 +1900,7 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
 
     ns->id_ns.flbas = lba_idx | meta_loc;
     ns->id_ns.dps = pil | pi;
-    ns->ns_blks = nvme_ns_calc_blks(ns->ctrl, ns);
+    ns->ns_blks = nvme_ns_calc_blks(n, ns);
     if (sec_erase) {
         /* TODO: write zeros, complete asynchronously */;
     }
@@ -1931,7 +1926,7 @@ static uint16_t nvme_format(NvmeCtrl *n, NvmeCmd *cmd)
 
         for (i = 0; i < n->params.num_namespaces; ++i) {
             ns = &n->namespaces[i];
-            ret = nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
+            ret = nvme_format_namespace(n, ns, lba_idx, meta_loc, pil, pi,
                 sec_erase);
             if (ret != NVME_SUCCESS) {
                 return ret;
@@ -1945,7 +1940,7 @@ static uint16_t nvme_format(NvmeCtrl *n, NvmeCmd *cmd)
     }
 
     ns = &n->namespaces[nsid - 1];
-    return nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
+    return nvme_format_namespace(n, ns, lba_idx, meta_loc, pil, pi,
                                  sec_erase);
 }
 
@@ -2701,16 +2696,34 @@ static int nvme_check_constraints(NvmeCtrl *n, Error **errp)
     return 0;
 }
 
-static int nvme_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
+void nvme_ns_init_predef(NvmeCtrl *n, NvmeNamespace *ns)
 {
-    NvmeIdNs *id_ns;
+    uint8_t *pbuf = g_malloc(NVME_ID_NS_LBADS_BYTES(ns));
+
+    switch (n->params.dlfeat) {
+    case 0x1:
+        memset(pbuf, 0x00, NVME_ID_NS_LBADS_BYTES(ns));
+        break;
+
+    case 0x2:
+        pbuf = g_malloc(NVME_ID_NS_LBADS_BYTES(ns));
+        memset(pbuf, 0xff, NVME_ID_NS_LBADS_BYTES(ns));
+        break;
+
+    default:
+        break;
+    }
+
+    blk_pwrite(n->conf.blk, NVME_NS_PREDEF_BLK_OFFSET(n, ns), pbuf,
+        NVME_ID_NS_LBADS_BYTES(ns), 0);
+}
+
+void nvme_ns_init_identify(NvmeCtrl *n, NvmeIdNs *id_ns)
+{
     NvmeParams *params;
     uint16_t ms_min;
-    uint8_t *pbuf;
 
-    id_ns = &ns->id_ns;
     params = &n->params;
-    ns->ctrl = n;
 
     id_ns->nsfeat = 0x4;
     id_ns->nlbaf = 0; /* 0's based value */
@@ -2737,37 +2750,24 @@ static int nvme_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
         ms_min *= 2;
         id_ns->nlbaf++;
     }
+}
+
+static int nvme_init_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
+{
+    NvmeIdNs *id_ns = &ns->id_ns;
+
+    nvme_ns_init_identify(n, id_ns);
 
     /* reserve 1 block for predefined data */
     ns->ns_blks = nvme_ns_calc_blks(n, ns) - 1;
 
+    ns->blk.predef = ns->blk.begin;
     ns->blk.data = ns->blk.begin + NVME_ID_NS_LBADS_BYTES(ns);
     ns->blk.meta = ns->blk.data + NVME_ID_NS_LBADS_BYTES(ns) * ns->ns_blks;
 
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(ns->ns_blks);
 
-    pbuf = g_malloc(NVME_ID_NS_LBADS_BYTES(ns));
-
-    switch (params->dlfeat) {
-    case 0x1:
-        memset(pbuf, 0x00, NVME_ID_NS_LBADS_BYTES(ns));
-        break;
-
-    case 0x2:
-        pbuf = g_malloc(NVME_ID_NS_LBADS_BYTES(ns));
-        memset(pbuf, 0xff, NVME_ID_NS_LBADS_BYTES(ns));
-        break;
-
-    default:
-        break;
-    }
-
-    blk_pwrite(n->conf.blk, NVME_NS_PREDEF_BLK_OFFSET(n, ns), pbuf,
-        NVME_ID_NS_LBADS_BYTES(ns), 0);
-
-    if (n->dialect.init_namespace) {
-        return n->dialect.init_namespace(n, ns, errp);
-    }
+    nvme_ns_init_predef(n, ns);
 
     return 0;
 }
@@ -2980,15 +2980,16 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
 
     default:
         n->dialect = (NvmeDialect) {
-            .blk_idx      = nvme_lba_to_sector_index,
-            .rw_check_req = nvme_rw_check_req,
+            .init_namespaces = nvme_init_namespaces,
+            .blk_idx         = nvme_lba_to_sector_index,
+            .rw_check_req    = nvme_rw_check_req,
         };
     }
 
     nvme_init_pci(n, pci_dev);
     nvme_init_ctrl(n);
 
-    if (nvme_init_namespaces(n, errp)) {
+    if (n->dialect.init_namespaces(n, errp)) {
         return;
     }
 }

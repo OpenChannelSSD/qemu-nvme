@@ -102,6 +102,44 @@
   } }
 
 ##
+# @ImageInfoSpecificOcssd:
+#
+# @num-ns: number of namespaces
+#
+# @namespaces: List of namespsaces
+#
+# Since: 3.1
+##
+{ 'struct': 'ImageInfoSpecificOcssd',
+  'data': {
+      'num-ns': 'int',
+      'sector-size': 'int',
+      'metadata-size': 'int',
+      'namespaces': ['ImageInfoSpecificOcssdNS']
+  } }
+
+##
+# @ImageInfoSpecificOcssdNS:
+#
+# @num-grp: number of groups
+#
+# @num-pu: number of parallel units per group
+#
+# @num-chk: number of chunks per parallel unit
+#
+# @num-sec: number of sectors per chunk
+#
+# Since: 3.1
+##
+{ 'struct': 'ImageInfoSpecificOcssdNS',
+  'data': {
+      'num-grp': 'int',
+      'num-pu': 'int',
+      'num-chk': 'int',
+      'num-sec': 'int'
+  } }
+
+##
 # @ImageInfoSpecific:
 #
 # A discriminated record of image format specific information structures.
@@ -112,6 +150,7 @@
   'data': {
       'qcow2': 'ImageInfoSpecificQCow2',
       'vmdk': 'ImageInfoSpecificVmdk',
+      'ocssd': 'ImageInfoSpecificOcssd',
       # If we need to add block driver specific parameters for
       # LUKS in future, then we'll subclass QCryptoBlockInfoLUKS
       # to define a ImageInfoSpecificLUKS
@@ -270,14 +309,15 @@
 # @drv: the name of the block format used to open the backing device. As of
 #       0.14.0 this can be: 'blkdebug', 'bochs', 'cloop', 'cow', 'dmg',
 #       'file', 'file', 'ftp', 'ftps', 'host_cdrom', 'host_device',
-#       'http', 'https', 'luks', 'nbd', 'parallels', 'qcow',
-#       'qcow2', 'raw', 'vdi', 'vmdk', 'vpc', 'vvfat'
+#       'http', 'https', 'luks', 'nbd', 'ocssd', 'parallels', 'qcow',
+#       'qcow2', 'raw', 'vdi', 'vmdk', 'vpc', 'vvfat',
 #       2.2: 'archipelago' added, 'cow' dropped
 #       2.3: 'host_floppy' deprecated
 #       2.5: 'host_floppy' dropped
 #       2.6: 'luks' added
 #       2.8: 'replication' added, 'tftp' dropped
 #       2.9: 'archipelago' dropped
+#       3.1: 'ocssd' added
 #
 # @backing_file: the name of the backing file (for copy-on-write)
 #
@@ -2730,8 +2770,8 @@
   'data': [ 'blkdebug', 'blklogwrites', 'blkverify', 'bochs', 'cloop',
             'copy-on-read', 'dmg', 'file', 'ftp', 'ftps', 'gluster',
             'host_cdrom', 'host_device', 'http', 'https', 'iscsi', 'luks',
-            'nbd', 'nfs', 'null-aio', 'null-co', 'nvme', 'parallels', 'qcow',
-            'qcow2', 'qed', 'quorum', 'raw', 'rbd',
+            'nbd', 'nfs', 'null-aio', 'null-co', 'nvme', 'ocssd', 'parallels',
+            'qcow', 'qcow2', 'qed', 'quorum', 'raw', 'rbd',
             { 'name': 'replication', 'if': 'defined(CONFIG_REPLICATION)' },
             'sheepdog',
             'ssh', 'throttle', 'vdi', 'vhdx', 'vmdk', 'vpc', 'vvfat', 'vxhs' ] }
@@ -3819,6 +3859,7 @@
       'null-aio':   'BlockdevOptionsNull',
       'null-co':    'BlockdevOptionsNull',
       'nvme':       'BlockdevOptionsNVMe',
+      'ocssd':      'BlockdevOptionsGenericFormat',
       'parallels':  'BlockdevOptionsGenericFormat',
       'qcow2':      'BlockdevOptionsQcow2',
       'qcow':       'BlockdevOptionsQcow',

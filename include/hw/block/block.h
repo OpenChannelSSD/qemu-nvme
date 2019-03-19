@@ -56,7 +56,6 @@ static inline unsigned int get_physical_block_exp(BlockConf *conf)
     DEFINE_PROP_UINT32("opt_io_size", _state, _conf.opt_io_size, 0),    \
     DEFINE_PROP_UINT32("discard_granularity", _state, \
                        _conf.discard_granularity, -1), \
-    DEFINE_PROP_UINT32("is_lightnvm", _state, _conf.is_lightnvm, 0),    \
     DEFINE_PROP_ON_OFF_AUTO("write-cache", _state, _conf.wce, \
                             ON_OFF_AUTO_AUTO), \
     DEFINE_PROP_BOOL("share-rw", _state, _conf.share_rw, false)

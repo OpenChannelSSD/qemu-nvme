@@ -13,7 +13,7 @@
 #include "hw/block/block.h"
 #include "hw/pci/pci.h"
 
-#define NVME_NS_PREDEF_BLK_OFFSET(n, ns) ((ns)->blk.begin)
+#define NVME_NS_PREDEF_BLK_OFFSET(n, ns) ((ns)->blk.predef)
 
 #define NVME_ID_NS_LBADS(ns)                                                  \
     ((ns)->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX((ns)->id_ns.flbas)].lbads)
@@ -121,7 +121,6 @@ typedef struct NvmeCQueue {
 } NvmeCQueue;
 
 typedef struct NvmeNamespace {
-    struct NvmeCtrl *ctrl;
     NvmeIdNs        id_ns;
     NvmeRangeType   lba_range[64];
     uint32_t        id;
@@ -129,6 +128,7 @@ typedef struct NvmeNamespace {
     uint64_t        nsze;
     struct {
         uint64_t begin;
+        uint64_t predef;
         uint64_t data;
         uint64_t meta;
     } blk;
@@ -143,16 +143,10 @@ typedef struct NvmeNamespace {
 
 typedef struct LnvmParams {
     /* qemu configurable device characteristics */
-    uint32_t sec_size;
     uint32_t mccap;
-    uint16_t num_grp;
-    uint16_t num_lun;
-    uint32_t num_chk;
-    uint32_t num_sec;
     uint32_t ws_min;
     uint32_t ws_opt;
     uint32_t mw_cunits;
-    uint64_t chunkinfo_size;
 
     uint8_t debug;
     uint8_t early_reset;
@@ -238,15 +232,9 @@ typedef struct NvmeParams {
     DEFINE_PROP_UINT32("lws_min", _state, _props.ws_min, 4), \
     DEFINE_PROP_UINT32("lws_opt", _state, _props.ws_opt, 8), \
     DEFINE_PROP_UINT32("lmw_cunits", _state, _props.mw_cunits, 32), \
-    DEFINE_PROP_UINT16("lnum_grp", _state, _props.num_grp, 1), \
-    DEFINE_PROP_UINT16("lnum_pu", _state, _props.num_lun, 1), \
-    DEFINE_PROP_UINT32("lnum_sec", _state, _props.num_sec, 4096), \
-    DEFINE_PROP_UINT32("lnum_chk", _state, _props.num_chk, 0), \
-    DEFINE_PROP_UINT32("lsec_size", _state, _props.sec_size, 4096), \
     DEFINE_PROP_STRING("lresetfail", _state, _props.resetfail_fname), \
     DEFINE_PROP_STRING("lwritefail", _state, _props.writefail_fname), \
     DEFINE_PROP_STRING("lchunkstate", _state, _props.chunkstate_fname), \
-    DEFINE_PROP_UINT64("lchunkinfo_size", _state, _props.chunkinfo_size, 4 << 20), \
     DEFINE_PROP_UINT8("ldebug", _state, _props.debug, 0), \
     DEFINE_PROP_UINT8("learly_reset", _state, _props.early_reset, 1), \
     DEFINE_PROP_UINT8("lsgl_lbal", _state, _props.sgl_lbal, 0)
@@ -256,7 +244,7 @@ typedef struct NvmeDialect {
 
     void (*init_ctrl)(struct NvmeCtrl *);
     void (*init_pci)(struct NvmeCtrl *, PCIDevice *);
-    int (*init_namespace)(struct NvmeCtrl *, NvmeNamespace *, Error **);
+    int (*init_namespaces)(struct NvmeCtrl *, Error **);
     void (*free_namespace)(struct NvmeCtrl *, NvmeNamespace *);
 
     uint16_t (*rw_check_req)(struct NvmeCtrl *, NvmeCmd *, NvmeRequest *);
@@ -325,6 +313,9 @@ typedef struct NvmeDifTuple {
 
 typedef uint16_t (*NvmeBlockSetupFn)(NvmeCtrl *n, QEMUSGList *qsg,
     uint64_t blk_offset, uint32_t unit_len, NvmeRequest *req);
+
+void nvme_ns_init_predef(NvmeCtrl *n, NvmeNamespace *ns);
+void nvme_ns_init_identify(NvmeCtrl *n, NvmeIdNs *id_ns);
 
 void nvme_addr_write(NvmeCtrl *n, hwaddr addr, void *buf, int size);
 void nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size);
