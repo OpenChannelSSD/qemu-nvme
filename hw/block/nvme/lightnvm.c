@@ -329,30 +329,32 @@ static uint16_t lnvm_rw_check_write_req(NvmeCtrl *n, NvmeCmd *cmd,
     LnvmAddrF *addrf = &lns->lbaf;
 
     uint64_t lba = ((uint64_t *) req->slba)[0];
-    uint16_t chunk = LNVM_LBA_GET_CHUNK(addrf, lba);
+    uint64_t cidx = lnvm_lba_to_chunk_index(n, ns, lba);
     uint32_t sectr = LNVM_LBA_GET_SECTR(addrf, lba);
     uint16_t ws = 1;
 
     for (uint16_t i = 1; i < req->nlb; i++) {
-        uint16_t next;
+        uint64_t next_cidx;
+        uint64_t next_lba = ((uint64_t *) req->slba)[i];
 
         /* it is assumed that LBAs for different chunks are laid out
            contiguously and sorted with increasing addresses. */
-        if (chunk != (next = LNVM_LBA_GET_CHUNK(addrf, ((uint64_t *) req->slba)[i]))) {
+        next_cidx = lnvm_lba_to_chunk_index(n, ns, next_lba);
+        if (cidx != next_cidx) {
             uint16_t err = lnvm_rw_check_chunk_write(n, cmd, lba, ws, req);
             if (err) {
                 return err;
             }
 
             lba = ((uint64_t *) req->slba)[i];
-            chunk = next;
-            sectr = LNVM_LBA_GET_SECTR(addrf, ((uint64_t *) req->slba)[i]);
+            cidx = next_cidx;
+            sectr = LNVM_LBA_GET_SECTR(addrf, lba);
             ws = 1;
 
             continue;
         }
 
-        if (++sectr != LNVM_LBA_GET_SECTR(addrf, ((uint64_t *) req->slba)[i])) {
+        if (++sectr != LNVM_LBA_GET_SECTR(addrf, next_lba)) {
             return LNVM_OUT_OF_ORDER_WRITE | NVME_DNR;
         }
 
