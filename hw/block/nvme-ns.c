@@ -15,27 +15,33 @@
 
 static uint64_t nvme_ns_calc_blks(NvmeNamespace *ns)
 {
-    return ns->size / nvme_ns_lbads_bytes(ns);
+    return ns->size / (nvme_ns_lbads_bytes(ns) + nvme_ns_ms(ns));
 }
 
-static void nvme_ns_init_identify(NvmeIdNs *id_ns)
+static void nvme_ns_init_identify(NvmeNamespace *ns)
 {
+    NvmeIdNs *id_ns = &ns->id_ns;
+    NvmeNamespaceParams *params = &ns->params;
+
     id_ns->nlbaf = 0;
     id_ns->flbas = 0;
-    id_ns->mc = 0;
+    id_ns->mc = params->ms ? 0x2 : 0;
     id_ns->dpc = 0;
     id_ns->dps = 0;
     id_ns->lbaf[0].ds = BDRV_SECTOR_BITS;
+    id_ns->lbaf[0].ms = params->ms;
 }
 
-static int nvme_ns_init(NvmeNamespace *ns)
+static int nvme_ns_init(NvmeCtrl *n, NvmeNamespace *ns)
 {
     uint64_t ns_blks;
     NvmeIdNs *id_ns = &ns->id_ns;
 
-    nvme_ns_init_identify(id_ns);
+    nvme_ns_init_identify(ns);
 
     ns_blks = nvme_ns_calc_blks(ns);
+    ns->blk_offset_md = nvme_ns_lbads_bytes(ns) * ns_blks;
+
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(ns_blks);
 
     return 0;
@@ -60,13 +66,24 @@ static int nvme_ns_init_blk(NvmeNamespace *ns, NvmeIdCtrl *id, Error **errp)
         id->vwc = 0;
     }
 
+    if (ns->params.ms) {
+        id->sgls = 0xa00001;
+    }
+
     return 0;
 }
 
 static int nvme_ns_check_constraints(NvmeNamespace *ns, Error **errp)
 {
+    NvmeNamespaceParams *params = &ns->params;
+
     if (!ns->conf.blk) {
         error_setg(errp, "nvme-ns: block backend not configured");
+        return 1;
+    }
+
+    if (params->ms && !is_power_of_2(params->ms)) {
+        error_setg(errp, "nvme-ns: invalid metadata configuration");
         return 1;
     }
 
@@ -92,7 +109,7 @@ static void nvme_ns_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    nvme_ns_init(ns);
+    nvme_ns_init(n, ns);
     if (nvme_register_namespace(n, ns, &local_err)) {
         error_propagate_prepend(errp, local_err, "nvme_register_namespace: ");
         return;

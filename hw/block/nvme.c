@@ -28,6 +28,8 @@
  *                              Default: 0 (disabled)
  *   mdts=<uint8>             : Maximum Data Transfer Size (power of two)
  *                              Default: 7
+ *   ms=<int>                 : Number of metadata bytes provided per LBA.
+ *                              Default:0
  */
 
 #include "qemu/osdep.h"
@@ -684,7 +686,7 @@ static NvmeBlockBackendRequest *nvme_blk_req_get(NvmeCtrl *n, NvmeRequest *req,
 }
 
 static uint16_t nvme_blk_setup(NvmeCtrl *n, NvmeNamespace *ns, QEMUSGList *qsg,
-    NvmeRequest *req)
+    uint64_t blk_offset, uint32_t unit_len, NvmeRequest *req)
 {
     NvmeBlockBackendRequest *blk_req = nvme_blk_req_get(n, req, qsg);
     if (!blk_req) {
@@ -695,7 +697,7 @@ static uint16_t nvme_blk_setup(NvmeCtrl *n, NvmeNamespace *ns, QEMUSGList *qsg,
 
     blk_req->slba = req->slba;
     blk_req->nlb = req->nlb;
-    blk_req->blk_offset = req->slba * nvme_ns_lbads_bytes(ns);
+    blk_req->blk_offset = blk_offset + req->slba * unit_len;
 
     QTAILQ_INSERT_TAIL(&req->blk_req_tailq, blk_req, tailq_entry);
 
@@ -707,7 +709,12 @@ static uint16_t nvme_blk_map(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     NvmeNamespace *ns = req->ns;
     uint16_t err;
 
-    uint32_t len = req->nlb * nvme_ns_lbads_bytes(ns);
+    uint32_t unit_len = nvme_ns_lbads_bytes(ns);
+    uint32_t len = req->nlb * unit_len;
+    uint32_t meta_unit_len = nvme_ns_ms(ns);
+    uint32_t meta_len = req->nlb * meta_unit_len;
+
+    NvmeSglDescriptor sgl;
 
     if (NVME_CMD_FLAGS_PSDT(cmd->flags)) {
         err = nvme_map_sgl(n, &req->qsg, cmd->dptr.sgl, len, req);
@@ -724,7 +731,47 @@ static uint16_t nvme_blk_map(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
     }
 
-    err = nvme_blk_setup(n, ns, &req->qsg, req);
+    err = nvme_blk_setup(n, ns, &req->qsg, 0, unit_len, req);
+    if (err) {
+        goto out;
+    }
+
+    if (ns->params.ms && cmd->mptr) {
+        if (NVME_CMD_FLAGS_PSDT(cmd->flags) == PSDT_SGL_MPTR_SGL) {
+            nvme_addr_read(n, le64_to_cpu(cmd->mptr), &sgl,
+                sizeof(NvmeSglDescriptor));
+
+            err = nvme_map_sgl(n, &req->qsg_md, sgl, meta_len, req);
+            if (err) {
+                 /*
+                 * nvme_map_sgl does not know if it was mapping a data or meta
+                 * data SGL, so fix the error code if needed.
+                 */
+                if (nvme_is_error(err, NVME_DATA_SGL_LENGTH_INVALID)) {
+                    err = NVME_METADATA_SGL_LENGTH_INVALID | NVME_DNR;
+                }
+
+                return err;
+            }
+        } else {
+            pci_dma_sglist_init(&req->qsg_md, &n->parent_obj, 1);
+            qemu_sglist_add(&req->qsg_md, le64_to_cpu(cmd->mptr), meta_len);
+        }
+
+        err = nvme_blk_setup(n, ns, &req->qsg_md, ns->blk_offset_md,
+            meta_unit_len, req);
+        if (err) {
+            goto out;
+        }
+    }
+
+    return NVME_SUCCESS;
+
+out:
+    qemu_sglist_destroy(&req->qsg);
+    if (req->qsg_md.nalloc) {
+        qemu_sglist_destroy(&req->qsg_md);
+    }
 
     return err;
 }
@@ -765,6 +812,10 @@ static void nvme_enqueue_req_completion(NvmeCQueue *cq, NvmeRequest *req)
 
     if (req->qsg.nalloc) {
         qemu_sglist_destroy(&req->qsg);
+    }
+
+    if (req->qsg_md.nalloc) {
+        qemu_sglist_destroy(&req->qsg_md);
     }
 
     trace_nvme_enqueue_req_completion(req->cqe.cid, cq->cqid);

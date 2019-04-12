@@ -53,7 +53,7 @@ typedef struct NvmeRequest {
     bool     is_cmb;
     bool     is_write;
 
-    QEMUSGList   qsg;
+    QEMUSGList   qsg, qsg_md;
 
     QTAILQ_HEAD(, NvmeBlockBackendRequest) blk_req_tailq;
     QTAILQ_ENTRY(NvmeRequest)entry;
