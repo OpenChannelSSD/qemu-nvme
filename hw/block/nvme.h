@@ -6,11 +6,13 @@
 #define DEFINE_NVME_PROPERTIES(_state, _props) \
     DEFINE_PROP_STRING("serial", _state, _props.serial), \
     DEFINE_PROP_UINT32("cmb_size_mb", _state, _props.cmb_size_mb, 0), \
-    DEFINE_PROP_UINT32("num_queues", _state, _props.num_queues, 64)
+    DEFINE_PROP_UINT32("num_queues", _state, _props.num_queues, 64), \
+    DEFINE_PROP_UINT8("mdts", _state, _props.mdts, 7)
 
 typedef struct NvmeParams {
     char     *serial;
     uint32_t num_queues;
+    uint8_t  mdts;
     uint32_t cmb_size_mb;
 } NvmeParams;
 
@@ -19,16 +21,38 @@ typedef struct NvmeAsyncEvent {
     NvmeAerResult result;
 } NvmeAsyncEvent;
 
+typedef struct NvmeBlockBackendRequest {
+    uint64_t slba;
+    uint16_t nlb;
+    uint64_t blk_offset;
+
+    struct NvmeRequest *req;
+
+    BlockAIOCB      *aiocb;
+    BlockAcctCookie acct;
+
+    QEMUSGList   *qsg;
+    QEMUIOVector iov;
+
+    QTAILQ_ENTRY(NvmeBlockBackendRequest) tailq_entry;
+    QSLIST_ENTRY(NvmeBlockBackendRequest) slist_entry;
+} NvmeBlockBackendRequest;
+
 typedef struct NvmeRequest {
-    struct NvmeSQueue       *sq;
-    BlockAIOCB              *aiocb;
-    uint16_t                status;
-    bool                    is_cmb;
-    NvmeCqe                 cqe;
-    BlockAcctCookie         acct;
-    QEMUSGList              qsg;
-    QEMUIOVector            iov;
-    NvmeCmd                 cmd;
+    struct NvmeSQueue    *sq;
+    struct NvmeNamespace *ns;
+    NvmeCqe              cqe;
+    NvmeCmd              cmd;
+
+    uint64_t slba;
+    uint16_t nlb;
+    uint16_t status;
+    bool     is_cmb;
+    bool     is_write;
+
+    QEMUSGList   qsg;
+
+    QTAILQ_HEAD(, NvmeBlockBackendRequest) blk_req_tailq;
     QTAILQ_ENTRY(NvmeRequest)entry;
 } NvmeRequest;
 
@@ -113,6 +137,11 @@ typedef struct NvmeCtrl {
     NvmeFeatureVal  features;
     NvmeIdCtrl      id_ctrl;
 } NvmeCtrl;
+
+static inline bool nvme_rw_is_write(NvmeRequest *req)
+{
+    return req->cmd.opcode == NVME_CMD_WRITE;
+}
 
 static inline uint8_t nvme_ns_lbads(NvmeNamespace *ns)
 {
