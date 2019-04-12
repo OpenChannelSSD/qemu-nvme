@@ -205,15 +205,53 @@ enum NvmeCmbszMask {
 #define NVME_CMBSZ_GETSIZE(cmbsz) \
     (NVME_CMBSZ_SZ(cmbsz) * (1 << (12 + 4 * NVME_CMBSZ_SZU(cmbsz))))
 
+enum NvmeSglDescriptorType {
+    SGL_DESCR_TYPE_DATA_BLOCK           = 0x0,
+    SGL_DESCR_TYPE_BIT_BUCKET           = 0x1,
+    SGL_DESCR_TYPE_SEGMENT              = 0x2,
+    SGL_DESCR_TYPE_LAST_SEGMENT         = 0x3,
+    SGL_DESCR_TYPE_KEYED_DATA_BLOCK     = 0x4,
+
+    SGL_DESCR_TYPE_VENDOR_SPECIFIC      = 0xf,
+};
+
+enum NvmeSglDescriptorSubtype {
+    SGL_DESCR_SUBTYPE_ADDRESS = 0x0,
+    SGL_DESCR_SUBTYPE_OFFSET  = 0x1,
+};
+
+typedef struct NvmeSglDescriptor {
+    uint64_t addr;
+    uint32_t len;
+    uint8_t  rsvd[3];
+    uint8_t  type;
+} NvmeSglDescriptor;
+
+#define NVME_SGL_TYPE(type)     (type >> 4)
+
+typedef union NvmeCmdDptr {
+    struct {
+        uint64_t    prp1;
+        uint64_t    prp2;
+    } prp;
+
+    NvmeSglDescriptor sgl;
+} NvmeCmdDptr;
+
+enum NvmePsdt {
+    PSDT_PRP                 = 0x0,
+    PSDT_SGL_MPTR_CONTIGUOUS = 0x1,
+    PSDT_SGL_MPTR_SGL        = 0x2,
+};
+
 typedef struct NvmeCmd {
     uint8_t     opcode;
-    uint8_t     fuse;
+    uint8_t     flags;
     uint16_t    cid;
     uint32_t    nsid;
-    uint64_t    res1;
+    uint64_t    rsvd2;
     uint64_t    mptr;
-    uint64_t    prp1;
-    uint64_t    prp2;
+    NvmeCmdDptr dptr;
     uint32_t    cdw10;
     uint32_t    cdw11;
     uint32_t    cdw12;
@@ -221,6 +259,9 @@ typedef struct NvmeCmd {
     uint32_t    cdw14;
     uint32_t    cdw15;
 } NvmeCmd;
+
+#define NVME_CMD_FLAGS_FUSE(flags) (flags & 0x3)
+#define NVME_CMD_FLAGS_PSDT(flags) ((flags >> 6) & 0x3)
 
 enum NvmeAdminCommands {
     NVME_ADM_CMD_DELETE_SQ      = 0x00,
@@ -427,6 +468,11 @@ enum NvmeStatusCodes {
     NVME_CMD_ABORT_MISSING_FUSE = 0x000a,
     NVME_INVALID_NSID           = 0x000b,
     NVME_CMD_SEQ_ERROR          = 0x000c,
+    NVME_INVALID_SGL_SEG_DESCRIPTOR  = 0x000d,
+    NVME_INVALID_NUM_SGL_DESCRIPTORS = 0x000e,
+    NVME_DATA_SGL_LENGTH_INVALID     = 0x000f,
+    NVME_METADATA_SGL_LENGTH_INVALID = 0x0010,
+    NVME_SGL_DESCRIPTOR_TYPE_INVALID = 0x0011,
     NVME_INVALID_USE_OF_CMB     = 0x0012,
     NVME_LBA_RANGE              = 0x0080,
     NVME_CAP_EXCEEDED           = 0x0081,
@@ -622,6 +668,16 @@ enum NvmeIdCtrlOncs {
 #define NVME_CTRL_SQES_MAX(sqes) (((sqes) >> 4) & 0xf)
 #define NVME_CTRL_CQES_MIN(cqes) ((cqes) & 0xf)
 #define NVME_CTRL_CQES_MAX(cqes) (((cqes) >> 4) & 0xf)
+
+#define NVME_CTRL_SGLS_SUPPORTED(sgls)                 ((sgls) & 0x3)
+#define NVME_CTRL_SGLS_SUPPORTED_NO_ALIGNMENT(sgls)    ((sgls) & (0x1 <<  0))
+#define NVME_CTRL_SGLS_SUPPORTED_DWORD_ALIGNMENT(sgls) ((sgls) & (0x1 <<  1))
+#define NVME_CTRL_SGLS_KEYED(sgls)                     ((sgls) & (0x1 <<  2))
+#define NVME_CTRL_SGLS_BITBUCKET(sgls)                 ((sgls) & (0x1 << 16))
+#define NVME_CTRL_SGLS_MPTR_CONTIGUOUS(sgls)           ((sgls) & (0x1 << 17))
+#define NVME_CTRL_SGLS_EXCESS_LENGTH(sgls)             ((sgls) & (0x1 << 18))
+#define NVME_CTRL_SGLS_MPTR_SGL(sgls)                  ((sgls) & (0x1 << 19))
+#define NVME_CTRL_SGLS_ADDR_OFFSET(sgls)               ((sgls) & (0x1 << 20))
 
 typedef struct NvmeFeatureVal {
     uint32_t    arbitration;

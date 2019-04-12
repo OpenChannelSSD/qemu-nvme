@@ -143,6 +143,12 @@ static inline bool nvme_rw_is_write(NvmeRequest *req)
     return req->cmd.opcode == NVME_CMD_WRITE;
 }
 
+static inline bool nvme_is_error(uint16_t status, uint16_t err)
+{
+    /* strip DNR and MORE */
+    return (status & 0xfff) == err;
+}
+
 static inline uint8_t nvme_ns_lbads(NvmeNamespace *ns)
 {
     NvmeIdNs *id = &ns->id_ns;
