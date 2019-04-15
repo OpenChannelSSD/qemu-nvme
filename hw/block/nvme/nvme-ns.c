@@ -10,15 +10,15 @@
 
 #include "hw/qdev-core.h"
 
-#include "nvme.h"
-#include "nvme-ns.h"
+#include "hw/block/nvme.h"
+#include "hw/block/nvme-ns.h"
 
 static uint64_t nvme_ns_calc_blks(NvmeNamespace *ns)
 {
     return ns->size / (nvme_ns_lbads_bytes(ns) + nvme_ns_ms(ns));
 }
 
-static void nvme_ns_init_identify(NvmeNamespace *ns)
+void nvme_ns_init_identify(NvmeNamespace *ns)
 {
     NvmeIdNs *id_ns = &ns->id_ns;
     NvmeNamespaceParams *params = &ns->params;
@@ -47,7 +47,7 @@ static int nvme_ns_init(NvmeCtrl *n, NvmeNamespace *ns)
     return 0;
 }
 
-static int nvme_ns_init_blk(NvmeNamespace *ns, NvmeIdCtrl *id, Error **errp)
+int nvme_ns_init_blk(NvmeNamespace *ns, NvmeIdCtrl *id, Error **errp)
 {
     blkconf_blocksizes(&ns->conf);
 
@@ -73,7 +73,7 @@ static int nvme_ns_init_blk(NvmeNamespace *ns, NvmeIdCtrl *id, Error **errp)
     return 0;
 }
 
-static int nvme_ns_check_constraints(NvmeNamespace *ns, Error **errp)
+int nvme_ns_check_constraints(NvmeNamespace *ns, Error **errp)
 {
     NvmeNamespaceParams *params = &ns->params;
 

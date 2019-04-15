@@ -152,6 +152,7 @@ trace-events-subdirs += hw/arm
 trace-events-subdirs += hw/audio
 trace-events-subdirs += hw/block
 trace-events-subdirs += hw/block/dataplane
+trace-events-subdirs += hw/block/nvme
 trace-events-subdirs += hw/char
 trace-events-subdirs += hw/dma
 trace-events-subdirs += hw/hppa

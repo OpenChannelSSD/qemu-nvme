@@ -1582,8 +1582,18 @@ nvme
 M: Keith Busch <keith.busch@intel.com>
 L: qemu-block@nongnu.org
 S: Supported
-F: hw/block/nvme*
+F: hw/block/nvme/nvme.c
+F: include/block/nvme.h
+F: include/hw/block/nvme/nvme.h
 F: tests/nvme-test.c
+
+ocssd
+M: Klaus Birkelund <klaus@birkelund.eu>
+L: qemu-block@nongnu.org
+S: Supported
+F: include/block/ocssd.h
+F: hw/block/nvme/ocssd.*
+T: git https://github.com/birkelund/qemu.git ocssd
 
 megasas
 M: Hannes Reinecke <hare@suse.com>
@@ -2473,6 +2483,7 @@ M: Fam Zheng <fam@euphon.net>
 L: qemu-block@nongnu.org
 S: Supported
 F: block/nvme*
+F: include/block/nvme.h
 
 Bootdevice
 M: Gonglei <arei.gonglei@huawei.com>

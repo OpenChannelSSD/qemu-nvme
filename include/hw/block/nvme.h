@@ -1,10 +1,20 @@
 #ifndef HW_NVME_H
 #define HW_NVME_H
 
+#include "qemu/log.h"
 #include "block/nvme.h"
-#include "nvme-ns.h"
+#include "hw/block/nvme-ns.h"
+#include "hw/block/block.h"
+#include "hw/pci/pci.h"
 
 #define NVME_MAX_NAMESPACES 256
+
+#define NVME_GUEST_ERR(trace, fmt, ...) \
+    do { \
+        (trace_##trace)(__VA_ARGS__); \
+        qemu_log_mask(LOG_GUEST_ERROR, #trace \
+            " in %s: " fmt "\n", __func__, ## __VA_ARGS__); \
+    } while (0)
 
 #define DEFINE_NVME_PROPERTIES(_state, _props) \
     DEFINE_PROP_STRING("serial", _state, _props.serial), \
@@ -49,6 +59,7 @@ typedef struct NvmeRequest {
 
     uint64_t slba;
     uint16_t nlb;
+    hwaddr   mptr;
     uint16_t status;
     bool     is_cmb;
     bool     is_write;
@@ -141,7 +152,12 @@ typedef struct NvmeCtrl {
     NvmeIdCtrl      id_ctrl;
 
     NvmeBus bus;
+    uint16_t (*admin_cmd)(struct NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+    uint16_t (*io_cmd)(struct NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 } NvmeCtrl;
+
+typedef uint16_t (*NvmeBlockSetupFn)(NvmeCtrl *n, NvmeNamespace *ns,
+    QEMUSGList *qsg, uint64_t blk_offset, uint32_t unit_len, NvmeRequest *req);
 
 static inline bool nvme_rw_is_write(NvmeRequest *req)
 {
@@ -154,6 +170,59 @@ static inline bool nvme_is_error(uint16_t status, uint16_t err)
     return (status & 0xfff) == err;
 }
 
+static inline bool nvme_nsid_is_valid(NvmeCtrl *n, uint32_t nsid)
+{
+    if (unlikely(nsid == 0 || nsid > n->num_namespaces)) {
+        return false;
+    }
+
+    return true;
+}
+
 int nvme_register_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp);
+
+void nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size);
+void nvme_addr_write(NvmeCtrl *n, hwaddr addr, void *buf, int size);
+
+uint16_t nvme_dma_read(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
+    NvmeCmd *cmd, NvmeRequest *req);
+uint16_t nvme_dma_read_sgl(NvmeCtrl *n, uint8_t *ptr, uint32_t len,
+    NvmeSglDescriptor sgl, NvmeCmd *cmd, NvmeRequest *req);
+uint16_t nvme_dma_write(NvmeCtrl *n, uint8_t *ptr, uint32_t len, NvmeCmd *cmd,
+    NvmeRequest *req);
+
+void nvme_noop_cb(void *opaque, int ret);
+void nvme_rw_cb(void *opaque, int ret);
+uint16_t nvme_rw_check_req(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+
+void nvme_clear_events(NvmeCtrl *n, uint8_t event_type);
+void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type, uint8_t event_info,
+    uint8_t log_page);
+
+void nvme_enqueue_req_completion(NvmeCQueue *cq, NvmeRequest *req);
+
+NvmeBlockBackendRequest *nvme_blk_req_get(NvmeCtrl *n, NvmeRequest *req,
+    QEMUSGList *qsg);
+void nvme_blk_req_put(NvmeCtrl *n, NvmeBlockBackendRequest *blk_req);
+
+uint16_t nvme_blk_map(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req,
+    NvmeBlockSetupFn blk_setup);
+uint16_t nvme_blk_submit_io(NvmeCtrl *n, NvmeRequest *req,
+    BlockCompletionFunc *cb);
+
+uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+
+uint16_t nvme_get_log(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+uint16_t nvme_get_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+uint16_t nvme_set_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+
+int nvme_check_constraints(NvmeCtrl *n, Error **errp);
+int nvme_init_blk(NvmeCtrl *n, Error **errp);
+void nvme_init_state(NvmeCtrl *n);
+void nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev);
+void nvme_init_ctrl(NvmeCtrl *n);
+
+void nvme_free_ctrl(NvmeCtrl *n, PCIDevice *pci_dev);
 
 #endif /* HW_NVME_H */

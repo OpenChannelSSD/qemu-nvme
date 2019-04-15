@@ -446,8 +446,13 @@ typedef struct NvmeAerResult {
 } NvmeAerResult;
 
 typedef struct NvmeCqe {
-    uint32_t    result;
-    uint32_t    rsvd;
+    union {
+        struct {
+            uint32_t cdw0;
+            uint32_t rsvd;
+        };
+        uint64_t res64;
+    };
     uint16_t    sq_head;
     uint16_t    sq_id;
     uint16_t    cid;
@@ -505,6 +510,7 @@ enum NvmeStatusCodes {
     NVME_E2E_REF_ERROR          = 0x0284,
     NVME_CMP_FAILURE            = 0x0285,
     NVME_ACCESS_DENIED          = 0x0286,
+    NVME_DULB                   = 0x0287,
     NVME_MORE                   = 0x2000,
     NVME_DNR                    = 0x4000,
     NVME_NO_COMPLETE            = 0xffff,
@@ -700,6 +706,8 @@ typedef struct NvmeFeatureVal {
 
 #define NVME_INTC_THR(intc)     (intc & 0xff)
 #define NVME_INTC_TIME(intc)    ((intc >> 8) & 0xff)
+
+#define NVME_ERR_REC_DULBE(err_rec) (err_rec & 0x10000)
 
 enum NvmeFeatureIds {
     NVME_ARBITRATION                = 0x1,
