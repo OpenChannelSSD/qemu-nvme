@@ -1023,6 +1023,10 @@ static uint16_t lnvm_chunk_info(NvmeCtrl *n, NvmeCmd *cmd,
     log_len = lns->chks_total * sizeof(LnvmCS);
     trans_len = MIN(log_len, buf_len);
 
+    if (unlikely(log_len < off + buf_len)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
     log_page = (uint8_t *) lns->chunk_info + off;
 
     if (cmd->opcode == NVME_ADM_CMD_GET_LOG_PAGE) {
