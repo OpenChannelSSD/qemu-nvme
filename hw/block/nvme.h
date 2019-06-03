@@ -87,18 +87,25 @@ typedef struct NvmeCtrl {
     uint32_t    num_namespaces;
     uint32_t    max_q_ents;
     uint64_t    ns_size;
+    uint8_t     outstanding_aers;
     uint32_t    cmbsz;
     uint32_t    cmbloc;
     uint8_t     *cmbuf;
     uint64_t    irq_status;
     uint64_t    host_timestamp;                 /* Timestamp sent by the host */
     uint64_t    timestamp_set_qemu_clock_ms;    /* QEMU clock time */
+    QEMUTimer   *aer_timer;
+    uint8_t     aer_mask;
+    uint8_t     aer_mask_queued;
+    NvmeRequest **aer_reqs;
+    QSIMPLEQ_HEAD(, NvmeAsyncEvent) aer_queue;
 
     NvmeNamespace   *namespaces;
     NvmeSQueue      **sq;
     NvmeCQueue      **cq;
     NvmeSQueue      admin_sq;
     NvmeCQueue      admin_cq;
+    NvmeFeatureVal  features;
     NvmeIdCtrl      id_ctrl;
 } NvmeCtrl;
 
