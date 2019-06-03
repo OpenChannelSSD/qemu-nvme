@@ -41,6 +41,7 @@
 #include "trace.h"
 #include "nvme.h"
 
+#define NVME_OP_ABORTED 0xff
 #define NVME_GUEST_ERR(trace, fmt, ...) \
     do { \
         (trace_##trace)(__VA_ARGS__); \
@@ -851,6 +852,54 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         trace_nvme_err_invalid_setfeat(dw10);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_abort(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
+{
+    NvmeSQueue *sq;
+    NvmeRequest *new;
+    uint32_t index = 0;
+    uint16_t sqid = cmd->cdw10 & 0xffff;
+    uint16_t cid = (cmd->cdw10 >> 16) & 0xffff;
+
+    req->cqe.result = 1;
+    if (nvme_check_sqid(n, sqid)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    sq = n->sq[sqid];
+
+    /* only consider queued (and not executing) commands for abort */
+    while ((sq->head + index) % sq->size != sq->tail) {
+        NvmeCmd abort_cmd;
+        hwaddr addr;
+
+        addr = sq->dma_addr + ((sq->head + index) % sq->size) * n->sqe_size;
+
+        nvme_addr_read(n, addr, (void *) &abort_cmd, sizeof(abort_cmd));
+        if (abort_cmd.cid == cid) {
+            req->cqe.result = 0;
+            new = QTAILQ_FIRST(&sq->req_list);
+            QTAILQ_REMOVE(&sq->req_list, new, entry);
+            QTAILQ_INSERT_TAIL(&sq->out_req_list, new, entry);
+
+            memset(&new->cqe, 0, sizeof(new->cqe));
+            new->cqe.cid = cid;
+            new->status = NVME_CMD_ABORT_REQ;
+
+            abort_cmd.opcode = NVME_OP_ABORTED;
+            nvme_addr_write(n, addr, (void *) &abort_cmd, sizeof(abort_cmd));
+
+            nvme_enqueue_req_completion(n->cq[sq->cqid], new);
+
+            return NVME_SUCCESS;
+        }
+
+        ++index;
+    }
+
     return NVME_SUCCESS;
 }
 
@@ -871,6 +920,8 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return nvme_set_feature(n, cmd, req);
     case NVME_ADM_CMD_GET_FEATURES:
         return nvme_get_feature(n, cmd, req);
+    case NVME_ADM_CMD_ABORT:
+        return nvme_abort(n, cmd, req);
     default:
         trace_nvme_err_invalid_admin_opc(cmd->opcode);
         return NVME_INVALID_OPCODE | NVME_DNR;
@@ -892,6 +943,10 @@ static void nvme_process_sq(void *opaque)
         addr = sq->dma_addr + sq->head * n->sqe_size;
         nvme_addr_read(n, addr, (void *)&cmd, sizeof(cmd));
         nvme_inc_sq_head(sq);
+
+        if (cmd.opcode == NVME_OP_ABORTED) {
+            continue;
+        }
 
         req = QTAILQ_FIRST(&sq->req_list);
         QTAILQ_REMOVE(&sq->req_list, req, entry);
