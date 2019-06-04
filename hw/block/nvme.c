@@ -42,6 +42,8 @@
 #include "nvme.h"
 
 #define NVME_MAX_QS PCI_MSIX_FLAGS_QSIZE
+#define NVME_TEMPERATURE 0x143
+#define NVME_ELPE 3
 #define NVME_AERL 3
 #define NVME_OP_ABORTED 0xff
 #define NVME_GUEST_ERR(trace, fmt, ...) \
@@ -320,6 +322,36 @@ static void nvme_enqueue_req_completion(NvmeCQueue *cq, NvmeRequest *req)
     QTAILQ_REMOVE(&req->sq->out_req_list, req, entry);
     QTAILQ_INSERT_TAIL(&cq->req_list, req, entry);
     timer_mod(cq->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 500);
+}
+
+static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
+    uint8_t event_info, uint8_t log_page)
+{
+    NvmeAsyncEvent *event;
+
+    trace_nvme_enqueue_event(event_type, event_info, log_page);
+
+    /*
+     * Do not enqueue the event if something of this type is already queued.
+     * This bounds the size of the event queue and makes sure it does not grow
+     * indefinitely when events are not processed by the host (i.e. does not
+     * issue any AERs).
+     */
+    if (n->aer_mask_queued & (1 << event_type)) {
+        return;
+    }
+    n->aer_mask_queued |= (1 << event_type);
+
+    event = g_new(NvmeAsyncEvent, 1);
+    event->result = (NvmeAerResult) {
+        .event_type = event_type,
+        .event_info = event_info,
+        .log_page   = log_page,
+    };
+
+    QSIMPLEQ_INSERT_TAIL(&n->aer_queue, event, entry);
+
+    timer_mod(n->aer_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 500);
 }
 
 static void nvme_process_aers(void *opaque)
@@ -834,6 +866,10 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t result;
 
     switch (dw10) {
+    case NVME_TEMPERATURE_THRESHOLD:
+        result = cpu_to_le32(n->features.temp_thresh);
+        break;
+    case NVME_ERROR_RECOVERY:
     case NVME_VOLATILE_WRITE_CACHE:
         result = blk_enable_write_cache(n->conf.blk);
         trace_nvme_getfeat_vwcache(result ? "enabled" : "disabled");
@@ -881,6 +917,13 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t dw11 = le32_to_cpu(cmd->cdw11);
 
     switch (dw10) {
+    case NVME_TEMPERATURE_THRESHOLD:
+        n->features.temp_thresh = dw11;
+        if (n->features.temp_thresh <= n->temperature) {
+            nvme_enqueue_event(n, NVME_AER_TYPE_SMART,
+                NVME_AER_INFO_SMART_TEMP_THRESH, NVME_LOG_SMART_INFO);
+        }
+        break;
     case NVME_VOLATILE_WRITE_CACHE:
         blk_set_enable_write_cache(n->conf.blk, dw11 & 1);
         break;
@@ -903,6 +946,137 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     }
 
     return NVME_SUCCESS;
+}
+
+static void nvme_clear_events(NvmeCtrl *n, uint8_t event_type)
+{
+    n->aer_mask &= ~(1 << event_type);
+    if (!QSIMPLEQ_EMPTY(&n->aer_queue)) {
+        timer_mod(n->aer_timer,
+            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 500);
+    }
+}
+
+static uint16_t nvme_error_log_info(NvmeCtrl *n, NvmeCmd *cmd, uint8_t rae,
+    uint32_t buf_len, uint64_t off, NvmeRequest *req)
+{
+    uint32_t trans_len;
+    uint64_t prp1 = le64_to_cpu(cmd->prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->prp2);
+
+    if (off > sizeof(*n->elpes) * (NVME_ELPE + 1)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    trans_len = MIN(sizeof(*n->elpes) * (NVME_ELPE + 1) - off, buf_len);
+
+    if (!rae) {
+        nvme_clear_events(n, NVME_AER_TYPE_ERROR);
+    }
+
+    return nvme_dma_read_prp(n, (uint8_t *) n->elpes + off, trans_len, prp1,
+        prp2);
+}
+
+static uint16_t nvme_smart_info(NvmeCtrl *n, NvmeCmd *cmd, uint8_t rae,
+    uint32_t buf_len, uint64_t off, NvmeRequest *req)
+{
+    uint64_t prp1 = le64_to_cpu(cmd->prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->prp2);
+
+    uint32_t trans_len;
+    time_t current_ms;
+    NvmeSmartLog smart;
+
+    if (cmd->nsid != 0 && cmd->nsid != 0xffffffff) {
+        trace_nvme_err(req->cqe.cid, "smart log not supported for namespace",
+            NVME_INVALID_FIELD | NVME_DNR);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (off > sizeof(smart)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    trans_len = MIN(sizeof(smart) - off, buf_len);
+
+    memset(&smart, 0x0, sizeof(smart));
+    smart.number_of_error_log_entries[0] = cpu_to_le64(0);
+    smart.temperature[0] = n->temperature & 0xff;
+    smart.temperature[1] = (n->temperature >> 8) & 0xff;
+
+    if (n->features.temp_thresh <= n->temperature) {
+        smart.critical_warning |= NVME_SMART_TEMPERATURE;
+    }
+
+    current_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+    smart.power_on_hours[0] = cpu_to_le64(
+        (((current_ms - n->starttime_ms) / 1000) / 60) / 60);
+
+    if (!rae) {
+        nvme_clear_events(n, NVME_AER_TYPE_SMART);
+    }
+
+    return nvme_dma_read_prp(n, (uint8_t *) &smart + off, trans_len, prp1,
+        prp2);
+}
+
+static uint16_t nvme_fw_log_info(NvmeCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
+    uint64_t off, NvmeRequest *req)
+{
+    uint32_t trans_len;
+    uint64_t prp1 = le64_to_cpu(cmd->prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->prp2);
+    NvmeFwSlotInfoLog fw_log;
+
+    if (off > sizeof(fw_log)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    memset(&fw_log, 0, sizeof(NvmeFwSlotInfoLog));
+
+    trans_len = MIN(sizeof(fw_log) - off, buf_len);
+
+    return nvme_dma_read_prp(n, (uint8_t *) &fw_log + off, trans_len, prp1,
+        prp2);
+}
+
+static uint16_t nvme_get_log(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
+{
+    uint32_t dw10 = le32_to_cpu(cmd->cdw10);
+    uint32_t dw11 = le32_to_cpu(cmd->cdw11);
+    uint32_t dw12 = le32_to_cpu(cmd->cdw12);
+    uint32_t dw13 = le32_to_cpu(cmd->cdw13);
+    uint16_t lid = dw10 & 0xff;
+    uint8_t  rae = (dw10 >> 15) & 0x1;
+    uint32_t numdl, numdu, len;
+    uint64_t off, lpol, lpou;
+
+    numdl = (dw10 >> 16);
+    numdu = (dw11 & 0xffff);
+    lpol = dw12;
+    lpou = dw13;
+
+    len = (((numdu << 16) | numdl) + 1) << 2;
+    off = (lpou << 32ULL) | lpol;
+
+    if (off & 0x3) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    trace_nvme_get_log(req->cqe.cid, lid);
+
+    switch (lid) {
+    case NVME_LOG_ERROR_INFO:
+        return nvme_error_log_info(n, cmd, rae, len, off, req);
+    case NVME_LOG_SMART_INFO:
+        return nvme_smart_info(n, cmd, rae, len, off, req);
+    case NVME_LOG_FW_SLOT_INFO:
+        return nvme_fw_log_info(n, cmd, len, off, req);
+    default:
+        trace_nvme_err_invalid_log_page(req->cqe.cid, lid);
+        return NVME_INVALID_LOG_ID | NVME_DNR;
+    }
 }
 
 static uint16_t nvme_aer(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
@@ -985,6 +1159,8 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return nvme_set_feature(n, cmd, req);
     case NVME_ADM_CMD_GET_FEATURES:
         return nvme_get_feature(n, cmd, req);
+    case NVME_ADM_CMD_GET_LOG_PAGE:
+        return nvme_get_log(n, cmd, req);
     case NVME_ADM_CMD_ASYNC_EV_REQ:
         return nvme_aer(n, cmd, req);
     case NVME_ADM_CMD_ABORT:
@@ -1350,6 +1526,13 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
                            "completion queue doorbell write"
                            " for nonexistent queue,"
                            " sqid=%"PRIu32", ignoring", qid);
+
+            if (n->outstanding_aers) {
+                nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
+                    NVME_AER_INFO_ERR_INVALID_DB_REGISTER,
+                    NVME_LOG_ERROR_INFO);
+            }
+
             return;
         }
 
@@ -1360,6 +1543,12 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
                            " beyond queue size, sqid=%"PRIu32","
                            " new_head=%"PRIu16", ignoring",
                            qid, new_head);
+
+            if (n->outstanding_aers) {
+                nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
+                    NVME_AER_INFO_ERR_INVALID_DB_VALUE, NVME_LOG_ERROR_INFO);
+            }
+
             return;
         }
 
@@ -1388,6 +1577,13 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
                            "submission queue doorbell write"
                            " for nonexistent queue,"
                            " sqid=%"PRIu32", ignoring", qid);
+
+            if (n->outstanding_aers) {
+                nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
+                    NVME_AER_INFO_ERR_INVALID_DB_REGISTER,
+                    NVME_LOG_ERROR_INFO);
+            }
+
             return;
         }
 
@@ -1398,6 +1594,12 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
                            " beyond queue size, sqid=%"PRIu32","
                            " new_tail=%"PRIu16", ignoring",
                            qid, new_tail);
+
+            if (n->outstanding_aers) {
+                nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
+                    NVME_AER_INFO_ERR_INVALID_DB_VALUE, NVME_LOG_ERROR_INFO);
+            }
+
             return;
         }
 
@@ -1487,8 +1689,10 @@ static void nvme_init_state(NvmeCtrl *n)
 {
     n->num_namespaces = 1;
     n->reg_size = pow2ceil(0x1004 + 2 * (n->params.num_queues + 1) * 4);
+    n->starttime_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
     n->sq = g_new0(NvmeSQueue *, n->params.num_queues);
     n->cq = g_new0(NvmeCQueue *, n->params.num_queues);
+    n->elpes = g_new0(NvmeErrorLog, NVME_ELPE + 1);
     n->aer_reqs = g_new0(NvmeRequest *, NVME_AERL + 1);
 }
 
@@ -1561,6 +1765,7 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     id->aerl = NVME_AERL;
     id->frmw = 7 << 1 | 1;
     id->lpa = 1 << 2;
+    id->elpe = NVME_ELPE;
     id->npss = 0;
     id->sqes = (0x6 << 4) | 0x6;
     id->cqes = (0x4 << 4) | 0x4;
@@ -1581,6 +1786,8 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     id->psd[0].exlat = cpu_to_le32(0x4);
     if (blk_enable_write_cache(n->conf.blk)) {
         id->vwc = 1;
+    n->temperature = NVME_TEMPERATURE;
+    n->features.temp_thresh = 0x14d;
     }
 
     n->bar.cap = 0;
@@ -1687,6 +1894,7 @@ static void nvme_exit(PCIDevice *pci_dev)
     g_free(n->namespaces);
     g_free(n->cq);
     g_free(n->sq);
+    g_free(n->elpes);
     g_free(n->aer_reqs);
 
     if (n->params.cmb_size_mb) {
