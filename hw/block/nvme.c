@@ -9,20 +9,22 @@
  */
 
 /**
- * Reference Specs: http://www.nvmexpress.org, 1.2, 1.1, 1.0e
+ * Reference Specs: http://www.nvmexpress.org, 1.3d, 1.2, 1.1, 1.0e
  *
  *  http://www.nvmexpress.org/resources/
  */
 
 /**
  * Usage: add options:
- *      -drive file=<file>,if=none,id=<drive_id>
- *      -device nvme,drive=<drive_id>,serial=<serial>,id=<id[optional]>, \
- *              cmb_size_mb=<cmb_size_mb[optional]>, \
- *              num_queues=<N[optional]>
+ *     -drive file=<file>,if=none,id=<drive_id>
+ *     -device nvme,drive=<drive_id>,serial=<serial>,id=<id[optional]>
  *
- * Note cmb_size_mb denotes size of CMB in MB. CMB is assumed to be at
- * offset 0 in BAR2 and supports only WDS, RDS and SQS for now.
+ * Advanced optional options:
+ *
+ *   num_queues=<uint32>      : Maximum number of IO Queues.
+ *                              Default: 64
+ *   cmb_size_mb=<uint32>     : Size of Controller Memory Buffer in MBs.
+ *                              Default: 0 (disabled)
  */
 
 #include "qemu/osdep.h"
@@ -46,6 +48,7 @@
 #define NVME_ELPE 3
 #define NVME_AERL 3
 #define NVME_OP_ABORTED 0xff
+
 #define NVME_GUEST_ERR(trace, fmt, ...) \
     do { \
         (trace_##trace)(__VA_ARGS__); \
@@ -319,6 +322,8 @@ static void nvme_post_cqes(void *opaque)
 static void nvme_enqueue_req_completion(NvmeCQueue *cq, NvmeRequest *req)
 {
     assert(cq->cqid == req->sq->cqid);
+
+    trace_nvme_enqueue_req_completion(req->cqe.cid, cq->cqid);
     QTAILQ_REMOVE(&req->sq->out_req_list, req, entry);
     QTAILQ_INSERT_TAIL(&cq->req_list, req, entry);
     timer_mod(cq->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 500);
@@ -537,6 +542,7 @@ static void nvme_free_sq(NvmeSQueue *sq, NvmeCtrl *n)
     if (sq->sqid) {
         g_free(sq);
     }
+    n->qs_created--;
 }
 
 static uint16_t nvme_del_sq(NvmeCtrl *n, NvmeCmd *cmd)
@@ -603,6 +609,7 @@ static void nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
     cq = n->cq[cqid];
     QTAILQ_INSERT_TAIL(&(cq->sq_list), sq, entry);
     n->sq[sqid] = sq;
+    n->qs_created++;
 }
 
 static uint16_t nvme_create_sq(NvmeCtrl *n, NvmeCmd *cmd)
@@ -652,6 +659,7 @@ static void nvme_free_cq(NvmeCQueue *cq, NvmeCtrl *n)
     if (cq->cqid) {
         g_free(cq);
     }
+    n->qs_created--;
 }
 
 static uint16_t nvme_del_cq(NvmeCtrl *n, NvmeCmd *cmd)
@@ -692,6 +700,7 @@ static void nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
     msix_vector_use(&n->parent_obj, cq->vector);
     n->cq[cqid] = cq;
     cq->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvme_post_cqes, cq);
+    n->qs_created++;
 }
 
 static uint16_t nvme_create_cq(NvmeCtrl *n, NvmeCmd *cmd)
@@ -765,7 +774,7 @@ static uint16_t nvme_identify_ns(NvmeCtrl *n, NvmeIdentify *c)
         prp1, prp2);
 }
 
-static uint16_t nvme_identify_nslist(NvmeCtrl *n, NvmeIdentify *c)
+static uint16_t nvme_identify_ns_list(NvmeCtrl *n, NvmeIdentify *c)
 {
     static const int data_len = 4 * KiB;
     uint32_t min_nsid = le32_to_cpu(c->nsid);
@@ -775,7 +784,7 @@ static uint16_t nvme_identify_nslist(NvmeCtrl *n, NvmeIdentify *c)
     uint16_t ret;
     int i, j = 0;
 
-    trace_nvme_identify_nslist(min_nsid);
+    trace_nvme_identify_ns_list(min_nsid);
 
     list = g_malloc0(data_len);
     for (i = 0; i < n->num_namespaces; i++) {
@@ -792,6 +801,47 @@ static uint16_t nvme_identify_nslist(NvmeCtrl *n, NvmeIdentify *c)
     return ret;
 }
 
+static uint16_t nvme_identify_ns_descriptor_list(NvmeCtrl *n, NvmeCmd *c)
+{
+    static const int data_len = 4 * KiB;
+
+    /*
+     * The device model does not have anywhere to store a persistent UUID, so
+     * conjure up something that is reproducible. We generate an UUID of the
+     * form "00000000-0000-0000-0000-<nsid>", where nsid is similar to, say,
+     * 000000000001.
+     */
+    struct ns_descr {
+        uint8_t nidt;
+        uint8_t nidl;
+        uint8_t rsvd[14];
+        uint32_t nid;
+    };
+
+    uint32_t nsid = le32_to_cpu(c->nsid);
+    uint64_t prp1 = le64_to_cpu(c->prp1);
+    uint64_t prp2 = le64_to_cpu(c->prp2);
+
+    struct ns_descr *list;
+    uint16_t ret;
+
+    trace_nvme_identify_ns_descriptor_list(nsid);
+
+    if (unlikely(nsid == 0 || nsid > n->num_namespaces)) {
+        trace_nvme_err_invalid_ns(nsid, n->num_namespaces);
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
+
+    list = g_malloc0(data_len);
+    list->nidt = 0x3;
+    list->nidl = 0x10;
+    list->nid = cpu_to_be32(nsid);
+
+    ret = nvme_dma_read_prp(n, (uint8_t *) list, data_len, prp1, prp2);
+    g_free(list);
+    return ret;
+}
+
 static uint16_t nvme_identify(NvmeCtrl *n, NvmeCmd *cmd)
 {
     NvmeIdentify *c = (NvmeIdentify *)cmd;
@@ -802,7 +852,9 @@ static uint16_t nvme_identify(NvmeCtrl *n, NvmeCmd *cmd)
     case 0x01:
         return nvme_identify_ctrl(n, c);
     case 0x02:
-        return nvme_identify_nslist(n, c);
+        return nvme_identify_ns_list(n, c);
+    case 0x03:
+        return nvme_identify_ns_descriptor_list(n, cmd);
     default:
         trace_nvme_err_invalid_identify_cns(le32_to_cpu(c->cns));
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -954,6 +1006,14 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         blk_set_enable_write_cache(n->conf.blk, dw11 & 1);
         break;
     case NVME_NUMBER_OF_QUEUES:
+        if (n->qs_created > 2) {
+            return NVME_CMD_SEQ_ERROR | NVME_DNR;
+        }
+
+        if ((dw11 & 0xffff) == 0xffff || ((dw11 >> 16) & 0xffff) == 0xffff) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+
         trace_nvme_setfeat_numq((dw11 & 0xFFFF) + 1,
                                 ((dw11 >> 16) & 0xFFFF) + 1,
                                 n->params.num_queues - 1,
@@ -1794,7 +1854,7 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     id->ieee[1] = 0x02;
     id->ieee[2] = 0xb3;
     id->cmic = 0;
-    id->ver = cpu_to_le32(0x00010201);
+    id->ver = cpu_to_le32(0x00010300);
     id->oacs = cpu_to_le16(0);
     id->acl = 3;
     id->aerl = NVME_AERL;
@@ -1840,7 +1900,7 @@ static void nvme_init_ctrl(NvmeCtrl *n)
     NVME_CAP_SET_CSS(n->bar.cap, 1);
     NVME_CAP_SET_MPSMAX(n->bar.cap, 4);
 
-    n->bar.vs = 0x00010201;
+    n->bar.vs = 0x00010300;
     n->bar.intmc = n->bar.intms = 0;
 }
 
