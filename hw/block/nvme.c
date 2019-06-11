@@ -1368,6 +1368,7 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
     id->ieee[0] = 0x00;
     id->ieee[1] = 0x02;
     id->ieee[2] = 0xb3;
+    id->ver = cpu_to_le32(0x00010201);
     id->oacs = cpu_to_le16(0);
     id->frmw = 7 << 1;
     id->lpa = 1 << 0;
@@ -1375,6 +1376,11 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
     id->cqes = (0x4 << 4) | 0x4;
     id->nn = cpu_to_le32(n->num_namespaces);
     id->oncs = cpu_to_le16(NVME_ONCS_WRITE_ZEROS | NVME_ONCS_TIMESTAMP);
+
+    strcpy((char *) id->subnqn, "nqn.2014-08.org.nvmexpress:uuid:");
+    qemu_uuid_unparse(&qemu_uuid,
+        (char *) id->subnqn + strlen((char *) id->subnqn));
+
     id->psd[0].mp = cpu_to_le16(0x9c4);
     id->psd[0].enlat = cpu_to_le32(0x10);
     id->psd[0].exlat = cpu_to_le32(0x4);
@@ -1389,7 +1395,7 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
     NVME_CAP_SET_CSS(n->bar.cap, 1);
     NVME_CAP_SET_MPSMAX(n->bar.cap, 4);
 
-    n->bar.vs = 0x00010200;
+    n->bar.vs = 0x00010201;
     n->bar.intmc = n->bar.intms = 0;
 
     if (n->params.cmb_size_mb) {
