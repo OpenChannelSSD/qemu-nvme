@@ -2,6 +2,9 @@
 #define HW_NVME_H
 
 #include "block/nvme.h"
+#include "nvme-ns.h"
+
+#define NVME_MAX_NAMESPACES 256
 
 #define DEFINE_NVME_PROPERTIES(_state, _props) \
     DEFINE_PROP_STRING("serial", _state, _props.serial), \
@@ -86,10 +89,12 @@ typedef struct NvmeCQueue {
     QTAILQ_HEAD(, NvmeRequest) req_list;
 } NvmeCQueue;
 
-typedef struct NvmeNamespace {
-    NvmeIdNs        id_ns;
-    uint32_t        id;
-} NvmeNamespace;
+#define TYPE_NVME_BUS "nvme-bus"
+#define NVME_BUS(obj) OBJECT_CHECK(NvmeBus, (obj), TYPE_NVME_BUS)
+
+typedef struct NvmeBus {
+    BusState parent_bus;
+} NvmeBus;
 
 #define TYPE_NVME "nvme"
 #define NVME(obj) \
@@ -100,7 +105,6 @@ typedef struct NvmeCtrl {
     MemoryRegion iomem;
     MemoryRegion ctrl_mem;
     NvmeBar      bar;
-    BlockConf    conf;
     NvmeParams   params;
 
     uint64_t    starttime_ms;
@@ -113,7 +117,6 @@ typedef struct NvmeCtrl {
     uint32_t    reg_size;
     uint32_t    num_namespaces;
     uint32_t    max_q_ents;
-    uint64_t    ns_size;
     uint8_t     outstanding_aers;
     uint32_t    cmbsz;
     uint32_t    cmbloc;
@@ -129,13 +132,15 @@ typedef struct NvmeCtrl {
     QSIMPLEQ_HEAD(, NvmeAsyncEvent) aer_queue;
 
     NvmeErrorLog    *elpes;
-    NvmeNamespace   *namespaces;
+    NvmeNamespace   *namespaces[NVME_MAX_NAMESPACES];
     NvmeSQueue      **sq;
     NvmeCQueue      **cq;
     NvmeSQueue      admin_sq;
     NvmeCQueue      admin_cq;
     NvmeFeatureVal  features;
     NvmeIdCtrl      id_ctrl;
+
+    NvmeBus bus;
 } NvmeCtrl;
 
 static inline bool nvme_rw_is_write(NvmeRequest *req)
@@ -149,15 +154,6 @@ static inline bool nvme_is_error(uint16_t status, uint16_t err)
     return (status & 0xfff) == err;
 }
 
-static inline uint8_t nvme_ns_lbads(NvmeNamespace *ns)
-{
-    NvmeIdNs *id = &ns->id_ns;
-    return id->lbaf[NVME_ID_NS_FLBAS_INDEX(id->flbas)].ds;
-}
-
-static inline size_t nvme_ns_lbads_bytes(NvmeNamespace *ns)
-{
-    return 1 << nvme_ns_lbads(ns);
-}
+int nvme_register_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp);
 
 #endif /* HW_NVME_H */
