@@ -54,7 +54,7 @@ To get a complete list of all options supported by the NVMe device, issue
 qemu-system-x86_64 -device nvme,help
 ```
 
-or look into [the source](hw/block/nvme.c#L31).
+or look into [the source](hw/block/nvme/nvme.c#L31).
 
 There are two QEMU device parameters that change the behavior of the device.
 The first, `learly_reset` is enabled by default and allows `OPEN` chunks to be
